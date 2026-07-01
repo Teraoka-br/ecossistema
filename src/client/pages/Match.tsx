@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 
 // ---------------------------------------------------------------------------
 // Tipos
@@ -59,6 +60,7 @@ interface DeviceResult {
 }
 
 interface LineResult {
+  id: number;
   id_pedido: string;
   imei: string | null;
   os: string | null;
@@ -233,6 +235,16 @@ export function Match() {
     "devices",
   );
 
+  // Separação
+  const [selectedFullDeviceIds, setSelectedFullDeviceIds] = useState<Set<number>>(new Set());
+  const [selectedPartialResultIds, setSelectedPartialResultIds] = useState<Set<number>>(new Set());
+  const [showSepForm, setShowSepForm] = useState(false);
+  const [sepCreatedBy, setSepCreatedBy] = useState("");
+  const [sepNotes, setSepNotes] = useState("");
+  const [sepError, setSepError] = useState<string | null>(null);
+  const [sepLoading, setSepLoading] = useState(false);
+  const [sepResult, setSepResult] = useState<{ batchNumber: string; batchId: number } | null>(null);
+
   // Abas de conteúdo
   const [devices, setDevices] = useState<DeviceResult[]>([]);
   const [devicesTotal, setDevicesTotal] = useState(0);
@@ -333,6 +345,61 @@ export function Match() {
       m.set(deviceId, data.lines);
       return m;
     });
+  }
+
+  async function handleCreateSeparation() {
+    if (!latestRun || !sepCreatedBy.trim()) return;
+    setSepLoading(true);
+    setSepError(null);
+    try {
+      const idempotencyKey = `sep-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const body = {
+        createdBy: sepCreatedBy.trim(),
+        notes: sepNotes.trim() || null,
+        fullDeviceResultIds: [...selectedFullDeviceIds],
+        partialMatchResultIds: [...selectedPartialResultIds],
+        idempotencyKey,
+        matchRunId: latestRun.id,
+      };
+      const r = await apiFetch<{ batch: { id: number; batch_number: string } }>(
+        "/api/separation-batches",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      setSepResult({ batchNumber: r.batch.batch_number, batchId: r.batch.id });
+      setSelectedFullDeviceIds(new Set());
+      setSelectedPartialResultIds(new Set());
+      setShowSepForm(false);
+      // Recarregar estado para refletir que o run ficou stale
+      await loadState();
+    } catch (e) {
+      setSepError((e as Error).message);
+    } finally {
+      setSepLoading(false);
+    }
+  }
+
+  function toggleFullDevice(deviceId: number) {
+    setSelectedFullDeviceIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(deviceId)) next.delete(deviceId);
+      else next.add(deviceId);
+      return next;
+    });
+    setSepResult(null);
+  }
+
+  function togglePartialResult(resultId: number) {
+    setSelectedPartialResultIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(resultId)) next.delete(resultId);
+      else next.add(resultId);
+      return next;
+    });
+    setSepResult(null);
   }
 
   async function handleRun() {
@@ -565,6 +632,69 @@ export function Match() {
             <Card label="Saldo utilizável restante" value={latestRun.remaining_usable_units} />
           </div>
 
+          {/* Separação — resultado criado */}
+          {sepResult && (
+            <div style={{ background: "#dcfce7", border: "1px solid #16a34a", borderRadius: 6, padding: "10px 14px", marginBottom: 16 }}>
+              ✅ Lote de separação <strong>{sepResult.batchNumber}</strong> criado.{" "}
+              <Link to="/separacao" style={{ color: "#15803d" }}>Ir para SEPARAÇÃO →</Link>
+              <span style={{ fontSize: 12, color: "#15803d", marginLeft: 8 }}>
+                (Este run ficou desatualizado após a criação de reservas)
+              </span>
+            </div>
+          )}
+
+          {/* Painel GERAR SEPARAÇÃO */}
+          {!stale && (selectedFullDeviceIds.size > 0 || selectedPartialResultIds.size > 0) && (
+            <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 14, marginBottom: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <strong>Selecionados para separação:</strong>{" "}
+                  {selectedFullDeviceIds.size > 0 && (
+                    <span style={{ marginRight: 12 }}>{selectedFullDeviceIds.size} kit(s) completo(s)</span>
+                  )}
+                  {selectedPartialResultIds.size > 0 && (
+                    <span>{selectedPartialResultIds.size} linha(s) parcial(is)</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => { setSelectedFullDeviceIds(new Set()); setSelectedPartialResultIds(new Set()); }} className="secondary" style={{ fontSize: 12 }}>
+                    Limpar seleção
+                  </button>
+                  <button onClick={() => setShowSepForm(!showSepForm)} style={{ fontWeight: 700 }}>
+                    GERAR SEPARAÇÃO
+                  </button>
+                </div>
+              </div>
+              {showSepForm && (
+                <div style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                  <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+                    <div>
+                      <label style={{ fontSize: 12, color: "var(--muted)" }}>Responsável *</label>
+                      <input value={sepCreatedBy} onChange={(e) => setSepCreatedBy(e.target.value)} placeholder="Nome do operador" style={{ display: "block", marginTop: 4, padding: "6px 10px" }} />
+                    </div>
+                    <div style={{ flex: 2 }}>
+                      <label style={{ fontSize: 12, color: "var(--muted)" }}>Observação (opcional)</label>
+                      <input value={sepNotes} onChange={(e) => setSepNotes(e.target.value)} style={{ display: "block", width: "100%", marginTop: 4, padding: "6px 10px" }} />
+                    </div>
+                  </div>
+                  {sepError && (
+                    <div style={{ background: "#fee2e2", color: "#dc2626", borderRadius: 4, padding: "6px 10px", marginBottom: 8, fontSize: 12 }}>{sepError}</div>
+                  )}
+                  <button onClick={handleCreateSeparation} disabled={!sepCreatedBy.trim() || sepLoading} style={{ fontWeight: 700 }}>
+                    {sepLoading ? "Criando…" : "Confirmar e criar lote"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Aviso stale */}
+          {stale && (
+            <div style={{ background: "#fef3c7", border: "1px solid #f59e0b", borderRadius: 6, padding: "8px 14px", marginBottom: 16, fontSize: 12, color: "#92400e" }}>
+              ⚠️ Este resultado está desatualizado (o estoque ou as reservas mudaram). Execute um novo match para gerar separações.
+            </div>
+          )}
+
           {/* Aviso de warnings */}
           {latestRun.warnings_count > 0 && (
             <div
@@ -623,6 +753,9 @@ export function Match() {
               kitFilter={deviceKitFilter}
               expandedDevice={expandedDevice}
               deviceLines={deviceLines}
+              selectedFullDeviceIds={selectedFullDeviceIds}
+              selectedPartialResultIds={selectedPartialResultIds}
+              stale={stale}
               onSearch={(s) => {
                 setDeviceSearch(s);
                 void loadDevices(latestRun.id, 0, s, deviceKitFilter);
@@ -640,6 +773,8 @@ export function Match() {
                   void loadDeviceLines(latestRun.id, id);
                 }
               }}
+              onToggleFullDevice={toggleFullDevice}
+              onTogglePartialResult={togglePartialResult}
             />
           )}
 
@@ -716,10 +851,15 @@ function DevicesTab({
   kitFilter,
   expandedDevice,
   deviceLines,
+  selectedFullDeviceIds,
+  selectedPartialResultIds,
+  stale,
   onSearch,
   onKitFilter,
   onPage,
   onExpand,
+  onToggleFullDevice,
+  onTogglePartialResult,
 }: {
   runId: number;
   devices: DeviceResult[];
@@ -730,10 +870,15 @@ function DevicesTab({
   kitFilter: string;
   expandedDevice: number | null;
   deviceLines: Map<number, LineResult[]>;
+  selectedFullDeviceIds: Set<number>;
+  selectedPartialResultIds: Set<number>;
+  stale: boolean;
   onSearch: (s: string) => void;
   onKitFilter: (k: string) => void;
   onPage: (o: number) => Promise<void>;
   onExpand: (id: number) => void;
+  onToggleFullDevice: (deviceId: number) => void;
+  onTogglePartialResult: (resultId: number) => void;
 }) {
   return (
     <div>
@@ -778,6 +923,7 @@ function DevicesTab({
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
         <thead>
           <tr style={{ borderBottom: "2px solid var(--border)", textAlign: "left" }}>
+            {!stale && <th style={{ padding: "6px 4px" }} title="Selecionar para separação">Sep.</th>}
             <th style={{ padding: "6px 8px" }}>Rank</th>
             <th style={{ padding: "6px 8px" }}>IMEI</th>
             <th style={{ padding: "6px 8px" }}>OS</th>
@@ -792,6 +938,9 @@ function DevicesTab({
             const osValues: string[] = JSON.parse(d.os_values_json || "[]");
             const warningCodes: string[] = JSON.parse(d.warning_codes_json || "[]");
             const expanded = expandedDevice === d.id;
+            const isFullKit = d.allocation_phase === "FULL" && d.kit_status === "KIT POSSIVEL";
+            const isSelected = selectedFullDeviceIds.has(d.id);
+            const isReservedOrSep = d.kit_status === "EM SEPARACAO";
             return (
               <>
                 <tr
@@ -799,10 +948,23 @@ function DevicesTab({
                   style={{
                     borderBottom: "1px solid var(--border)",
                     cursor: "pointer",
-                    background: expanded ? "var(--surface)" : undefined,
+                    background: expanded ? "var(--surface)" : isSelected ? "#dcfce7" : undefined,
+                    opacity: isReservedOrSep ? 0.5 : 1,
                   }}
                   onClick={() => onExpand(d.id)}
                 >
+                  {!stale && (
+                    <td style={{ padding: "5px 4px" }} onClick={(e) => e.stopPropagation()}>
+                      {isFullKit && !isReservedOrSep && (
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => onToggleFullDevice(d.id)}
+                          title="Selecionar kit completo para separação"
+                        />
+                      )}
+                    </td>
+                  )}
                   <td style={{ padding: "5px 8px" }}>{d.priority_rank ?? "—"}</td>
                   <td style={{ padding: "5px 8px" }}>
                     {d.imei ?? <span style={{ color: "var(--muted)" }}>(sem IMEI)</span>}
@@ -843,8 +1005,14 @@ function DevicesTab({
                 </tr>
                 {expanded && (
                   <tr key={`${d.id}-lines`}>
-                    <td colSpan={7} style={{ padding: "4px 16px 12px", background: "var(--surface)" }}>
-                      <DeviceLinesTable lines={deviceLines.get(d.id)} deviceId={d.id} />
+                    <td colSpan={stale ? 7 : 8} style={{ padding: "4px 16px 12px", background: "var(--surface)" }}>
+                      <DeviceLinesTable
+                        lines={deviceLines.get(d.id)}
+                        deviceId={d.id}
+                        selectedPartialResultIds={selectedPartialResultIds}
+                        stale={stale}
+                        onTogglePartialResult={onTogglePartialResult}
+                      />
                     </td>
                   </tr>
                 )}
@@ -861,9 +1029,15 @@ function DevicesTab({
 
 function DeviceLinesTable({
   lines,
+  selectedPartialResultIds,
+  stale,
+  onTogglePartialResult,
 }: {
   lines: LineResult[] | undefined;
   deviceId: number;
+  selectedPartialResultIds: Set<number>;
+  stale: boolean;
+  onTogglePartialResult: (id: number) => void;
 }) {
   if (!lines) return <div style={{ fontSize: 12, color: "var(--muted)" }}>Carregando…</div>;
   if (lines.length === 0)
@@ -873,6 +1047,7 @@ function DeviceLinesTable({
     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
       <thead>
         <tr style={{ borderBottom: "1px solid var(--border)" }}>
+          {!stale && <th style={{ padding: "4px 4px" }} title="Selecionar para separação (parcial)">Sep.</th>}
           <th style={{ padding: "4px 6px", textAlign: "left" }}>ID_PEDIDO</th>
           <th style={{ padding: "4px 6px", textAlign: "left" }}>CHAVEPECA</th>
           <th style={{ padding: "4px 6px", textAlign: "left" }}>Descrição</th>
@@ -885,42 +1060,58 @@ function DeviceLinesTable({
         </tr>
       </thead>
       <tbody>
-        {lines.map((l) => (
-          <tr key={l.id_pedido} style={{ borderBottom: "1px solid var(--border)44" }}>
-            <td style={{ padding: "3px 6px" }}>{l.id_pedido}</td>
-            <td style={{ padding: "3px 6px" }}>{l.chave_peca ?? "—"}</td>
-            <td style={{ padding: "3px 6px", color: "var(--muted)", fontSize: 10 }}>
-              {l.concat_peca ?? "—"}
-            </td>
-            <td style={{ padding: "3px 6px", color: "var(--muted)" }}>
-              {l.allocated_reference ?? "—"}
-            </td>
-            <td style={{ padding: "3px 6px" }}>
-              {l.result_status_label ? (
-                <Badge
-                  text={l.result_status_label}
-                  color={resultStatusColor(l.result_status)}
-                />
-              ) : (
-                "—"
+        {lines.map((l) => {
+          const isPartialMatch = l.allocation_phase === "PARTIAL" && l.result_status === "MATCH PARCIAL";
+          const isSelected = selectedPartialResultIds.has(l.id);
+          return (
+            <tr key={l.id_pedido} style={{ borderBottom: "1px solid var(--border)44", background: isSelected ? "#fef9c3" : undefined }}>
+              {!stale && (
+                <td style={{ padding: "3px 4px" }}>
+                  {isPartialMatch && (
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => onTogglePartialResult(l.id)}
+                      title="Selecionar linha parcial para separação"
+                    />
+                  )}
+                </td>
               )}
-            </td>
-            <td style={{ padding: "3px 6px", color: "var(--muted)", fontSize: 10 }}>
-              {l.allocation_phase ?? "—"}
-            </td>
-            <td style={{ padding: "3px 6px" }}>{l.ordem_consumo ?? "—"}</td>
-            <td style={{ padding: "3px 6px" }}>{l.stock_for_key_initial}</td>
-            <td style={{ padding: "3px 6px", color: "var(--muted)", fontSize: 10 }}>
-              {l.reason_code ?? ""}
-              {JSON.parse(l.warning_codes_json || "[]")
-                .map((w: string) => (
-                  <span key={w} style={{ marginLeft: 4, color: "#d97706" }} title={w}>
-                    ⚠
-                  </span>
-                ))}
-            </td>
-          </tr>
-        ))}
+              <td style={{ padding: "3px 6px" }}>{l.id_pedido}</td>
+              <td style={{ padding: "3px 6px" }}>{l.chave_peca ?? "—"}</td>
+              <td style={{ padding: "3px 6px", color: "var(--muted)", fontSize: 10 }}>
+                {l.concat_peca ?? "—"}
+              </td>
+              <td style={{ padding: "3px 6px", color: "var(--muted)" }}>
+                {l.allocated_reference ?? "—"}
+              </td>
+              <td style={{ padding: "3px 6px" }}>
+                {l.result_status_label ? (
+                  <Badge
+                    text={l.result_status_label}
+                    color={resultStatusColor(l.result_status)}
+                  />
+                ) : (
+                  "—"
+                )}
+              </td>
+              <td style={{ padding: "3px 6px", color: "var(--muted)", fontSize: 10 }}>
+                {l.allocation_phase ?? "—"}
+              </td>
+              <td style={{ padding: "3px 6px" }}>{l.ordem_consumo ?? "—"}</td>
+              <td style={{ padding: "3px 6px" }}>{l.stock_for_key_initial}</td>
+              <td style={{ padding: "3px 6px", color: "var(--muted)", fontSize: 10 }}>
+                {l.reason_code ?? ""}
+                {JSON.parse(l.warning_codes_json || "[]")
+                  .map((w: string) => (
+                    <span key={w} style={{ marginLeft: 4, color: "#d97706" }} title={w}>
+                      ⚠
+                    </span>
+                  ))}
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

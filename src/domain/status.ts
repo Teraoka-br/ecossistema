@@ -14,6 +14,8 @@ export const ORDER_STATUS_LABELS: Record<string, string> = {
   CONCLUIDO: "CONCLUÍDO",
   SEPARADO: "SEPARADO",
   CANCELADO: "CANCELADO",
+  /** Estado temporário: existe reserva ativa em separation_items. */
+  "EM SEPARACAO": "EM SEPARAÇÃO",
 };
 
 /**

@@ -139,6 +139,7 @@ export function loadDemandLines(db: Db, importBatchId: number): SourceOrderPartR
 
 /**
  * Carrega o evento operacional mais recente por id_pedido (entity_type = ORDER_PART).
+ * Inclui reservas ativas (EM SEPARACAO) com precedência sobre eventos.
  * Retorna Map<idPedido, new_status>.
  */
 export function loadOperationalEventsForOrders(db: Db): Map<string, string> {
@@ -157,6 +158,26 @@ export function loadOperationalEventsForOrders(db: Db): Map<string, string> {
       map.set(r.entity_id, r.new_status);
     }
   }
+
+  // Reservas ativas sobrepõem o status efetivo (precedência máxima para demanda não-permanente)
+  try {
+    const reserved = db
+      .prepare(
+        `SELECT DISTINCT id_pedido FROM separation_items WHERE status = 'RESERVED'`,
+      )
+      .all() as { id_pedido: string }[];
+    for (const r of reserved) {
+      // Só sobrepõe se não for status permanente (CONCLUIDO, SEPARADO, CANCELADO)
+      const existing = map.get(r.id_pedido);
+      const permanent = new Set(["CONCLUIDO", "SEPARADO", "CANCELADO"]);
+      if (!existing || !permanent.has(existing)) {
+        map.set(r.id_pedido, "EM SEPARACAO");
+      }
+    }
+  } catch {
+    // tabela separation_items ainda não existe
+  }
+
   return map;
 }
 

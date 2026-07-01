@@ -231,11 +231,13 @@ export function runMatchEngine(input: EngineInput): EngineOutput {
 
   for (const g of stockGroups) {
     stockTotalUnits += g.currentQuantity;
-    if (!g.mapeada || !g.chavePecaNorm || !g.referenciaNorm || g.currentQuantity <= 0) {
+    // O motor usa availableQuantity (físico − reservado); se não disponível, usa currentQuantity.
+    const available = (g as { availableQuantity?: number }).availableQuantity ?? g.currentQuantity;
+    if (!g.mapeada || !g.chavePecaNorm || !g.referenciaNorm || available <= 0) {
       stockUnmappedUnits += g.currentQuantity;
       continue;
     }
-    stockUsableUnits += g.currentQuantity;
+    stockUsableUnits += available;
     const k = g.chavePecaNorm;
     let pool = pools.get(k);
     if (!pool) {
@@ -253,13 +255,13 @@ export function runMatchEngine(input: EngineInput): EngineOutput {
     pool.refs.push({
       referenciaNorm: g.referenciaNorm,
       referencia: g.referencia,
-      available: g.currentQuantity,
-      initialAvailable: g.currentQuantity,
+      available,
+      initialAvailable: available,
       allocatedFull: 0,
       allocatedPartial: 0,
     });
-    pool.initialTotal += g.currentQuantity;
-    pool.currentAvailable += g.currentQuantity;
+    pool.initialTotal += available;
+    pool.currentAvailable += available;
   }
 
   // Ordenar referências por referenciaNorm ASC dentro de cada pool.
@@ -271,11 +273,13 @@ export function runMatchEngine(input: EngineInput): EngineOutput {
   const processedLines: ProcessedLine[] = demandLines.map((line) => {
     const eventStatus = operationalEvents.get(line.id_pedido);
     const effectiveStatus = eventStatus ?? line.status_atual_legado ?? "";
+    // EM SEPARACAO é tratado como "permanente para fins do motor" — não compete por estoque.
+    const isEmSeparacao = effectiveStatus === "EM SEPARACAO";
     const scoreOut = computeScore({ idade: line.idade, custo: line.custo, venda: line.venda }, rule);
     return {
       ...line,
       effectiveStatus,
-      isPermanent: isPermanentStatus(effectiveStatus),
+      isPermanent: isPermanentStatus(effectiveStatus) || isEmSeparacao,
       computedMargin: scoreOut.margem,
       computedNotaIdade: scoreOut.notaIdade,
       computedNotaMargem: scoreOut.notaMargem,
@@ -424,8 +428,14 @@ export function runMatchEngine(input: EngineInput): EngineOutput {
     for (const l of d.permanentLines) {
       const r = lineResults.get(l.id)!;
       r.phase = "PRESERVED";
-      r.resultStatus = l.effectiveStatus;
-      r.resultStatusLabel = orderStatusLabel(l.effectiveStatus) ?? l.effectiveStatus;
+      if (l.effectiveStatus === "EM SEPARACAO") {
+        r.resultStatus = "EM SEPARACAO";
+        r.resultStatusLabel = "EM SEPARAÇÃO";
+        r.reasonCode = "ACTIVE_SEPARATION";
+      } else {
+        r.resultStatus = l.effectiveStatus;
+        r.resultStatusLabel = orderStatusLabel(l.effectiveStatus) ?? l.effectiveStatus;
+      }
       r.reservedUnits = 0;
     }
   }

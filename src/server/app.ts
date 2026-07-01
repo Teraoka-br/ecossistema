@@ -7,6 +7,7 @@ import { dataRouter } from "./routes/data-routes.js";
 import { countingRouter } from "./routes/counting-routes.js";
 import { procurementRouter } from "./routes/procurement-routes.js";
 import { matchRouter } from "./routes/match-routes.js";
+import { separationRouter } from "./routes/separation-routes.js";
 
 export function createApp(): Express {
   const app = express();
@@ -18,6 +19,7 @@ export function createApp(): Express {
   app.use("/api", countingRouter);
   app.use("/api", procurementRouter);
   app.use("/api", matchRouter);
+  app.use("/api", separationRouter);
 
   // Em produção, serve o frontend compilado e faz fallback de SPA.
   if (fs.existsSync(config.clientDist)) {

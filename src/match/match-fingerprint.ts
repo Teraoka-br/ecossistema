@@ -11,6 +11,7 @@ import type { Db } from "../db/database.js";
 import { ALGORITHM_VERSION } from "./match-engine.js";
 import { getCurrentOperationalStock } from "../operational/stock-service.js";
 import { getSystemState } from "../system/system-service.js";
+import { maxActiveReservationId } from "../separation/separation-repository.js";
 
 export interface FingerprintComponents {
   initialImportBatchId: number | null;
@@ -21,6 +22,8 @@ export interface FingerprintComponents {
   stockMaxMovementId: number;
   /** SHA-256 das quantidades efetivas do estoque — detecta reversões de movimentos antigos. */
   stockStateHash: string;
+  /** Máximo id de reserva ativa (RESERVED/CONFIRMED) — detecta criação/cancelamento de separações. */
+  maxActiveReservationId: number;
   ruleId: number;
   ruleAgeDaysPerPoint: number;
   ruleAgeMaxPoints: number;
@@ -39,6 +42,7 @@ export function computeHash(c: FingerprintComponents): string {
     stockSnapshotId: c.stockSnapshotId,
     stockCutoffMovementId: c.stockCutoffMovementId,
     stockStateHash: c.stockStateHash,
+    maxActiveReservationId: c.maxActiveReservationId,
     ruleId: c.ruleId,
     ruleAgeDaysPerPoint: c.ruleAgeDaysPerPoint,
     ruleAgeMaxPoints: c.ruleAgeMaxPoints,
@@ -49,8 +53,8 @@ export function computeHash(c: FingerprintComponents): string {
 }
 
 /**
- * Computa SHA-256 das quantidades efetivas do estoque operacional.
- * Detecta reversões de movimentos antigos que não alteram o MAX(id).
+ * Computa SHA-256 do estado efetivo do estoque operacional (físico, reservado, disponível).
+ * Detecta reversões de movimentos antigos e variações de reservas.
  */
 export function computeStockStateHash(groups: import("../operational/stock-service.js").OperationalStockGroup[]): string {
   const sorted = [...groups]
@@ -63,7 +67,7 @@ export function computeStockStateHash(groups: import("../operational/stock-servi
   const data = sorted
     .map(
       (g) =>
-        `${g.referenciaNorm ?? ""}|${g.chavePecaNorm ?? ""}|${g.currentQuantity}|${g.baseQuantity}|${g.movementQuantity}`,
+        `${g.referenciaNorm ?? ""}|${g.chavePecaNorm ?? ""}|${g.currentQuantity}|${g.reservedQuantity}|${g.availableQuantity}`,
     )
     .join("\n");
   return crypto.createHash("sha256").update(data).digest("hex");
@@ -122,6 +126,13 @@ export function collectFingerprintComponents(db: Db, rule: ActiveDecisionRule): 
     .prepare("SELECT COALESCE(MAX(id), 0) AS m FROM stock_movements WHERE reversed_at IS NULL")
     .get() as { m: number };
 
+  let maxReservId = 0;
+  try {
+    maxReservId = maxActiveReservationId(db);
+  } catch {
+    // tabela ainda não existe (antes da migration 009)
+  }
+
   return {
     initialImportBatchId: state.initial_import_batch_id,
     maxOperationalEventId: maxEvent.m,
@@ -130,6 +141,7 @@ export function collectFingerprintComponents(db: Db, rule: ActiveDecisionRule): 
     stockCutoffMovementId: stock.base.cutoffMovementId,
     stockMaxMovementId: maxMovement.m,
     stockStateHash: computeStockStateHash(stock.groups),
+    maxActiveReservationId: maxReservId,
     ruleId: rule.id,
     ruleAgeDaysPerPoint: rule.age_days_per_point,
     ruleAgeMaxPoints: rule.age_max_points,

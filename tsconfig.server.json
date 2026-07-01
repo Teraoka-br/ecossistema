@@ -19,6 +19,7 @@
     "src/db/**/*.ts",
     "src/domain/**/*.ts",
     "src/shared/**/*.ts",
-    "src/match/**/*.ts"
+    "src/match/**/*.ts",
+    "src/separation/**/*.ts"
   ]
 }

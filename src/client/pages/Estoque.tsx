@@ -116,7 +116,10 @@ export function Estoque() {
               <thead>
                 <tr>
                   <th>Referência</th><th>CHAVEPECA</th><th className="num">Base</th>
-                  <th className="num">Entradas posteriores</th><th className="num">Atual</th><th>Mapeada</th>
+                  <th className="num">Entradas posteriores</th><th className="num">Atual</th>
+                  <th className="num" title="Reservado em separações ativas">Reservado</th>
+                  <th className="num" title="Disponível = Atual − Reservado">Disponível</th>
+                  <th>Mapeada</th>
                 </tr>
               </thead>
               <tbody>
@@ -129,6 +132,12 @@ export function Estoque() {
                       <td className="num">{fmtInt(g.baseQuantity)}</td>
                       <td className="num">{g.movementQuantity > 0 ? "+" : ""}{fmtInt(g.movementQuantity)}</td>
                       <td className="num"><strong>{fmtInt(g.currentQuantity)}</strong></td>
+                      <td className="num" style={{ color: g.reservedQuantity > 0 ? "#d97706" : "var(--muted)" }}>
+                        {g.reservedQuantity > 0 ? fmtInt(g.reservedQuantity) : "—"}
+                      </td>
+                      <td className="num" style={{ color: g.availableQuantity < g.currentQuantity ? "#2563eb" : undefined }}>
+                        <strong>{fmtInt(g.availableQuantity)}</strong>
+                      </td>
                       <td>{g.mapeada ? <span className="badge ok">sim</span> : <span className="badge err">não</span>}</td>
                     </tr>
                   ))}

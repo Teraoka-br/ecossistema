@@ -1,7 +1,7 @@
 # Contexto do projeto — Sistema de Peças (Outlet do Celular)
 
-> Atualizado em: 2026-07-01, após implementar o motor de match completo (migration 007,
-> `src/match/`, API `/api/match-runs/*`, tela `/match`).
+> Atualizado em: 2026-07-01, após implementar separação operacional (migration 009,
+> `src/separation/`, API `/api/separation-batches/*`, tela `/separacao`).
 > Mantenha este documento enxuto — veja "Regras de manutenção" no final antes de editar.
 
 ## 1. Projeto
@@ -18,9 +18,11 @@
   fonte operacional oficial e novas importações ficam bloqueadas (`system_state.initialized`).
   Implementados: bipagem operacional (snapshot oficial), solicitações de compra aprovadas,
   pedidos de compra, recebimento (com movimentações de estoque), estoque operacional
-  (base oficial + movimentações posteriores) e **motor de match** (`src/match/`, migration 007,
-  API `/api/match-runs/*`, tela `/match`). O match é recomendação calculada — não cria
-  `stock_movements` nem `operational_events`. A tela de match é a última fase implementada.
+  (base oficial + movimentações posteriores), **motor de match** (`src/match/`, migration 007,
+  API `/api/match-runs/*`, tela `/match`) e **separação operacional** (`src/separation/`,
+  migration 009, API `/api/separation-batches/*`, tela `/separacao`). O match é recomendação
+  calculada — apenas a separação cria `stock_movements` (`REPAIR_CONSUMPTION`) e
+  `operational_events` (`PART_SEPARATED`). Estorno ainda não implementado.
 
 ## 2. Domínio
 
@@ -102,9 +104,9 @@ Vite/Vitest), Zod, `xlsx` 0.18.5, Vitest 2. Um único `package.json`/repositóri
 ```
 src/
   client/      React + Vite — App.tsx, api.ts, ui.tsx,
-               pages/{Importar,Diagnostico,Pedidos,Estoque,Movimentacoes,Cotacoes,Bipagem,Compras,Match}.tsx
+               pages/{Importar,Diagnostico,Pedidos,Estoque,Movimentacoes,Cotacoes,Bipagem,Compras,Match,Separacao}.tsx
   server/      Express — config.ts, app.ts, index.ts,
-               routes/{import-routes,data-routes,counting-routes,procurement-routes,match-routes}.ts
+               routes/{import-routes,data-routes,counting-routes,procurement-routes,match-routes,separation-routes}.ts
   shared/      types.ts — tipos compartilhados client/server (sem dependências)
   domain/      text.ts, status.ts, scoring.ts, reference-catalog.ts, procurement.ts (normalização
                de status de cotação) — regras puras e testadas
@@ -119,6 +121,8 @@ src/
                receiving-service.ts (recebimento transacional)
   match/       match-engine.ts (algoritmo puro, sem DB), match-fingerprint.ts (SHA-256 staleness),
                match-repository.ts (DB reads/writes), match-service.ts (orquestrador transacional)
+  separation/  separation-types.ts, separation-status.ts, separation-repository.ts,
+               separation-service.ts — separação operacional (reserva → confirmação → consumo)
 scripts/    audit-real.ts — auditoria reproduzível com arquivos reais (npm run audit:real)
 tests/      domain, import-mapping, import-service, fatal-issues, migration-guard,
             staged-detection, server-config, audit-real, counting-service, counting-integration,
@@ -131,10 +135,11 @@ data/       app.sqlite (operacional, não versionado), backups/, tmp/ (uploads t
 
 **Frontend:** rotas `/importar` (somente leitura após inicialização), `/diagnostico`,
 `/pedidos`, `/compras` (abas Aprovados/Aguardando/Recebidos/Cancelados), `/bipagem`, `/estoque`,
-`/estoque/movimentacoes`, `/cotacoes`, `/match` — todas consumindo a API via `fetch`; nenhuma
-regra de negócio no cliente (o backend recalcula e bloqueia de fato; o cliente só reflete o
-estado retornado). A tela `/match` exibe aviso permanente de que o resultado é recomendação
-calculada, sem movimentação de estoque.
+`/estoque/movimentacoes`, `/cotacoes`, `/match`, `/separacao` — todas consumindo a API via
+`fetch`; nenhuma regra de negócio no cliente (o backend recalcula e bloqueia de fato; o cliente
+só reflete o estado retornado). A tela `/match` exibe aviso permanente de que o resultado é
+recomendação calculada, sem movimentação de estoque. A tela `/separacao` permite criar lotes
+de separação a partir de runs de match, confirmar ou cancelar por peça/aparelho/lote.
 
 **Backend (endpoints):**
 - `POST /api/importar/preview`, `POST /api/importar/confirmar` (bloqueada após inicialização,
@@ -155,6 +160,11 @@ calculada, sem movimentação de estoque.
   `GET /api/match-runs/latest`, `GET /api/match-runs/:id`,
   `GET /api/match-runs/:id/{devices,results,stock-summary,comparison,export-csv}`,
   `GET /api/match-runs/current-state`, `GET /api/decision-rules/active`.
+- `POST /api/separation-batches` (criar lote), `GET /api/separation-batches` (listar),
+  `GET /api/separation-batches/:id/state`,
+  `POST /api/separation-batches/:id/{confirm-all,cancel}`,
+  `POST /api/separation-batches/:id/devices/:deviceId/{confirm,cancel}`,
+  `POST /api/separation-batches/:id/items/:itemId/{confirm,cancel}`.
 - Códigos HTTP: 400 entrada inválida, 404 recurso inexistente, 409 conflito de estado/
   idempotência, 422 regra operacional bloqueando.
 
@@ -210,6 +220,14 @@ cobertura mínima via `config.countMinCompletenessRatio` (env `COUNT_MIN_COMPLET
   ordem_consumo, stock_for_key_initial/before/after, margin, score). `UNIQUE(match_run_id, id_pedido)`.
 - `decision_rules`: política de score configurável; lida pelo domínio e pelo motor de match.
   Não há tela para editar — configurada apenas via SQL direto por ora.
+- `separation_batches` (migration 009): lote de separação criado a partir de um `match_run`.
+  Status: `OPEN` → `PARTIALLY_COMPLETED` | `COMPLETED` | `CANCELLED`. Número sequencial
+  `SEP-YYYYMMDD-NNNN` por dia. `idempotency_key UNIQUE` garante idempotência de criação.
+- `separation_items` (migration 009): um item por peça separada. Status: `RESERVED` →
+  `CONFIRMED` | `CANCELLED`. `UNIQUE INDEX` impede reserva duplicada do mesmo `id_pedido`
+  ativo (somente `NOT CANCELLED`); impede também dois itens do mesmo `match_result_id` ativos
+  no mesmo batch. Confirmação cria `REPAIR_CONSUMPTION` em `stock_movements` e
+  `PART_SEPARATED` em `operational_events`; cancelamento libera reserva sem criar movimento.
 - `system_state` (migration 005): linha única global; `initialized`/`initial_import_batch_id`
   marcam se/quando o sistema foi inicializado pela primeira importação confirmada.
 - `purchase_requests` (migration 006): solicitações de compra aprovadas, inicializadas a partir
@@ -314,8 +332,18 @@ cobertura mínima via `config.countMinCompletenessRatio` (env `COUNT_MIN_COMPLET
   finalização absorve as movimentações ocorridas antes dele
   (`stock_snapshots.baseline_movement_id_max`). `/api/estoque` e `/estoque/movimentacoes`
   expõem base/movimentos/atual e o livro-razão filtrável.
-- Tudo testado: **193 testes** (ver §8), incluindo o motor de match completo (74 novos
-  testes: engine puro + serviço + integração).
+- **Separação operacional** (`src/separation/`, migration 009, tela `/separacao`):
+  criação de lote a partir de run de match com stale-check (impede separar run desatualizado
+  por novas reservas — `maxActiveReservationId` no fingerprint); reserva lógica
+  (`reservedQuantity`/`availableQuantity` em `getCurrentOperationalStock`); confirmação de
+  peça/aparelho/lote com criação atômica de `REPAIR_CONSUMPTION` + `PART_SEPARATED`;
+  cancelamento libera reserva sem criar movimento; status do lote recalculado após cada ação
+  (`OPEN`/`PARTIALLY_COMPLETED`/`COMPLETED`/`CANCELLED`); idempotência por `idempotency_key`;
+  restrição única contra dupla reserva do mesmo `id_pedido` ativo; `confirmPartialItem` só
+  funciona em itens `PARTIAL`; `confirmFullDevice` confirma todos os itens `RESERVED` de um
+  aparelho; `cancelBatch` sobre lote `COMPLETED` ou `CANCELLED` é idempotente (no-op).
+  Estorno não implementado nesta fase.
+- Tudo testado: **250 testes** (ver §8), incluindo a separação completa (57 novos testes).
 
 ## 7. Dados reais validados
 
@@ -364,15 +392,15 @@ reimportação.
 
 ## 8. Testes
 
-- **193 testes** (Vitest), todos passando, em 16 arquivos: `domain.test.ts` (11),
+- **250 testes** (Vitest), todos passando, em 17 arquivos: `domain.test.ts` (11),
   `import-mapping.test.ts` (12), `import-service.test.ts` (8), `fatal-issues.test.ts` (8),
   `migration-guard.test.ts` (2), `staged-detection.test.ts` (7), `server-config.test.ts` (1),
   `audit-real.test.ts` (1), `counting-service.test.ts` (38), `counting-integration.test.ts` (1),
   `system-initialization.test.ts` (7), `procurement.test.ts` (17), `counting-baseline.test.ts`
-  (6), `match-engine.test.ts` (29, algoritmo puro), `match-service.test.ts` (20, serviço+fingerprint),
-  `match-integration.test.ts` (25, cenário de ponta a ponta) — mais `helpers.ts`/`global-setup.ts`.
-- `npm run typecheck` — 3 projetos: `tsconfig.server.json` (cobre `src/counting`, `src/match`),
-  `tsconfig.client.json`, `tsconfig.scripts.json` — sem erros.
+  (6), `match-engine.test.ts` (29), `match-service.test.ts` (20), `match-integration.test.ts`
+  (25), `separation.test.ts` (57) — mais `helpers.ts`/`global-setup.ts`.
+- `npm run typecheck` — 3 projetos: `tsconfig.server.json` (cobre `src/counting`, `src/match`,
+  `src/separation`), `tsconfig.client.json`, `tsconfig.scripts.json` — sem erros.
 - `npm run build` (`tsc` + `vite build`) — sem erros.
 - Comandos reais usados na validação: `npm install`, `npm test`, `npm run typecheck`,
   `npm run build`, `npm run audit:real -- --orders ... --analysis ...`. A validação com
@@ -443,14 +471,14 @@ reimportação.
 
 ## 10. Pendências
 
-**Bloqueadores:** nenhum conhecido. Motor de match validado (193 testes + typecheck + build).
+**Bloqueadores:** nenhum conhecido. Separação operacional validada (250 testes + typecheck + build).
 
 **Últimas mudanças relevantes (mais recentes primeiro, máx. 5):**
-1. **Inicialização da base operacional**: Banco inicializado (`system_state.initialized = 1`) usando lote #1, criando 175 solicitações de compra aprovadas (`purchase_requests`). Nenhuma duplicidade criada.
-2. **Estoque operacional e Regras**: Regra de decisão validada (1 ativa, `margin_allows_negative = 1`). Estoque atual total de 791 unidades físicas (739 úteis mapeadas e 52 não mapeadas) agrupadas em 530 grupos. Baseline atual é o INITIAL_IMPORT.
-3. **Auditoria e Segurança**: Testes unitários (201/201), build e typecheck validados pós-inicialização. Backups garantidos em `data/backups/app-before-operational-readiness-20260701-162000.sqlite` (pré) e `data/backups/app-after-initialization-20260701-163251.sqlite` (pós-inicialização). Git inicializado (pendente commit por falta de identidade do usuário).
-4. **Motor de match** (migration 007, `src/match/`, API `/api/match-runs/*`, tela `/match`): algoritmo puro em 2 passagens (kit completo atômico → saldo parcial), fingerprint SHA-256. Nunca cria `stock_movements` nem `operational_events`. Smoke test validado em cópia do banco original demonstrando correta alocação e idempotência.
-5. **Estoque operacional + pedidos de compra + recebimento** (migration 006): base oficial + movimentações posteriores, recebimento transacional idempotente.
+1. **Separação operacional** (migration 009, `src/separation/`, API `/api/separation-batches/*`, tela `/separacao`): reserva lógica de estoque no match, confirmação com `REPAIR_CONSUMPTION`+`PART_SEPARATED`, cancelamento sem movimento, stale-check via `maxActiveReservationId` no fingerprint, `availableQuantity`/`reservedQuantity` em `getCurrentOperationalStock`, tela `/estoque` atualizada com colunas Reservado/Disponível, tela `/match` com checkbox para PARTIAL. 57 novos testes de integração. Estorno fora do escopo.
+2. **Inicialização da base operacional**: Banco inicializado (`system_state.initialized = 1`) usando lote #1, criando 175 solicitações de compra aprovadas. Backups em `data/backups/`.
+3. **Motor de match** (migration 007, `src/match/`, API `/api/match-runs/*`, tela `/match`): algoritmo puro em 2 passagens, fingerprint SHA-256. Nunca cria `stock_movements` nem `operational_events`. 74 testes.
+4. **Estoque operacional + pedidos de compra + recebimento** (migration 006): base oficial + movimentações posteriores, recebimento transacional idempotente.
+5. **Bipagem operacional completa** (migration 004): sessão, scans, finalização transacional, snapshot oficial.
 
 **Melhorias futuras (fora do escopo das tarefas já concluídas):**
 - `confirm()` (importação) re-lê os arquivos copiados no diretório do lote; se o servidor
@@ -468,10 +496,10 @@ reimportação.
 
 ## 11. Próxima fase
 
-O motor de match está implementado como **recomendação calculada**. A próxima fase possível
-é **confirmação física do match** — o operador revisa a tela `/match` e confirma distribuições,
-o que criaria `operational_events` (status permanente) e eventualmente `stock_movements`
-(consumo real). Não implementar essa fase a menos que explicitamente solicitada.
+A separação operacional (reserva + confirmação com consumo de estoque) está implementada.
+Fase seguinte possível: **estorno de separação** — desfazer uma confirmação já realizada,
+criando um `stock_movements` de crédito e revertendo o status de `CONFIRMED` para um estado
+estornado. Não implementar sem solicitação explícita.
 
 ## 12. Comandos
 

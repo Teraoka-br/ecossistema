@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { Importar } from "./pages/Importar.js";
 import { Diagnostico } from "./pages/Diagnostico.js";
@@ -8,6 +9,7 @@ import { Bipagem } from "./pages/Bipagem.js";
 import { Compras } from "./pages/Compras.js";
 import { Movimentacoes } from "./pages/Movimentacoes.js";
 import { Match } from "./pages/Match.js";
+import { Separacao } from "./pages/Separacao.js";
 
 const links = [
   { to: "/importar", label: "Importar" },
@@ -18,7 +20,24 @@ const links = [
   { to: "/estoque", label: "Estoque" },
   { to: "/cotacoes", label: "Cotações" },
   { to: "/match", label: "MATCH" },
+  { to: "/separacao", label: "SEPARAÇÃO" },
 ];
+
+function RootRedirect() {
+  const [target, setTarget] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/separation-batches?status=OPEN&limit=1")
+      .then((r) => r.json())
+      .then((d: { total?: number }) => {
+        setTarget(d.total && d.total > 0 ? "/separacao" : "/match");
+      })
+      .catch(() => setTarget("/match"));
+  }, []);
+
+  if (!target) return null;
+  return <Navigate to={target} replace />;
+}
 
 export function App() {
   return (
@@ -35,7 +54,7 @@ export function App() {
       </header>
       <main className="content">
         <Routes>
-          <Route path="/" element={<Navigate to="/importar" replace />} />
+          <Route path="/" element={<RootRedirect />} />
           <Route path="/importar" element={<Importar />} />
           <Route path="/diagnostico" element={<Diagnostico />} />
           <Route path="/pedidos" element={<Pedidos />} />
@@ -45,7 +64,8 @@ export function App() {
           <Route path="/estoque/movimentacoes" element={<Movimentacoes />} />
           <Route path="/cotacoes" element={<Cotacoes />} />
           <Route path="/match" element={<Match />} />
-          <Route path="*" element={<Navigate to="/importar" replace />} />
+          <Route path="/separacao" element={<Separacao />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>
