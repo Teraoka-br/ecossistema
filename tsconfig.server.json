@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "outDir": "dist/server",
+    "rootDir": "src",
+    "types": ["node"],
+    "noEmit": false
+  },
+  "include": [
+    "src/server/**/*.ts",
+    "src/import/**/*.ts",
+    "src/counting/**/*.ts",
+    "src/operational/**/*.ts",
+    "src/system/**/*.ts",
+    "src/db/**/*.ts",
+    "src/domain/**/*.ts",
+    "src/shared/**/*.ts",
+    "src/match/**/*.ts"
+  ]
+}

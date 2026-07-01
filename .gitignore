@@ -1,0 +1,37 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# environment
+.env
+.env.local
+
+# database (local, operational data — never commit)
+data/*.sqlite
+data/*.sqlite-journal
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/backups/
+data/tmp/
+data/tmp-test/
+
+# uploads temporários e excel
+tmp/
+*.tmp
+*.xlsx
+
+# vite cache
+.vite/
+
+# logs
+*.log
+npm-debug.log*
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
