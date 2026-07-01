@@ -446,19 +446,11 @@ reimportação.
 **Bloqueadores:** nenhum conhecido. Motor de match validado (193 testes + typecheck + build).
 
 **Últimas mudanças relevantes (mais recentes primeiro, máx. 5):**
-1. **Motor de match** (migration 007, `src/match/`, API `/api/match-runs/*`, tela `/match`):
-   algoritmo puro em 2 passagens (kit completo atômico → saldo parcial), fingerprint SHA-256
-   para reutilização/staleness, 6 verificações de integridade na transação. **Recomendação
-   calculada: nunca cria stock_movements nem operational_events.**
-2. **Estoque operacional + pedidos de compra + recebimento** (migration 006): base oficial +
-   movimentações posteriores, `/compras`, recebimento transacional idempotente,
-   `/estoque/movimentacoes`.
-3. **Importação Excel como inicialização única** (migration 005, `system_state`): primeira
-   importação inicializa (cria solicitações aprovadas), novas importações bloqueadas
-   (`ALLOW_LEGACY_REIMPORT` só dev/teste), `/importar` somente leitura após inicializado.
-4. **Correções de integridade da bipagem**: perda de unidades pós-resolução manual corrigida;
-   `GET .../state` para F5; sessões imutáveis; autocomplete usa catálogo da sessão.
-5. Bipagem operacional e snapshot oficial de estoque (migration 004; tela `/bipagem`).
+1. **Inicialização da base operacional**: Banco inicializado (`system_state.initialized = 1`) usando lote #1, criando 175 solicitações de compra aprovadas (`purchase_requests`). Nenhuma duplicidade criada.
+2. **Estoque operacional e Regras**: Regra de decisão validada (1 ativa, `margin_allows_negative = 1`). Estoque atual total de 791 unidades físicas (739 úteis mapeadas e 52 não mapeadas) agrupadas em 530 grupos. Baseline atual é o INITIAL_IMPORT.
+3. **Auditoria e Segurança**: Testes unitários (201/201), build e typecheck validados pós-inicialização. Backups garantidos em `data/backups/app-before-operational-readiness-20260701-162000.sqlite` (pré) e `data/backups/app-after-initialization-20260701-163251.sqlite` (pós-inicialização). Git inicializado (pendente commit por falta de identidade do usuário).
+4. **Motor de match** (migration 007, `src/match/`, API `/api/match-runs/*`, tela `/match`): algoritmo puro em 2 passagens (kit completo atômico → saldo parcial), fingerprint SHA-256. Nunca cria `stock_movements` nem `operational_events`. Smoke test validado em cópia do banco original demonstrando correta alocação e idempotência.
+5. **Estoque operacional + pedidos de compra + recebimento** (migration 006): base oficial + movimentações posteriores, recebimento transacional idempotente.
 
 **Melhorias futuras (fora do escopo das tarefas já concluídas):**
 - `confirm()` (importação) re-lê os arquivos copiados no diretório do lote; se o servidor
