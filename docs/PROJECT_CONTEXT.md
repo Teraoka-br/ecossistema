@@ -1,7 +1,7 @@
 # Contexto do projeto — Sistema de Peças (Outlet do Celular)
 
-> Atualizado em: 2026-07-01, após implementar separação operacional (migration 009,
-> `src/separation/`, API `/api/separation-batches/*`, tela `/separacao`).
+> Atualizado em: 2026-07-02, após implementar autenticação, domínio de reparo operacional,
+> intake do Datasys e novo shell visual (migrations 010–011).
 > Mantenha este documento enxuto — veja "Regras de manutenção" no final antes de editar.
 
 ## 1. Projeto
@@ -19,10 +19,15 @@
   Implementados: bipagem operacional (snapshot oficial), solicitações de compra aprovadas,
   pedidos de compra, recebimento (com movimentações de estoque), estoque operacional
   (base oficial + movimentações posteriores), **motor de match** (`src/match/`, migration 007,
-  API `/api/match-runs/*`, tela `/match`) e **separação operacional** (`src/separation/`,
-  migration 009, API `/api/separation-batches/*`, tela `/separacao`). O match é recomendação
-  calculada — apenas a separação cria `stock_movements` (`REPAIR_CONSUMPTION`) e
-  `operational_events` (`PART_SEPARATED`). Estorno ainda não implementado.
+  API `/api/match-runs/*`, tela `/match`), **separação operacional** (`src/separation/`,
+  migration 009, API `/api/separation-batches/*`, tela `/separacao`),
+  **autenticação/sessões** (migration 010, `src/auth/`, `src/audit/`, `src/staff/`),
+  **domínio de reparo** (`repair_cases`/`part_requests`/`repair_case_priorities`, migration 011,
+  `src/repair/`, API `/api/repair-cases/*`), **intake do Datasys**
+  (`src/datasys/`, API `/api/datasys/*`, tela `/admin/datasys`) e
+  **novo shell visual** (dark mode industrial, sidebar com grupos Operação/Suprimentos/Administração).
+  O match é recomendação calculada — apenas a separação cria `stock_movements` (`REPAIR_CONSUMPTION`) e
+  `operational_events` (`PART_SEPARATED`). Estorno e motor de match de repair_cases não implementados.
 
 ## 2. Domínio
 
@@ -103,33 +108,37 @@ Vite/Vitest), Zod, `xlsx` 0.18.5, Vitest 2. Um único `package.json`/repositóri
 
 ```
 src/
-  client/      React + Vite — App.tsx, api.ts, ui.tsx,
-               pages/{Importar,Diagnostico,Pedidos,Estoque,Movimentacoes,Cotacoes,Bipagem,Compras,Match,Separacao}.tsx
+  client/      React + Vite — App.tsx, auth.tsx,
+               pages/{Importar,Diagnostico,Pedidos,Estoque,Movimentacoes,Cotacoes,Bipagem,
+                      Compras,Match,Separacao,Analise,Login,Setup,
+                      AdminUsuarios,AdminTecnicos,AdminDatasys}.tsx
   server/      Express — config.ts, app.ts, index.ts,
-               routes/{import-routes,data-routes,counting-routes,procurement-routes,match-routes,separation-routes}.ts
+               middleware/auth-middleware.ts,
+               routes/{import,data,counting,procurement,match,separation,
+                       auth,staff,repair,datasys}-routes.ts
   shared/      types.ts — tipos compartilhados client/server (sem dependências)
-  domain/      text.ts, status.ts, scoring.ts, reference-catalog.ts, procurement.ts (normalização
-               de status de cotação) — regras puras e testadas
+  domain/      text.ts, status.ts, scoring.ts, reference-catalog.ts, procurement.ts
   db/          database.ts, migrate.ts, migrations/*.sql, repository.ts, queries.ts,
                counting-repository.ts, counting-queries.ts
   import/      xlsx-reader.ts, value.ts, columns.ts, table-detection.ts, mappers.ts, import-service.ts
-  counting/    counting-service.ts — sessões (com baseline operacional congelada), scans,
-               pendências, resumo, finalização transacional
-  system/      system-service.ts — estado global de inicialização (system_state)
-  operational/ stock-service.ts (estoque operacional + livro de movimentações),
-               procurement-service.ts (solicitações + pedidos de compra),
-               receiving-service.ts (recebimento transacional)
-  match/       match-engine.ts (algoritmo puro, sem DB), match-fingerprint.ts (SHA-256 staleness),
-               match-repository.ts (DB reads/writes), match-service.ts (orquestrador transacional)
+  counting/    counting-service.ts
+  system/      system-service.ts
+  operational/ stock-service.ts, procurement-service.ts, receiving-service.ts
+  match/       match-engine.ts, match-fingerprint.ts, match-repository.ts, match-service.ts
   separation/  separation-types.ts, separation-status.ts, separation-repository.ts,
-               separation-service.ts — separação operacional (reserva → confirmação → consumo)
-scripts/    audit-real.ts — auditoria reproduzível com arquivos reais (npm run audit:real)
+               separation-service.ts
+  auth/        auth-service.ts — PIN hashing (scryptSync), sessões, usuários, roles
+  audit/       audit-service.ts — logAudit (silencioso), getAuditLog
+  staff/       staff-service.ts — técnicos (TECHNICIAN, activate/deactivate)
+  repair/      repair-service.ts — repair_cases, part_requests, prioridades manuais
+  datasys/     datasys-service.ts — preview/confirm de RELATORIO.xlsx, search por IMEI/OS
+scripts/    audit-real.ts, migrate-repair-domain.ts (migração idempotente legado→repair_cases)
 tests/      domain, import-mapping, import-service, fatal-issues, migration-guard,
             staged-detection, server-config, audit-real, counting-service, counting-integration,
-            counting-baseline, system-initialization, procurement (+ helpers, global-setup)
+            counting-baseline, system-initialization, procurement, match-engine, match-service,
+            match-integration, separation, auth, staff, repair-domain, datasys (+ helpers, global-setup)
 docs/       modelo-dados.md, importacao-legado.md, regras-negocio.md, REAL_DATA_AUDIT.md
             (gerado), PROJECT_CONTEXT.md (este arquivo)
-audit/      concluded-sample.csv, status-conflicts.csv (gerados por audit:real, não versionados)
 data/       app.sqlite (operacional, não versionado), backups/, tmp/ (uploads temporários)
 ```
 
@@ -343,7 +352,19 @@ cobertura mínima via `config.countMinCompletenessRatio` (env `COUNT_MIN_COMPLET
   funciona em itens `PARTIAL`; `confirmFullDevice` confirma todos os itens `RESERVED` de um
   aparelho; `cancelBatch` sobre lote `COMPLETED` ou `CANCELLED` é idempotente (no-op).
   Estorno não implementado nesta fase.
-- Tudo testado: **250 testes** (ver §8), incluindo a separação completa (57 novos testes).
+- **Auth, staff, repair domain e Datasys** (migrations 010–011): autenticação com PIN (scryptSync,
+  timing-safe), sessões HttpOnly/SameSite=Lax, roles ADMIN/OPERATOR, setup do primeiro usuário,
+  middleware protegendo todas as rotas exceto `/api/auth/{setup-status,setup,login}` e `/api/health`;
+  técnicos (CRUD, activate/deactivate); log de auditoria silencioso (nunca quebra fluxo principal);
+  `repair_cases` (um por aparelho), `part_requests` (uma por peça), prioridade manual com histórico;
+  intake Datasys via `RELATORIO.xlsx` (preview/confirm, idempotência SHA-256); tela `/analise`
+  (busca por IMEI/OS, formulário de aparelho + peças, salvar/finalizar); admin pages
+  (`/admin/usuarios`, `/admin/tecnicos`, `/admin/datasys`); novo shell dark mode industrial
+  com sidebar Operação/Suprimentos/Administração; script `migrate:repair-domain` idempotente
+  (legado `source_order_parts` → `repair_cases` + `part_requests`).
+  45 novos testes (auth=10, repair-domain=9, datasys=8, staff=6, server-config atualizado=1).
+  `SERVER_HOST` agora padrão `0.0.0.0` (autenticação implantada).
+- Tudo testado: **295 testes** (ver §8), incluindo a separação completa (57) e os módulos de auth/repair/datasys (33).
 
 ## 7. Dados reais validados
 
@@ -392,13 +413,14 @@ reimportação.
 
 ## 8. Testes
 
-- **250 testes** (Vitest), todos passando, em 17 arquivos: `domain.test.ts` (11),
+- **295 testes** (Vitest), todos passando, em 21 arquivos: `domain.test.ts` (11),
   `import-mapping.test.ts` (12), `import-service.test.ts` (8), `fatal-issues.test.ts` (8),
   `migration-guard.test.ts` (2), `staged-detection.test.ts` (7), `server-config.test.ts` (1),
   `audit-real.test.ts` (1), `counting-service.test.ts` (38), `counting-integration.test.ts` (1),
   `system-initialization.test.ts` (7), `procurement.test.ts` (17), `counting-baseline.test.ts`
   (6), `match-engine.test.ts` (29), `match-service.test.ts` (20), `match-integration.test.ts`
-  (25), `separation.test.ts` (57) — mais `helpers.ts`/`global-setup.ts`.
+  (25), `separation.test.ts` (57), `auth.test.ts` (10), `repair-domain.test.ts` (9),
+  `datasys.test.ts` (8+4=12), `staff.test.ts` (6) — mais `helpers.ts`/`global-setup.ts`.
 - `npm run typecheck` — 3 projetos: `tsconfig.server.json` (cobre `src/counting`, `src/match`,
   `src/separation`), `tsconfig.client.json`, `tsconfig.scripts.json` — sem erros.
 - `npm run build` (`tsc` + `vite build`) — sem erros.
@@ -438,8 +460,8 @@ reimportação.
 - Abas claramente históricas/volumosas de um Excel (ex.: `His Estoque`) **nunca são lidas**,
   nem mesmo para procurar cabeçalho — a heurística de nome é só para REDUZIR a varredura
   inicial; a detecção por conteúdo de cabeçalho continua sendo a autoridade final.
-- O servidor não escuta em `0.0.0.0` por padrão enquanto não houver autenticação — `127.0.0.1`
-  é o host padrão; mudar isso é uma decisão explícita de quem operar o ambiente.
+- Com a autenticação implantada, `SERVER_HOST` passa a ter padrão `0.0.0.0` (rede local). O
+  cookie usa `secure: false` porque o beta corre em HTTP local — mudar para `true` exige HTTPS.
 - **Beep nunca é deduplicado** — cada requisição de scan é uma unidade física real; 10 beeps
   da mesma referência são 10 linhas, nunca consolidadas na gravação.
 - **Scan e sessão nunca são apagados** (`DELETE`) — cancelamento só preenche
@@ -471,12 +493,12 @@ reimportação.
 
 ## 10. Pendências
 
-**Bloqueadores:** nenhum conhecido. Separação operacional validada (250 testes + typecheck + build).
+**Bloqueadores:** nenhum conhecido. 295 testes + typecheck + build limpos.
 
 **Últimas mudanças relevantes (mais recentes primeiro, máx. 5):**
-1. **Separação operacional** (migration 009, `src/separation/`, API `/api/separation-batches/*`, tela `/separacao`): reserva lógica de estoque no match, confirmação com `REPAIR_CONSUMPTION`+`PART_SEPARATED`, cancelamento sem movimento, stale-check via `maxActiveReservationId` no fingerprint, `availableQuantity`/`reservedQuantity` em `getCurrentOperationalStock`, tela `/estoque` atualizada com colunas Reservado/Disponível, tela `/match` com checkbox para PARTIAL. 57 novos testes de integração. Estorno fora do escopo.
-2. **Inicialização da base operacional**: Banco inicializado (`system_state.initialized = 1`) usando lote #1, criando 175 solicitações de compra aprovadas. Backups em `data/backups/`.
-3. **Motor de match** (migration 007, `src/match/`, API `/api/match-runs/*`, tela `/match`): algoritmo puro em 2 passagens, fingerprint SHA-256. Nunca cria `stock_movements` nem `operational_events`. 74 testes.
+1. **Auth, staff, repair domain, Datasys intake e shell visual** (migrations 010–011, `src/auth/`, `src/audit/`, `src/staff/`, `src/repair/`, `src/datasys/`): autenticação com PIN scryptSync, sessões cookie HttpOnly/SameSite=Lax, roles ADMIN/OPERATOR, middleware global; técnicos CRUD; auditoria silenciosa; `repair_cases`/`part_requests`/prioridades manuais; intake `RELATORIO.xlsx`; tela `/analise`, admin pages; shell dark mode; `SERVER_HOST` agora `0.0.0.0` (auth ativa). 45 novos testes.
+2. **Separação operacional** (migration 009, `src/separation/`, API `/api/separation-batches/*`, tela `/separacao`): reserva lógica, confirmação com `REPAIR_CONSUMPTION`+`PART_SEPARATED`, cancelamento sem movimento, stale-check. 57 novos testes.
+3. **Motor de match** (migration 007, `src/match/`, API `/api/match-runs/*`, tela `/match`): algoritmo puro em 2 passagens, fingerprint SHA-256. 74 testes.
 4. **Estoque operacional + pedidos de compra + recebimento** (migration 006): base oficial + movimentações posteriores, recebimento transacional idempotente.
 5. **Bipagem operacional completa** (migration 004): sessão, scans, finalização transacional, snapshot oficial.
 
@@ -496,10 +518,15 @@ reimportação.
 
 ## 11. Próxima fase
 
-A separação operacional (reserva + confirmação com consumo de estoque) está implementada.
-Fase seguinte possível: **estorno de separação** — desfazer uma confirmação já realizada,
-criando um `stock_movements` de crédito e revertendo o status de `CONFIRMED` para um estado
-estornado. Não implementar sem solicitação explícita.
+Com auth, repair domain e Datasys implementados, as próximas fases possíveis são:
+- **Motor de match para repair_cases** — conectar `part_requests` ao estoque operacional real
+  (análogo ao `match_engine` existente, mas operando sobre `repair_cases`/`part_requests`).
+- **Estorno de separação** — desfazer uma confirmação já realizada, criando `stock_movements`
+  de crédito e revertendo status de `CONFIRMED`.
+- **Tela /reparo** — visualização e gestão de `repair_cases` com partes, status e prioridade.
+- **Execução do `migrate:repair-domain`** sobre `data/app.sqlite` quando o banco operacional
+  tiver sido inicializado (backup prévio + `--dry-run` primeiro).
+Nenhuma dessas fases deve ser implementada sem solicitação explícita.
 
 ## 12. Comandos
 
