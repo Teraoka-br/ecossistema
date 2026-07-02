@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import {
-  Wrench, List, PackageSearch, ShoppingCart, Boxes, ScanBarcode,
-  Users, UserCog, Database, Puzzle, Stethoscope,
-  Activity, FileInput, LogOut, PanelLeftClose, PanelLeftOpen,
+  Wrench, List, ShoppingCart, Boxes, ScanBarcode,
+  Users, UserCog, Database, Activity, FileInput, LogOut,
+  PanelLeftClose, PanelLeftOpen, Settings, Stethoscope, Sliders,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "./auth.js";
 import { Login } from "./pages/Login.js";
@@ -22,42 +22,9 @@ import { Separacao } from "./pages/Separacao.js";
 import { AdminUsuarios } from "./pages/AdminUsuarios.js";
 import { AdminTecnicos } from "./pages/AdminTecnicos.js";
 import { AdminDatasys } from "./pages/AdminDatasys.js";
-
-interface SidebarGroup {
-  label: string;
-  items: { to: string; icon: React.ReactNode; label: string }[];
-}
-
-const SIDEBAR_GROUPS: SidebarGroup[] = [
-  {
-    label: "Operação",
-    items: [
-      { to: "/analise", icon: <Wrench size={15} />, label: "Analisar aparelho" },
-      { to: "/pedidos", icon: <List size={15} />, label: "Fila de reparos" },
-      { to: "/separacao", icon: <PackageSearch size={15} />, label: "Separação" },
-    ],
-  },
-  {
-    label: "Suprimentos",
-    items: [
-      { to: "/compras", icon: <ShoppingCart size={15} />, label: "Pedidos de peças" },
-      { to: "/estoque", icon: <Boxes size={15} />, label: "Estoque" },
-      { to: "/bipagem", icon: <ScanBarcode size={15} />, label: "Contagem" },
-    ],
-  },
-  {
-    label: "Administração",
-    items: [
-      { to: "/admin/usuarios", icon: <Users size={15} />, label: "Usuários" },
-      { to: "/admin/tecnicos", icon: <UserCog size={15} />, label: "Técnicos" },
-      { to: "/admin/datasys", icon: <Database size={15} />, label: "Dados do Datasys" },
-      { to: "/cotacoes", icon: <Puzzle size={15} />, label: "Peças e referências" },
-      { to: "/diagnostico", icon: <Stethoscope size={15} />, label: "Diagnóstico" },
-      { to: "/match", icon: <Activity size={15} />, label: "Auditoria do motor" },
-      { to: "/importar", icon: <FileInput size={15} />, label: "Importação inicial" },
-    ],
-  },
-];
+import { FilaReparos } from "./pages/FilaReparos.js";
+import { AdminMatchRules } from "./pages/AdminMatchRules.js";
+import { AdminDados } from "./pages/AdminDados.js";
 
 function LoadingScreen() {
   return (
@@ -79,6 +46,7 @@ function AuthenticatedShell() {
   }
 
   if (!user) return null;
+  const isAdmin = user.role === "ADMIN";
 
   return (
     <div className="app-shell">
@@ -89,7 +57,7 @@ function AuthenticatedShell() {
         <span className="topbar-brand">Sistema de Peças</span>
         <span className="topbar-user">
           <span>{user.displayName}</span>
-          <span className="topbar-role">{user.role === "ADMIN" ? "Admin" : "Operador"}</span>
+          <span className="topbar-role">{isAdmin ? "Admin" : "Operador"}</span>
           <button className="topbar-btn" onClick={logout} title="Sair">
             <LogOut size={14} />
             Sair
@@ -99,26 +67,58 @@ function AuthenticatedShell() {
 
       <div className={`layout ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
         <nav className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
-          {SIDEBAR_GROUPS.map((group) => (
-            <div key={group.label} className="sidebar-section">
-              <div className="sidebar-label">{group.label}</div>
-              {group.items.map((item) => (
-                <NavLink
-                  key={item.to + item.label}
-                  to={item.to}
-                  className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}
-                >
-                  {item.icon}
-                  {item.label}
-                </NavLink>
-              ))}
+          <div className="sidebar-section">
+            <div className="sidebar-label">Operação</div>
+            <NavLink to="/fila-reparos" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+              <List size={15} /> Fila de reparos
+            </NavLink>
+            <NavLink to="/analise" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+              <Wrench size={15} /> Analisar aparelho
+            </NavLink>
+          </div>
+
+          <div className="sidebar-section">
+            <div className="sidebar-label">Suprimentos</div>
+            <NavLink to="/compras" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+              <ShoppingCart size={15} /> Pedidos de peças
+            </NavLink>
+            <NavLink to="/estoque" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+              <Boxes size={15} /> Estoque
+            </NavLink>
+            <NavLink to="/bipagem" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+              <ScanBarcode size={15} /> Contagem
+            </NavLink>
+          </div>
+
+          {isAdmin && (
+            <div className="sidebar-section">
+              <div className="sidebar-label">Administração</div>
+              <NavLink to="/admin/dados" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <Database size={15} /> Dados
+              </NavLink>
+              <NavLink to="/admin/pessoas" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <Users size={15} /> Pessoas
+              </NavLink>
+              <NavLink to="/admin/regras-match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <Sliders size={15} /> Regras do Match
+              </NavLink>
+              <NavLink to="/diagnostico" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <Stethoscope size={15} /> Diagnóstico
+              </NavLink>
+              <NavLink to="/match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <Activity size={15} /> Auditoria do motor
+              </NavLink>
+              <NavLink to="/importar" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <FileInput size={15} /> Importação inicial
+              </NavLink>
             </div>
-          ))}
+          )}
         </nav>
 
         <main className="main-content">
           <Routes>
-            <Route path="/" element={<Navigate to="/analise" replace />} />
+            <Route path="/" element={<Navigate to="/fila-reparos" replace />} />
+            <Route path="/fila-reparos" element={<FilaReparos />} />
             <Route path="/analise" element={<Analise />} />
             <Route path="/importar" element={<Importar />} />
             <Route path="/diagnostico" element={<Diagnostico />} />
@@ -129,11 +129,16 @@ function AuthenticatedShell() {
             <Route path="/estoque/movimentacoes" element={<Movimentacoes />} />
             <Route path="/cotacoes" element={<Cotacoes />} />
             <Route path="/match" element={<Match />} />
-            <Route path="/separacao" element={<Separacao />} />
+            {/* Compatibilidade — /separacao redireciona para a fila */}
+            <Route path="/separacao" element={<Navigate to="/fila-reparos" replace />} />
             <Route path="/admin/usuarios" element={<AdminUsuarios />} />
             <Route path="/admin/tecnicos" element={<AdminTecnicos />} />
+            {/* /admin/pessoas: redireciona para usuários como ponto único */}
+            <Route path="/admin/pessoas" element={<AdminUsuarios />} />
             <Route path="/admin/datasys" element={<AdminDatasys />} />
-            <Route path="*" element={<Navigate to="/analise" replace />} />
+            <Route path="/admin/dados" element={<AdminDados />} />
+            <Route path="/admin/regras-match" element={<AdminMatchRules />} />
+            <Route path="*" element={<Navigate to="/fila-reparos" replace />} />
           </Routes>
         </main>
       </div>
@@ -148,23 +153,20 @@ function AppShell() {
 
   return (
     <Routes>
-      {/* /setup: mostra setup somente quando não há usuários; caso contrário redireciona */}
       <Route
         path="/setup"
         element={!setupDone ? <Setup /> : <Navigate to="/login" replace />}
       />
-      {/* /login: mostra login quando há usuários e não há sessão; caso contrário redireciona */}
       <Route
         path="/login"
         element={
           !setupDone
             ? <Navigate to="/setup" replace />
             : user
-              ? <Navigate to="/analise" replace />
+              ? <Navigate to="/fila-reparos" replace />
               : <Login />
         }
       />
-      {/* Todas as demais rotas requerem sessão válida */}
       <Route
         path="/*"
         element={

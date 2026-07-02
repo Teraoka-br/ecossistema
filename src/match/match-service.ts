@@ -301,7 +301,7 @@ export function runMatch(db: Db, input: RunMatchInput): RunMatchResult {
 
     const maxMovementId = (
       db
-        .prepare("SELECT COALESCE(MAX(id), 0) AS m FROM stock_movements WHERE reversed_at IS NULL")
+        .prepare("SELECT COALESCE(MAX(id), 0) AS m FROM stock_movements")
         .get() as { m: number }
     ).m;
 

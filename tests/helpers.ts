@@ -2,6 +2,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import XLSX from "xlsx";
+import { openDatabase } from "../src/db/database.js";
+import { runMigrations } from "../src/db/migrate.js";
+import type { Db } from "../src/db/database.js";
+
+/**
+ * Cria um banco :memory: com todas as migrations aplicadas.
+ * Usar apenas em testes — nunca usa data/app.sqlite.
+ */
+export async function createDb(): Promise<Db> {
+  const db = openDatabase(":memory:");
+  runMigrations(db);
+  return db;
+}
 
 export interface ErrorCell {
   r: number;

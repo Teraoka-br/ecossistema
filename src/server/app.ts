@@ -13,6 +13,7 @@ import { authRouter } from "./routes/auth-routes.js";
 import { staffRouter } from "./routes/staff-routes.js";
 import { repairRouter } from "./routes/repair-routes.js";
 import { datasysRouter } from "./routes/datasys-routes.js";
+import { repairQueueRouter } from "./routes/repair-queue-routes.js";
 import { requireAuth } from "./middleware/auth-middleware.js";
 
 export function createApp(): Express {
@@ -34,6 +35,7 @@ export function createApp(): Express {
   app.use("/api", staffRouter);          // middleware requireAuth aplicado internamente
   app.use("/api", repairRouter);         // idem
   app.use("/api", datasysRouter);        // idem
+  app.use("/api", repairQueueRouter);   // fila, reservas, motor, regras
 
   // Em produção, serve o frontend compilado e faz fallback de SPA.
   if (fs.existsSync(config.clientDist)) {

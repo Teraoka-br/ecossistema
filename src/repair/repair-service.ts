@@ -5,6 +5,8 @@ export type AnalysisStatus = "DRAFT" | "COMPLETED";
 export type WorkflowStatus =
   | "EM_ANALISE" | "PEDIR_PECA" | "AGUARDANDO_RECEBIMENTO"
   | "MATCH_PARCIAL" | "MATCH" | "EM_SEPARACAO" | "APTO_REPARO"
+  | "DIRECIONADO_TECNICO" | "EM_REPARO" | "REPARO_EXECUTADO"
+  | "TRIAGEM_FINAL" | "RETORNO_TECNICO"
   | "CONCLUIDO" | "VENDA_ESTADO" | "CANCELADO" | "VERIFICAR";
 
 export const TERMINAL_WORKFLOW_STATUSES: WorkflowStatus[] = ["CONCLUIDO", "VENDA_ESTADO", "CANCELADO"];
@@ -21,6 +23,8 @@ export interface RepairCase {
   osNorm: string | null;
   brand: string | null;
   model: string | null;
+  capacity: string | null;
+  color: string | null;
   entryDate: string | null;
   repairDate: string | null;
   repairDateSource: string | null;
@@ -32,6 +36,9 @@ export interface RepairCase {
   analysisStatus: AnalysisStatus;
   workflowStatus: WorkflowStatus;
   assignedTechnicianId: number | null;
+  directedTechnicianId: number | null;
+  directedAt: string | null;
+  directedByUserId: number | null;
   manualPriorityActive: boolean;
   legacyImportBatchId: number | null;
   legacyDeviceKey: string | null;
@@ -572,7 +579,8 @@ export function getPrioritiesByCase(db: Db, repairCaseId: number): Priority[] {
 
 interface RepairCaseRow {
   id: number; imei: string | null; imei_norm: string | null; os: string | null; os_norm: string | null;
-  brand: string | null; model: string | null; entry_date: string | null;
+  brand: string | null; model: string | null; capacity: string | null; color: string | null; entry_date: string | null;
+  directed_technician_id: number | null; directed_at: string | null; directed_by_user_id: number | null;
   repair_date: string | null; repair_date_source: string | null;
   age_days: number | null; cost: number | null; estimated_sale: number | null; margin: number | null; notes: string | null;
   analysis_status: string; workflow_status: string; assigned_technician_id: number | null;
@@ -585,7 +593,10 @@ interface RepairCaseRow {
 function toRepairCase(r: RepairCaseRow): RepairCase {
   return {
     id: r.id, imei: r.imei, imeiNorm: r.imei_norm, os: r.os, osNorm: r.os_norm,
-    brand: r.brand, model: r.model, entryDate: r.entry_date,
+    brand: r.brand, model: r.model, capacity: r.capacity ?? null, color: r.color ?? null, entryDate: r.entry_date,
+    directedTechnicianId: r.directed_technician_id ?? null,
+    directedAt: r.directed_at ?? null,
+    directedByUserId: r.directed_by_user_id ?? null,
     repairDate: r.repair_date, repairDateSource: r.repair_date_source,
     ageDays: r.age_days, cost: r.cost, estimatedSale: r.estimated_sale, margin: r.margin, notes: r.notes,
     analysisStatus: r.analysis_status as AnalysisStatus,

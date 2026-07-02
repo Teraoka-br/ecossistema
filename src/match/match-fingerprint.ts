@@ -123,7 +123,7 @@ export function collectFingerprintComponents(db: Db, rule: ActiveDecisionRule): 
     .get() as { m: number };
 
   const maxMovement = db
-    .prepare("SELECT COALESCE(MAX(id), 0) AS m FROM stock_movements WHERE reversed_at IS NULL")
+    .prepare("SELECT COALESCE(MAX(id), 0) AS m FROM stock_movements")
     .get() as { m: number };
 
   let maxReservId = 0;
