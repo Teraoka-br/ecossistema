@@ -2,7 +2,7 @@ import { useState } from "react";
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import {
   Wrench, List, PackageSearch, ShoppingCart, Boxes, ScanBarcode,
-  Users, UserCog, Database, Puzzle, Sliders, Stethoscope,
+  Users, UserCog, Database, Puzzle, Stethoscope,
   Activity, FileInput, LogOut, PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "./auth.js";
@@ -52,7 +52,6 @@ const SIDEBAR_GROUPS: SidebarGroup[] = [
       { to: "/admin/tecnicos", icon: <UserCog size={15} />, label: "Técnicos" },
       { to: "/admin/datasys", icon: <Database size={15} />, label: "Dados do Datasys" },
       { to: "/cotacoes", icon: <Puzzle size={15} />, label: "Peças e referências" },
-      { to: "/match", icon: <Sliders size={15} />, label: "Regras / motor" },
       { to: "/diagnostico", icon: <Stethoscope size={15} />, label: "Diagnóstico" },
       { to: "/match", icon: <Activity size={15} />, label: "Auditoria do motor" },
       { to: "/importar", icon: <FileInput size={15} />, label: "Importação inicial" },

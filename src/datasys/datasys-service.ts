@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import type { Db } from "../db/database.js";
 import { normalizeKey as normalizeText } from "../domain/text.js";
 
@@ -16,6 +17,8 @@ export interface DatasysImport {
   rowsImported: number;
   warningsCount: number;
   errorsCount: number;
+  stagedFilePath: string | null;
+  cancelledAt: string | null;
   createdByUserId: number | null;
   startedAt: string;
   finishedAt: string | null;
@@ -69,8 +72,6 @@ export class DatasysError extends Error {
 
 // ---------------------------------------------------------------------------
 // Mapeamento de colunas esperadas do relatório Datasys / RELATORIO
-// Configurável — isolado aqui para ser ajustado sem mudar o pipeline.
-// PENDÊNCIA: validar com arquivo real quando disponível.
 // ---------------------------------------------------------------------------
 export const DATASYS_COLUMN_MAPPING: Record<string, string[]> = {
   imei:       ["IMEI", "Imei", "imei", "SERIAL", "Serial"],
@@ -91,14 +92,26 @@ function hashFile(filePath: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Validação de path traversal
+// ---------------------------------------------------------------------------
+function validateStagedPath(filePath: string, allowedDir: string): void {
+  const resolved = path.resolve(filePath);
+  const dir = path.resolve(allowedDir);
+  if (!resolved.startsWith(dir + path.sep) && resolved !== dir) {
+    throw new DatasysError("INVALID_PATH", "Caminho de arquivo inválido.");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Preview — analisa sem gravar registros
 // ---------------------------------------------------------------------------
 export async function previewDatasysImport(
   db: Db,
-  params: { filePath: string; filename: string; userId: number | null },
+  params: { filePath: string; filename: string; userId: number | null; uploadDir: string },
 ): Promise<DatasysPreviewResult> {
   const { default: XLSX } = await import("xlsx");
 
+  validateStagedPath(params.filePath, params.uploadDir);
   const fileHash = hashFile(params.filePath);
 
   // Idempotência: mesmo arquivo já importado
@@ -107,6 +120,8 @@ export async function previewDatasysImport(
     .get(fileHash) as { id: number } | undefined;
 
   if (existing) {
+    // Limpa arquivo temporário — duplicado não precisa ficar
+    try { fs.unlinkSync(params.filePath); } catch { /* ignore */ }
     return {
       importId: -1,
       filename: params.filename,
@@ -123,19 +138,18 @@ export async function previewDatasysImport(
   // Lê o arquivo
   const wb = XLSX.readFile(params.filePath, { cellDates: true });
 
-  // Seleciona aba — procura "RELATORIO" ou pega a primeira
   const sheetName = wb.SheetNames.find(
     (n) => n.toUpperCase().includes("RELATORIO") || n.toUpperCase().includes("RELATÓRIO"),
   ) ?? wb.SheetNames[0];
 
   if (!sheetName) {
+    try { fs.unlinkSync(params.filePath); } catch { /* ignore */ }
     throw new DatasysError("NO_SHEET", "Nenhuma aba encontrada no arquivo.");
   }
 
   const ws = wb.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: null });
 
-  // Detecta mapeamento de colunas
   const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
   const resolved: Record<string, string | null> = {};
   for (const [field, candidates] of Object.entries(DATASYS_COLUMN_MAPPING)) {
@@ -144,7 +158,6 @@ export async function previewDatasysImport(
 
   const issues: Pick<DatasysIssue, "rowNumber" | "severity" | "code" | "message">[] = [];
 
-  // Valida campos essenciais
   if (!resolved.imei && !resolved.os) {
     issues.push({ rowNumber: null, severity: "ERROR", code: "MISSING_KEY_COLUMNS", message: "Colunas de IMEI e OS não encontradas. Verifique o arquivo ou o mapeamento de colunas." });
   }
@@ -161,14 +174,29 @@ export async function previewDatasysImport(
     validRows.push(row);
   }
 
-  // Cria registro de import pendente
+  if (validRows.length === 0 && rows.length > 0) {
+    issues.push({ rowNumber: null, severity: "ERROR", code: "NO_VALID_ROWS", message: "Nenhuma linha válida encontrada no arquivo." });
+  }
+
+  // Cria registro PENDING e persiste o caminho staged
   const res = db
     .prepare(
-      `INSERT INTO datasys_imports (filename, file_hash, status, rows_found, created_by_user_id)
-       VALUES (?, ?, 'PENDING', ?, ?)`,
+      `INSERT INTO datasys_imports (filename, file_hash, status, rows_found, staged_file_path, created_by_user_id)
+       VALUES (?, ?, 'PENDING', ?, ?, ?)`,
     )
-    .run(params.filename, fileHash, rows.length, params.userId ?? null);
+    .run(params.filename, fileHash, rows.length, params.filePath, params.userId ?? null);
   const importId = res.lastInsertRowid as number;
+
+  // Persiste os issues do preview
+  if (issues.length > 0) {
+    const insertIssue = db.prepare(
+      `INSERT INTO datasys_import_issues (datasys_import_id, row_number, severity, code, message)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    for (const iss of issues) {
+      insertIssue.run(importId, iss.rowNumber ?? null, iss.severity, iss.code, iss.message);
+    }
+  }
 
   return {
     importId,
@@ -184,11 +212,11 @@ export async function previewDatasysImport(
 }
 
 // ---------------------------------------------------------------------------
-// Confirm — efetivamente grava
+// Confirm — efetivamente grava; usa staged_file_path do banco
 // ---------------------------------------------------------------------------
 export async function confirmDatasysImport(
   db: Db,
-  params: { importId: number; filePath: string; userId: number | null },
+  params: { importId: number; userId: number | null; uploadDir: string },
 ): Promise<{ imported: number; warnings: number; errors: number }> {
   const { default: XLSX } = await import("xlsx");
 
@@ -197,11 +225,27 @@ export async function confirmDatasysImport(
     .get(params.importId) as DatasysImportRow | undefined;
   if (!imp) throw new DatasysError("NOT_FOUND", "Importação não encontrada.");
   if (imp.status === "COMPLETED") throw new DatasysError("ALREADY_IMPORTED", "Importação já confirmada.");
+  if (imp.cancelled_at) throw new DatasysError("CANCELLED", "Importação cancelada.");
+
+  const filePath = imp.staged_file_path;
+  if (!filePath) throw new DatasysError("NO_STAGED_FILE", "Arquivo staged não encontrado. Faça upload novamente.");
+  validateStagedPath(filePath, params.uploadDir);
+  if (!fs.existsSync(filePath)) {
+    throw new DatasysError("FILE_MISSING", "Arquivo temporário não encontrado. Faça upload novamente.");
+  }
+
+  // Verifica que há linhas válidas (bloqueio: zero valid rows)
+  const issueCount = (db.prepare(
+    "SELECT COUNT(*) as c FROM datasys_import_issues WHERE datasys_import_id = ? AND code = 'NO_VALID_ROWS'",
+  ).get(params.importId) as { c: number }).c;
+  if (issueCount > 0) {
+    throw new DatasysError("NO_VALID_ROWS", "Nenhuma linha válida no arquivo — confirmação bloqueada.");
+  }
 
   db.prepare("UPDATE datasys_imports SET status = 'PROCESSING' WHERE id = ?").run(params.importId);
 
   try {
-    const wb = XLSX.readFile(params.filePath, { cellDates: true });
+    const wb = XLSX.readFile(filePath, { cellDates: true });
     const sheetName = wb.SheetNames.find(
       (n) => n.toUpperCase().includes("RELATORIO") || n.toUpperCase().includes("RELATÓRIO"),
     ) ?? wb.SheetNames[0];
@@ -215,7 +259,7 @@ export async function confirmDatasysImport(
 
     let imported = 0;
     let warnings = 0;
-    let errors = 0;
+    const errors = 0;
 
     const insertRecord = db.prepare(
       `INSERT INTO datasys_records (datasys_import_id, imei, imei_norm, os, os_norm, brand, model, entry_date, age_days, cost, raw_data_json)
@@ -258,7 +302,7 @@ export async function confirmDatasysImport(
       }
 
       db.prepare(
-        `UPDATE datasys_imports SET status = 'COMPLETED', rows_imported = ?, warnings_count = ?, errors_count = ?, finished_at = datetime('now') WHERE id = ?`,
+        `UPDATE datasys_imports SET status = 'COMPLETED', rows_imported = ?, warnings_count = ?, errors_count = ?, staged_file_path = NULL, finished_at = datetime('now') WHERE id = ?`,
       ).run(imported, warnings, errors, params.importId);
       db.exec("COMMIT");
     } catch (err) {
@@ -267,6 +311,9 @@ export async function confirmDatasysImport(
       throw err;
     }
 
+    // Limpa arquivo temporário após import bem-sucedido
+    try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+
     return { imported, warnings, errors };
   } catch (err) {
     if (!(err instanceof DatasysError)) {
@@ -274,6 +321,29 @@ export async function confirmDatasysImport(
     }
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cancel preview — apaga registro PENDING e arquivo staged
+// ---------------------------------------------------------------------------
+export function cancelDatasysPreview(db: Db, importId: number, userId: number | null): void {
+  const imp = db
+    .prepare("SELECT * FROM datasys_imports WHERE id = ?")
+    .get(importId) as DatasysImportRow | undefined;
+  if (!imp) throw new DatasysError("NOT_FOUND", "Importação não encontrada.");
+  if (imp.status !== "PENDING" || imp.cancelled_at) {
+    throw new DatasysError("NOT_PENDING", "Somente importações pendentes podem ser canceladas.");
+  }
+
+  if (imp.staged_file_path) {
+    try { fs.unlinkSync(imp.staged_file_path); } catch { /* ignore */ }
+  }
+
+  db.prepare(
+    "UPDATE datasys_imports SET status = 'FAILED', cancelled_at = datetime('now'), finished_at = datetime('now') WHERE id = ?",
+  ).run(importId);
+
+  void userId; // auditado na rota
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +386,7 @@ export function searchDatasysRecords(
 interface DatasysImportRow {
   id: number; filename: string; file_hash: string; status: string;
   rows_found: number; rows_imported: number; warnings_count: number; errors_count: number;
+  staged_file_path: string | null; cancelled_at: string | null;
   created_by_user_id: number | null; started_at: string; finished_at: string | null;
 }
 
@@ -327,9 +398,18 @@ interface DatasysRecordRow {
 }
 
 function toDatasysImport(r: DatasysImportRow): DatasysImport {
-  return { id: r.id, filename: r.filename, fileHash: r.file_hash, status: r.status as any, rowsFound: r.rows_found, rowsImported: r.rows_imported, warningsCount: r.warnings_count, errorsCount: r.errors_count, createdByUserId: r.created_by_user_id, startedAt: r.started_at, finishedAt: r.finished_at };
+  return {
+    id: r.id, filename: r.filename, fileHash: r.file_hash, status: r.status as DatasysImport["status"],
+    rowsFound: r.rows_found, rowsImported: r.rows_imported, warningsCount: r.warnings_count, errorsCount: r.errors_count,
+    stagedFilePath: r.staged_file_path, cancelledAt: r.cancelled_at,
+    createdByUserId: r.created_by_user_id, startedAt: r.started_at, finishedAt: r.finished_at,
+  };
 }
 
 function toDatasysRecord(r: DatasysRecordRow): DatasysRecord {
-  return { id: r.id, datasysImportId: r.datasys_import_id, imei: r.imei, imeiNorm: r.imei_norm, os: r.os, osNorm: r.os_norm, brand: r.brand, model: r.model, entryDate: r.entry_date, ageDays: r.age_days, cost: r.cost, rawDataJson: r.raw_data_json, createdAt: r.created_at };
+  return {
+    id: r.id, datasysImportId: r.datasys_import_id, imei: r.imei, imeiNorm: r.imei_norm,
+    os: r.os, osNorm: r.os_norm, brand: r.brand, model: r.model, entryDate: r.entry_date,
+    ageDays: r.age_days, cost: r.cost, rawDataJson: r.raw_data_json, createdAt: r.created_at,
+  };
 }

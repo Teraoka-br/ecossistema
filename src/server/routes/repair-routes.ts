@@ -1,9 +1,10 @@
 import { Router } from "express";
 import { z } from "zod";
 import {
-  listRepairCases, getRepairCaseWithParts, createRepairCase, updateRepairCase,
-  completeAnalysis, closeRepairCase, addPart, updatePart, cancelPart,
+  listRepairCases, searchRepairCases, getRepairCaseWithParts, createRepairCase, updateRepairCase,
+  saveAnalysis, completeAnalysis, closeRepairCase, addPart, updatePart, cancelPart,
   setManualPriority, removeManualPriority, getPrioritiesByCase,
+  searchChavePeca,
   RepairError,
 } from "../../repair/repair-service.js";
 import { getDb } from "../../db/database.js";
@@ -14,7 +15,14 @@ export const repairRouter = Router();
 
 function handleRepairError(err: unknown, res: import("express").Response): boolean {
   if (err instanceof RepairError) {
-    const statusMap: Record<string, number> = { NOT_FOUND: 404, DUPLICATE_ACTIVE_IMEI: 409, ALREADY_CLOSED: 409, ALREADY_PRIORITY: 409, NO_PRIORITY: 409, ALREADY_COMPLETED: 409 };
+    const statusMap: Record<string, number> = {
+      NOT_FOUND: 404,
+      DUPLICATE_ACTIVE_IMEI: 409, DUPLICATE_CASE: 409,
+      ALREADY_CLOSED: 409, ALREADY_PRIORITY: 409, NO_PRIORITY: 409, ALREADY_COMPLETED: 409,
+      MISSING_IMEI: 422, MISSING_OS: 422, MISSING_MODEL: 422,
+      MISSING_AGE: 422, MISSING_COST: 422, MISSING_SALE: 422, MISSING_REPAIR_DATE: 422,
+      NO_PARTS: 422, PART_CANCELLED: 409,
+    };
     res.status(statusMap[err.code] ?? 422).json({ error: err.message, code: err.code });
     return true;
   }
@@ -34,6 +42,26 @@ repairRouter.get("/repair-cases", requireAuth, (req, res) => {
   res.json(result);
 });
 
+repairRouter.get("/repair-cases/chave-peca-search", requireAuth, (req, res) => {
+  const q = (req.query.q as string | undefined) ?? "";
+  if (q.trim().length < 1) { res.json({ suggestions: [] }); return; }
+  const limit = Math.min(Number(req.query.limit ?? 15), 30);
+  const suggestions = searchChavePeca(getDb(), q, limit);
+  res.json({ suggestions });
+});
+
+repairRouter.get("/repair-cases/search", requireAuth, (req, res) => {
+  const imei = req.query.imei as string | undefined;
+  const os = req.query.os as string | undefined;
+  const repairDate = req.query.repairDate as string | undefined;
+  if (!imei && !os && !repairDate) {
+    res.status(400).json({ error: "Informe ao menos um critério: imei, os ou repairDate." });
+    return;
+  }
+  const result = searchRepairCases(getDb(), { imei, os, repairDate, limit: 20 });
+  res.json(result);
+});
+
 repairRouter.get("/repair-cases/:id", requireAuth, (req, res) => {
   const rc = getRepairCaseWithParts(getDb(), Number(req.params.id));
   if (!rc) { res.status(404).json({ error: "Caso não encontrado." }); return; }
@@ -46,11 +74,43 @@ const CaseSchema = z.object({
   brand: z.string().nullish(),
   model: z.string().nullish(),
   entryDate: z.string().nullish(),
+  repairDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
   ageDays: z.number().int().nonnegative().nullish(),
   cost: z.number().nonnegative().nullish(),
   estimatedSale: z.number().nonnegative().nullish(),
   notes: z.string().nullish(),
   assignedTechnicianId: z.number().int().positive().nullish(),
+});
+
+const SaveAnalysisSchema = CaseSchema.extend({
+  caseId: z.number().int().positive().nullish(),
+  parts: z.array(z.object({
+    id: z.number().int().positive().nullish(),
+    description: z.string().nullish(),
+    chavePeca: z.string().nullish(),
+    status: z.enum(["PEDIR_PECA","AGUARDANDO_RECEBIMENTO","INDICADA","RESERVADA","SEPARADA","CANCELADA","VERIFICAR"]).optional(),
+    cancel: z.boolean().optional(),
+  })).default([]),
+  finalize: z.boolean().optional(),
+});
+
+repairRouter.post("/repair-cases/save-analysis", requireAuth, (req, res, next) => {
+  try {
+    const body = SaveAnalysisSchema.parse(req.body);
+    const result = saveAnalysis(getDb(), { ...body as any, userId: req.sessionUser!.id });
+    logAudit(getDb(), {
+      userId: req.sessionUser!.id,
+      action: body.caseId ? "REPAIR_CASE_UPDATED" : "REPAIR_CASE_CREATED",
+      entityType: "REPAIR_CASE",
+      entityId: String(result.repairCase.id),
+      meta: { partsCount: body.parts.length, finalize: body.finalize ?? false },
+    });
+    res.status(body.caseId ? 200 : 201).json(result);
+  } catch (err) {
+    if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos.", details: err.issues }); return; }
+    if (handleRepairError(err, res)) return;
+    next(err);
+  }
 });
 
 repairRouter.post("/repair-cases", requireAuth, (req, res, next) => {

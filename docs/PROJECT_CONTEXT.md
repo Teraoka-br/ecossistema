@@ -1,7 +1,7 @@
 # Contexto do projeto — Sistema de Peças (Outlet do Celular)
 
-> Atualizado em: 2026-07-02, após implementar autenticação, domínio de reparo operacional,
-> intake do Datasys e novo shell visual (migrations 010–011).
+> Atualizado em: 2026-07-02, após concluir macrofase 1 (migration 012, identidade temporal
+> de repair_cases, segurança datasys, auth melhorada, autocomplete CHAVEPECA, 373 testes).
 > Mantenha este documento enxuto — veja "Regras de manutenção" no final antes de editar.
 
 ## 1. Projeto
@@ -174,6 +174,10 @@ de separação a partir de runs de match, confirmar ou cancelar por peça/aparel
   `POST /api/separation-batches/:id/{confirm-all,cancel}`,
   `POST /api/separation-batches/:id/devices/:deviceId/{confirm,cancel}`,
   `POST /api/separation-batches/:id/items/:itemId/{confirm,cancel}`.
+- `GET /api/repair-cases/chave-peca-search?q=&limit=` — autocomplete CHAVEPECA (union de `part_requests` + `source_order_parts`, com `stockAvailable` do último snapshot OFFICIAL).
+- `GET /api/repair-cases/search?imei=&os=&repairDate=` — busca por caso (IMEI/OS/data).
+- `POST /api/repair-cases/save-analysis` — criar/atualizar caso + peças em transação única.
+- `DELETE /api/datasys/import/:id` — cancelar preview datasys.
 - Códigos HTTP: 400 entrada inválida, 404 recurso inexistente, 409 conflito de estado/
   idempotência, 422 regra operacional bloqueando.
 
@@ -352,19 +356,8 @@ cobertura mínima via `config.countMinCompletenessRatio` (env `COUNT_MIN_COMPLET
   funciona em itens `PARTIAL`; `confirmFullDevice` confirma todos os itens `RESERVED` de um
   aparelho; `cancelBatch` sobre lote `COMPLETED` ou `CANCELLED` é idempotente (no-op).
   Estorno não implementado nesta fase.
-- **Auth, staff, repair domain e Datasys** (migrations 010–011): autenticação com PIN (scryptSync,
-  timing-safe), sessões HttpOnly/SameSite=Lax, roles ADMIN/OPERATOR, setup do primeiro usuário,
-  middleware protegendo todas as rotas exceto `/api/auth/{setup-status,setup,login}` e `/api/health`;
-  técnicos (CRUD, activate/deactivate); log de auditoria silencioso (nunca quebra fluxo principal);
-  `repair_cases` (um por aparelho), `part_requests` (uma por peça), prioridade manual com histórico;
-  intake Datasys via `RELATORIO.xlsx` (preview/confirm, idempotência SHA-256); tela `/analise`
-  (busca por IMEI/OS, formulário de aparelho + peças, salvar/finalizar); admin pages
-  (`/admin/usuarios`, `/admin/tecnicos`, `/admin/datasys`); novo shell dark mode industrial
-  com sidebar Operação/Suprimentos/Administração; script `migrate:repair-domain` idempotente
-  (legado `source_order_parts` → `repair_cases` + `part_requests`).
-  45 novos testes (auth=10, repair-domain=9, datasys=8, staff=6, server-config atualizado=1).
-  `SERVER_HOST` agora padrão `0.0.0.0` (autenticação implantada).
-- Tudo testado: **295 testes** (ver §8), incluindo a separação completa (57) e os módulos de auth/repair/datasys (33).
+- **Auth, staff, repair domain, Datasys e macrofase 1 completa** (migrations 010–012): autenticação PIN scryptSync, sessões cookie HttpOnly, roles ADMIN/OPERATOR, proteção do último admin, rate-limit de login (10/15 min); técnicos CRUD; log de auditoria silencioso; `repair_cases`/`part_requests`/prioridades; identidade temporal (`repair_date`, `repair_date_source`, `legacy_case_key`, migration 012, índice único parcial); intake Datasys seguro (staged_file_path server-side, validação path traversal, cancelamento via `cancelled_at`, sem filePath do cliente); `GET /api/repair-cases/chave-peca-search?q=` (autocomplete CHAVEPECA com estoque); `GET /api/repair-cases/search`, `POST /api/repair-cases/save-analysis` (transacional); sidebar sem item duplicado `/match`; script `migrate:repair-domain` idempotente aplicado ao DB operacional (1108 casos criados, 1387 peças, identidade IMEI+OS+data, nunca RESERVADA). `SERVER_HOST` padrão `0.0.0.0`.
+- Tudo testado: **373 testes** (ver §8), incluindo separação (57), auth (15+5 rate-limit), repair-domain (42+5 chavepeca), datasys (12+8 staged), migration-domain (28).
 
 ## 7. Dados reais validados
 
@@ -413,14 +406,18 @@ reimportação.
 
 ## 8. Testes
 
-- **295 testes** (Vitest), todos passando, em 21 arquivos: `domain.test.ts` (11),
+- **373 testes** (Vitest), todos passando, em 25 arquivos: `domain.test.ts` (11),
   `import-mapping.test.ts` (12), `import-service.test.ts` (8), `fatal-issues.test.ts` (8),
   `migration-guard.test.ts` (2), `staged-detection.test.ts` (7), `server-config.test.ts` (1),
   `audit-real.test.ts` (1), `counting-service.test.ts` (38), `counting-integration.test.ts` (1),
   `system-initialization.test.ts` (7), `procurement.test.ts` (17), `counting-baseline.test.ts`
   (6), `match-engine.test.ts` (29), `match-service.test.ts` (20), `match-integration.test.ts`
-  (25), `separation.test.ts` (57), `auth.test.ts` (10), `repair-domain.test.ts` (9),
-  `datasys.test.ts` (8+4=12), `staff.test.ts` (6) — mais `helpers.ts`/`global-setup.ts`.
+  (25), `separation.test.ts` (57), `auth.test.ts` (10), `staff.test.ts` (6),
+  `repair-domain.test.ts` (42 incl. searchChavePeca+saveAnalysis+searchRepairCases),
+  `repair-domain-migration.test.ts` (28: mapLegacyPartStatus+deriveWorkflow+groupRows+schema),
+  `datasys.test.ts` (12), `datasys-staged.test.ts` (8),
+  `auth-ratelimit.test.ts` (9: last-admin+rate-limit)
+  — mais `helpers.ts`/`global-setup.ts`.
 - `npm run typecheck` — 3 projetos: `tsconfig.server.json` (cobre `src/counting`, `src/match`,
   `src/separation`), `tsconfig.client.json`, `tsconfig.scripts.json` — sem erros.
 - `npm run build` (`tsc` + `vite build`) — sem erros.
@@ -493,14 +490,14 @@ reimportação.
 
 ## 10. Pendências
 
-**Bloqueadores:** nenhum conhecido. 295 testes + typecheck + build limpos.
+**Bloqueadores:** nenhum conhecido. 373 testes + typecheck + build limpos.
 
 **Últimas mudanças relevantes (mais recentes primeiro, máx. 5):**
-1. **Auth, staff, repair domain, Datasys intake e shell visual** (migrations 010–011, `src/auth/`, `src/audit/`, `src/staff/`, `src/repair/`, `src/datasys/`): autenticação com PIN scryptSync, sessões cookie HttpOnly/SameSite=Lax, roles ADMIN/OPERATOR, middleware global; técnicos CRUD; auditoria silenciosa; `repair_cases`/`part_requests`/prioridades manuais; intake `RELATORIO.xlsx`; tela `/analise`, admin pages; shell dark mode; `SERVER_HOST` agora `0.0.0.0` (auth ativa). 45 novos testes.
-2. **Separação operacional** (migration 009, `src/separation/`, API `/api/separation-batches/*`, tela `/separacao`): reserva lógica, confirmação com `REPAIR_CONSUMPTION`+`PART_SEPARATED`, cancelamento sem movimento, stale-check. 57 novos testes.
-3. **Motor de match** (migration 007, `src/match/`, API `/api/match-runs/*`, tela `/match`): algoritmo puro em 2 passagens, fingerprint SHA-256. 74 testes.
-4. **Estoque operacional + pedidos de compra + recebimento** (migration 006): base oficial + movimentações posteriores, recebimento transacional idempotente.
-5. **Bipagem operacional completa** (migration 004): sessão, scans, finalização transacional, snapshot oficial.
+1. **Macrofase 1 concluída** (migration 012): identidade temporal `repair_date`+`repair_date_source`+`legacy_case_key` em `repair_cases`; índice único parcial por `(legacy_import_batch_id, legacy_case_key)`; `staged_file_path`+`cancelled_at` em `datasys_imports`; proteção último admin; rate-limit login; autocomplete `GET /api/repair-cases/chave-peca-search`; save-analysis transacional; `migrate:repair-domain` aplicado ao DB operacional (1108 casos, 1387 peças). 78 novos testes.
+2. **Auth, staff, repair domain, Datasys intake e shell visual** (migrations 010–011): autenticação PIN scryptSync, sessões cookie, middleware global; técnicos CRUD; auditoria silenciosa; `repair_cases`/`part_requests`/prioridades; intake `RELATORIO.xlsx`; telas `/analise`, admin pages; shell dark mode. 45 testes.
+3. **Separação operacional** (migration 009): reserva lógica, confirmação com `REPAIR_CONSUMPTION`+`PART_SEPARATED`, cancelamento sem movimento, stale-check. 57 testes.
+4. **Motor de match** (migration 007): algoritmo puro em 2 passagens, fingerprint SHA-256. 74 testes.
+5. **Estoque operacional + pedidos de compra + recebimento** (migration 006): base oficial + movimentações posteriores, recebimento transacional idempotente.
 
 **Melhorias futuras (fora do escopo das tarefas já concluídas):**
 - `confirm()` (importação) re-lê os arquivos copiados no diretório do lote; se o servidor
@@ -524,8 +521,7 @@ Com auth, repair domain e Datasys implementados, as próximas fases possíveis s
 - **Estorno de separação** — desfazer uma confirmação já realizada, criando `stock_movements`
   de crédito e revertendo status de `CONFIRMED`.
 - **Tela /reparo** — visualização e gestão de `repair_cases` com partes, status e prioridade.
-- **Execução do `migrate:repair-domain`** sobre `data/app.sqlite` quando o banco operacional
-  tiver sido inicializado (backup prévio + `--dry-run` primeiro).
+- ~~**Execução do `migrate:repair-domain`**~~ — concluída: 1108 casos + 1387 peças no DB operacional.
 Nenhuma dessas fases deve ser implementada sem solicitação explícita.
 
 ## 12. Comandos

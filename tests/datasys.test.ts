@@ -19,18 +19,18 @@ function makeDb(): Db {
   return db;
 }
 
-function makeFixture(rows: Record<string, unknown>[]): string {
+function makeFixture(rows: Record<string, unknown>[]): { filePath: string; uploadDir: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ds-test-"));
   const filePath = path.join(dir, "RELATORIO.xlsx");
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.json_to_sheet(rows);
   XLSX.utils.book_append_sheet(wb, ws, "RELATORIO");
   XLSX.writeFile(wb, filePath);
-  return filePath;
+  return { filePath, uploadDir: dir };
 }
 
-function cleanupFile(fp: string): void {
-  try { fs.rmSync(path.dirname(fp), { recursive: true, force: true }); } catch { /* noop */ }
+function cleanupDir(dir: string): void {
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ }
 }
 
 describe("datasys preview", () => {
@@ -38,30 +38,30 @@ describe("datasys preview", () => {
   beforeEach(() => { db = makeDb(); });
 
   it("retorna rowsFound e rowsValid corretamente", async () => {
-    const fp = makeFixture([
+    const { filePath, uploadDir } = makeFixture([
       { IMEI: "111111111111111", OS: "OS001", MARCA: "Samsung", MODELO: "A53", IDADE: 30, CUSTO: 200 },
-      { IMEI: "",               OS: "",      MARCA: "", MODELO: "", IDADE: "", CUSTO: "" }, // linha vazia
+      { IMEI: "",               OS: "",      MARCA: "", MODELO: "", IDADE: "", CUSTO: "" },
     ]);
     try {
-      const result = await previewDatasysImport(db, { filePath: fp, filename: "RELATORIO.xlsx", userId: null });
+      const result = await previewDatasysImport(db, { filePath, filename: "RELATORIO.xlsx", userId: null, uploadDir });
       expect(result.rowsFound).toBe(2);
       expect(result.rowsValid).toBe(1);
       expect(result.issues.some((i) => i.code === "EMPTY_KEY")).toBe(true);
     } finally {
-      cleanupFile(fp);
+      cleanupDir(uploadDir);
     }
   });
 
   it("detecta idempotência por hash", async () => {
-    const fp = makeFixture([{ IMEI: "222222222222222", OS: "OS002" }]);
+    const { filePath, uploadDir } = makeFixture([{ IMEI: "222222222222222", OS: "OS002" }]);
     try {
       // Marca o hash como COMPLETED manualmente para simular importação anterior
-      const hash = (await import("node:crypto")).default.createHash("sha256").update(fs.readFileSync(fp)).digest("hex");
+      const hash = (await import("node:crypto")).default.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
       db.prepare("INSERT INTO datasys_imports (filename, file_hash, status, rows_found) VALUES (?, ?, 'COMPLETED', 1)").run("old.xlsx", hash);
-      const result = await previewDatasysImport(db, { filePath: fp, filename: "RELATORIO.xlsx", userId: null });
+      const result = await previewDatasysImport(db, { filePath, filename: "RELATORIO.xlsx", userId: null, uploadDir });
       expect(result.alreadyImported).toBe(true);
     } finally {
-      cleanupFile(fp);
+      cleanupDir(uploadDir);
     }
   });
 });

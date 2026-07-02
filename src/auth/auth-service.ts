@@ -271,13 +271,15 @@ export function updateUser(
   const user = getUserById(db, userId);
   if (!user) throw new AuthError("NOT_FOUND", "Usuário não encontrado.");
 
-  // Impede desativar o último ADMIN ativo
-  if (params.active === false && user.role === "ADMIN") {
-    const activeAdmins = db
-      .prepare("SELECT COUNT(*) as c FROM users WHERE role = 'ADMIN' AND active = 1")
-      .get() as { c: number };
-    if (activeAdmins.c <= 1) {
-      throw new AuthError("LAST_ADMIN", "Não é possível desativar o último administrador ativo.");
+  // Impede desativar ou rebaixar o último ADMIN ativo
+  const isLastAdmin = (): boolean => {
+    const r = db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'ADMIN' AND active = 1").get() as { c: number };
+    return r.c <= 1;
+  };
+  if ((params.active === false || params.role === "OPERATOR") && user.role === "ADMIN") {
+    if (isLastAdmin()) {
+      const action = params.active === false ? "desativar" : "rebaixar";
+      throw new AuthError("LAST_ADMIN", `Não é possível ${action} o último administrador ativo.`);
     }
   }
 

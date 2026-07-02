@@ -14,6 +14,7 @@ import {
 import { getDb } from "../../db/database.js";
 import { requireAuth, SESSION_COOKIE } from "../middleware/auth-middleware.js";
 import { logAudit } from "../../audit/audit-service.js";
+import { rateLimitLogin, clearRateLimit } from "../middleware/rate-limit.js";
 
 export const authRouter = Router();
 
@@ -66,10 +67,11 @@ const LoginSchema = z.object({
   pin: z.string(),
 });
 
-authRouter.post("/login", async (req, res, next) => {
+authRouter.post("/login", rateLimitLogin, async (req, res, next) => {
   try {
     const body = LoginSchema.parse(req.body);
     const { token, user } = await login(getDb(), { username: body.username, pin: body.pin, ttlMs: COOKIE_MAX_AGE_MS });
+    clearRateLimit(req.ip ?? req.socket.remoteAddress ?? "unknown", body.username);
     setCookie(res, token);
     logAudit(getDb(), { userId: user.id, action: "LOGIN", entityType: "USER", entityId: String(user.id) });
     res.json({ user });

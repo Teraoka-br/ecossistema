@@ -1,8 +1,7 @@
-import fs from "node:fs";
 import { Router } from "express";
 import multer from "multer";
 import {
-  previewDatasysImport, confirmDatasysImport,
+  previewDatasysImport, confirmDatasysImport, cancelDatasysPreview,
   listDatasysImports, searchDatasysRecords, DatasysError,
 } from "../../datasys/datasys-service.js";
 import { getDb } from "../../db/database.js";
@@ -28,43 +27,26 @@ datasysRouter.post(
         filePath: req.file.path,
         filename: req.file.originalname,
         userId: req.sessionUser!.id,
+        uploadDir: config.uploadTmpDir,
       });
       res.json(result);
     } catch (err) {
-      cleanupFile(req.file?.path);
       if (err instanceof DatasysError) { res.status(422).json({ error: err.message, code: err.code }); return; }
       next(err);
     }
-    // Mantém o arquivo temporário até o confirm
   },
 );
 
 datasysRouter.post("/datasys/import/confirm", requireAuth, async (req, res, next) => {
-  const { importId } = req.body as { importId: number };
+  const { importId } = req.body as { importId?: number };
   if (!importId) { res.status(400).json({ error: "importId obrigatório." }); return; }
-
-  // Localiza o arquivo temporário do upload (por import_id/filename)
-  const imp = (getDb().prepare("SELECT filename FROM datasys_imports WHERE id = ?").get(importId) as { filename: string } | undefined);
-  if (!imp) { res.status(404).json({ error: "Importação não encontrada." }); return; }
-
-  // O arquivo foi salvo com o nome dado pelo multer — precisamos encontrá-lo
-  // A estratégia é: o preview deve ter retornado o importId após salvar;
-  // o arquivo temporário é referenciado via uma convenção simples: busca
-  // qualquer arquivo em uploadTmpDir que foi criado recentemente.
-  // Por simplicidade nesta fase, aceitamos o filePath no body (do preview).
-  const { filePath } = req.body as { importId: number; filePath: string };
-  if (!filePath || !fs.existsSync(filePath)) {
-    res.status(400).json({ error: "Caminho do arquivo não encontrado. Faça upload novamente." });
-    return;
-  }
 
   try {
     const result = await confirmDatasysImport(getDb(), {
       importId,
-      filePath,
       userId: req.sessionUser!.id,
+      uploadDir: config.uploadTmpDir,
     });
-    cleanupFile(filePath);
     logAudit(getDb(), {
       userId: req.sessionUser!.id,
       action: "DATASYS_IMPORT_CONFIRMED",
@@ -74,7 +56,32 @@ datasysRouter.post("/datasys/import/confirm", requireAuth, async (req, res, next
     });
     res.json({ ok: true, ...result });
   } catch (err) {
-    if (err instanceof DatasysError) { res.status(err.code === "NOT_FOUND" ? 404 : 409).json({ error: err.message, code: err.code }); return; }
+    if (err instanceof DatasysError) {
+      const status = err.code === "NOT_FOUND" ? 404 : err.code === "ALREADY_IMPORTED" ? 409 : 422;
+      res.status(status).json({ error: err.message, code: err.code });
+      return;
+    }
+    next(err);
+  }
+});
+
+datasysRouter.delete("/datasys/import/:id", requireAuth, (req, res, next) => {
+  const importId = Number(req.params.id);
+  try {
+    cancelDatasysPreview(getDb(), importId, req.sessionUser!.id);
+    logAudit(getDb(), {
+      userId: req.sessionUser!.id,
+      action: "DATASYS_IMPORT_CANCELLED",
+      entityType: "DATASYS_IMPORT",
+      entityId: String(importId),
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof DatasysError) {
+      const status = err.code === "NOT_FOUND" ? 404 : 409;
+      res.status(status).json({ error: err.message, code: err.code });
+      return;
+    }
     next(err);
   }
 });
@@ -90,9 +97,3 @@ datasysRouter.get("/datasys/search", requireAuth, (req, res) => {
   const records = searchDatasysRecords(getDb(), { imei, os });
   res.json({ records });
 });
-
-function cleanupFile(filePath: string | undefined): void {
-  if (filePath) {
-    try { fs.unlinkSync(filePath); } catch { /* ignore */ }
-  }
-}
