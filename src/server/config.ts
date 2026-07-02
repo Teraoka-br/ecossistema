@@ -9,11 +9,10 @@ function resolveFromRoot(p: string): string {
 
 export const config = {
   serverPort: Number(process.env.SERVER_PORT ?? 3001),
-  // Sem autenticação ainda e com leitura de Excel via biblioteca de terceiros
-  // (xlsx) processando uploads — não expor por padrão em 0.0.0.0. Beta local,
-  // somente arquivos confiáveis. Defina SERVER_HOST explicitamente para
-  // mudar (ex.: em um ambiente já protegido por outra camada).
-  serverHost: process.env.SERVER_HOST ?? "127.0.0.1",
+  // Escuta em todas as interfaces por padrão para permitir acesso pela rede local.
+  // Sem autenticação — use somente em redes locais confiáveis.
+  // Para restringir ao localhost: defina SERVER_HOST=127.0.0.1.
+  serverHost: process.env.SERVER_HOST ?? "0.0.0.0",
   databasePath:
     process.env.DATABASE_PATH === ":memory:"
       ? ":memory:"

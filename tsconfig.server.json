@@ -20,6 +20,11 @@
     "src/domain/**/*.ts",
     "src/shared/**/*.ts",
     "src/match/**/*.ts",
-    "src/separation/**/*.ts"
+    "src/separation/**/*.ts",
+    "src/auth/**/*.ts",
+    "src/audit/**/*.ts",
+    "src/staff/**/*.ts",
+    "src/repair/**/*.ts",
+    "src/datasys/**/*.ts"
   ]
 }
