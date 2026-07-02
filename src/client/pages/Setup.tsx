@@ -1,12 +1,21 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { UserPlus } from "lucide-react";
 import { useAuth } from "../auth.js";
 
 export function Setup() {
-  const { refetch } = useAuth();
+  const { refetch, setupDone } = useAuth();
+  const navigate = useNavigate();
   const [form, setForm] = useState({ username: "", displayName: "", pin: "", pin2: "" });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Se o contexto já sabe que há usuários, redireciona imediatamente.
+  useEffect(() => {
+    if (setupDone === true) {
+      navigate("/login", { replace: true });
+    }
+  }, [setupDone, navigate]);
 
   function set(field: string, value: string) {
     setForm((f) => ({ ...f, [field]: value }));
@@ -25,10 +34,16 @@ export function Setup() {
         body: JSON.stringify({ username: form.username, displayName: form.displayName, pin: form.pin }),
       });
       if (r.ok) {
+        // refetch atualiza user + setupDone no contexto → AppShell redireciona para /analise
         refetch();
       } else {
         const d = await r.json();
-        setError(d.error ?? "Erro ao criar usuário.");
+        if (d.code === "SETUP_ALREADY_DONE") {
+          // Usuários já existem — vai para login
+          navigate("/login", { replace: true });
+        } else {
+          setError(d.error ?? "Erro ao criar usuário.");
+        }
       }
     } catch {
       setError("Erro de conexão.");
@@ -36,6 +51,9 @@ export function Setup() {
       setLoading(false);
     }
   }
+
+  // Enquanto aguarda verificação ou redirect, não mostra o formulário
+  if (setupDone === true) return null;
 
   return (
     <div className="auth-page">

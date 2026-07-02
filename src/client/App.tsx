@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { useState } from "react";
+import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import {
   Wrench, List, PackageSearch, ShoppingCart, Boxes, ScanBarcode,
   Users, UserCog, Database, Puzzle, Sliders, Stethoscope,
@@ -60,37 +60,29 @@ const SIDEBAR_GROUPS: SidebarGroup[] = [
   },
 ];
 
-function AppShell() {
-  const { user, loading, refetch } = useAuth();
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [setupDone, setSetupDone] = useState<boolean | null>(null);
+function LoadingScreen() {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", color: "var(--muted)", fontSize: "0.9rem" }}>
+      Carregando…
+    </div>
+  );
+}
 
-  useEffect(() => {
-    fetch("/api/auth/setup-status")
-      .then((r) => r.json())
-      .then((d) => setSetupDone(d.setupDone))
-      .catch(() => setSetupDone(true));
-  }, []);
+function AuthenticatedShell() {
+  const { user, refetch } = useAuth();
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const navigate = useNavigate();
 
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     refetch();
+    navigate("/login", { replace: true });
   }
 
-  if (loading || setupDone === null) {
-    return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", color: "var(--muted)", fontSize: "0.9rem" }}>
-        Carregando…
-      </div>
-    );
-  }
-
-  if (!setupDone) return <Setup />;
-  if (!user) return <Login />;
+  if (!user) return null;
 
   return (
     <div className="app-shell">
-      {/* Topbar */}
       <header className="topbar">
         <button className="topbar-btn" onClick={() => setSidebarOpen((v) => !v)} title="Recolher menu">
           {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
@@ -107,7 +99,6 @@ function AppShell() {
       </header>
 
       <div className={`layout ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
-        {/* Sidebar */}
         <nav className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
           {SIDEBAR_GROUPS.map((group) => (
             <div key={group.label} className="sidebar-section">
@@ -126,7 +117,6 @@ function AppShell() {
           ))}
         </nav>
 
-        {/* Conteúdo */}
         <main className="main-content">
           <Routes>
             <Route path="/" element={<Navigate to="/analise" replace />} />
@@ -149,6 +139,44 @@ function AppShell() {
         </main>
       </div>
     </div>
+  );
+}
+
+function AppShell() {
+  const { user, loading, setupDone } = useAuth();
+
+  if (loading || setupDone === null) return <LoadingScreen />;
+
+  return (
+    <Routes>
+      {/* /setup: mostra setup somente quando não há usuários; caso contrário redireciona */}
+      <Route
+        path="/setup"
+        element={!setupDone ? <Setup /> : <Navigate to="/login" replace />}
+      />
+      {/* /login: mostra login quando há usuários e não há sessão; caso contrário redireciona */}
+      <Route
+        path="/login"
+        element={
+          !setupDone
+            ? <Navigate to="/setup" replace />
+            : user
+              ? <Navigate to="/analise" replace />
+              : <Login />
+        }
+      />
+      {/* Todas as demais rotas requerem sessão válida */}
+      <Route
+        path="/*"
+        element={
+          !setupDone
+            ? <Navigate to="/setup" replace />
+            : !user
+              ? <Navigate to="/login" replace />
+              : <AuthenticatedShell />
+        }
+      />
+    </Routes>
   );
 }
 
