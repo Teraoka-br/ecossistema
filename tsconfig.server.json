@@ -25,6 +25,7 @@
     "src/audit/**/*.ts",
     "src/staff/**/*.ts",
     "src/repair/**/*.ts",
-    "src/datasys/**/*.ts"
+    "src/datasys/**/*.ts",
+    "src/import-central/**/*.ts"
   ]
 }

@@ -65,7 +65,7 @@ datasysRouter.post("/datasys/import/confirm", requireAuth, requireAdmin, async (
   }
 });
 
-datasysRouter.delete("/datasys/import/:id", requireAuth, (req, res, next) => {
+datasysRouter.delete("/datasys/import/:id", requireAuth, requireAdmin, (req, res, next) => {
   const importId = Number(req.params.id);
   try {
     cancelDatasysPreview(getDb(), importId, req.sessionUser!.id);

@@ -14,6 +14,7 @@ import { staffRouter } from "./routes/staff-routes.js";
 import { repairRouter } from "./routes/repair-routes.js";
 import { datasysRouter } from "./routes/datasys-routes.js";
 import { repairQueueRouter } from "./routes/repair-queue-routes.js";
+import { importCentralRouter } from "./routes/import-central-routes.js";
 import { requireAuth } from "./middleware/auth-middleware.js";
 import { getDb } from "../db/database.js";
 
@@ -61,6 +62,7 @@ export function createApp(): Express {
   app.use("/api", repairRouter);         // idem
   app.use("/api", datasysRouter);        // idem
   app.use("/api", repairQueueRouter);   // fila, reservas, motor, regras
+  app.use("/api/import-central", importCentralRouter);  // central de dados
 
   // Em produção, serve o frontend compilado e faz fallback de SPA.
   if (fs.existsSync(config.clientDist)) {
