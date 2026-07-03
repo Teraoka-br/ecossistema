@@ -148,9 +148,9 @@ export function reserveKit(
       created.push(toReservation(row));
     }
 
-    // Update repair_case to EM_SEPARACAO
+    // Update repair_case to APTO_REPARO (todas as peças reservadas via motor)
     db.prepare(
-      "UPDATE repair_cases SET workflow_status = 'EM_SEPARACAO', updated_at = datetime('now'), updated_by_user_id = ? WHERE id = ?"
+      "UPDATE repair_cases SET workflow_status = 'APTO_REPARO', updated_at = datetime('now'), updated_by_user_id = ? WHERE id = ?"
     ).run(userId ?? null, repairCaseId);
 
     db.exec("COMMIT");
@@ -263,7 +263,7 @@ export function releaseReservation(
 
     if (remaining === 0) {
       db.prepare(
-        "UPDATE repair_cases SET workflow_status = 'MATCH_PARCIAL', updated_at = datetime('now') WHERE id = ? AND workflow_status IN ('EM_SEPARACAO','MATCH')"
+        "UPDATE repair_cases SET workflow_status = 'MATCH_PARCIAL', updated_at = datetime('now') WHERE id = ? AND workflow_status IN ('EM_SEPARACAO','APTO_REPARO','MATCH')"
       ).run(repairCaseId);
     }
 
@@ -324,7 +324,7 @@ export function consumeReservation(
   }
 }
 
-/** Direct all active reservations to technician — transitions repair_case to DIRECIONADO_TECNICO */
+/** Direciona caso para técnico — exige APTO_REPARO com todas as peças reservadas. */
 export function directToTechnician(
   db: Db,
   repairCaseId: number,
@@ -332,6 +332,10 @@ export function directToTechnician(
 ): void {
   const rc = db.prepare("SELECT * FROM repair_cases WHERE id = ?").get(repairCaseId) as Record<string, unknown> | undefined;
   if (!rc) throw new ReservationError("NOT_FOUND", "Caso não encontrado.");
+
+  if (rc.workflow_status !== "APTO_REPARO") {
+    throw new ReservationError("INVALID_STATUS", `Caso deve estar em APTO_REPARO para direcionar ao técnico (atual: ${rc.workflow_status}).`);
+  }
 
   const activeParts = (db.prepare(
     "SELECT COUNT(*) AS c FROM part_requests WHERE repair_case_id = ? AND status NOT IN ('CANCELADA') AND cancelled_at IS NULL"
@@ -341,7 +345,7 @@ export function directToTechnician(
     "SELECT COUNT(*) AS c FROM operational_reservations WHERE repair_case_id = ? AND status = 'ACTIVE'"
   ).get(repairCaseId) as { c: number }).c;
 
-  if (reservedParts < activeParts) {
+  if (activeParts > 0 && reservedParts < activeParts) {
     throw new ReservationError("PARTS_NOT_RESERVED", `Ainda há peças não reservadas (${activeParts - reservedParts} pendentes).`);
   }
 

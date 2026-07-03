@@ -157,7 +157,7 @@ export async function runRepairMatchEngine(
 }
 
 // ---------------------------------------------------------------------------
-// Core two-pass matching algorithm
+// Core two-pass matching algorithm (REF-based, atomic commit)
 // ---------------------------------------------------------------------------
 
 interface CaseRow {
@@ -178,6 +178,92 @@ interface PartRow {
   cancelled_at: string | null;
 }
 
+/** Estoque disponível indexado por chave_peca_norm → referencia_norm → qty */
+type RefStock = Map<string, Map<string, { ref: string; qty: number }>>;
+
+/** Resultado de alocação in-memory (antes do commit). */
+interface AllocResult {
+  partRequestId: number;
+  caseId: number;
+  chave: string;
+  chaveNorm: string;
+  refAllocated: string | null;
+  refAllocatedNorm: string | null;
+  resultStatus: "MATCH" | "MATCH_PARCIAL" | "PEDIR_PECA" | "VERIFICAR";
+  marginPoints: number;
+  agePoints: number;
+  score: number;
+  rank: number;
+}
+
+interface CaseDecision {
+  caseId: number;
+  prevStatus: string;
+  newStatus: string;
+  parts: AllocResult[];
+}
+
+function buildRefStock(db: Db): RefStock {
+  const { groups } = getCurrentOperationalStock(db);
+  const refStock: RefStock = new Map();
+
+  // stock_movements agrupados por (chave_peca_norm, referencia_norm) para estoque disponível por REF
+  const rows = db.prepare(`
+    SELECT sm.chave_peca_norm, sm.referencia, sm.referencia_norm,
+           SUM(sm.quantity) AS physical,
+           COALESCE((
+             SELECT SUM(op.quantity)
+             FROM operational_reservations op
+             WHERE op.chave_peca_norm = sm.chave_peca_norm
+               AND op.reference_norm  = sm.referencia_norm
+               AND op.status = 'ACTIVE'
+           ), 0) AS reserved
+    FROM stock_movements sm
+    WHERE sm.chave_peca_norm IS NOT NULL AND sm.chave_peca_norm != ''
+      AND sm.referencia_norm IS NOT NULL AND sm.referencia_norm != ''
+      AND sm.reversed_at IS NULL
+    GROUP BY sm.chave_peca_norm, sm.referencia_norm
+    HAVING (physical - reserved) > 0
+  `).all() as { chave_peca_norm: string; referencia: string; referencia_norm: string; physical: number; reserved: number }[];
+
+  for (const r of rows) {
+    const avail = r.physical - r.reserved;
+    if (avail <= 0) continue;
+    let inner = refStock.get(r.chave_peca_norm);
+    if (!inner) { inner = new Map(); refStock.set(r.chave_peca_norm, inner); }
+    inner.set(r.referencia_norm, { ref: r.referencia, qty: avail });
+  }
+
+  // Fallback: peças no estoque operacional SEM referência preenchida
+  // Agrupadas por chave com referência vazia — entram como ref="" para casos sem REF
+  for (const g of groups) {
+    if (!g.chavePecaNorm || g.availableQuantity <= 0) continue;
+    if (!refStock.has(g.chavePecaNorm)) {
+      // Sem REF mapeada — registra com chave vazia para indicar VERIFICAR
+      refStock.set(g.chavePecaNorm, new Map([["", { ref: "", qty: g.availableQuantity }]]));
+    }
+  }
+
+  return refStock;
+}
+
+/** Tenta alocar 1 unidade de uma chave (qualquer REF disponível). Muta workingStock. */
+function allocateOne(
+  workingStock: RefStock,
+  chaveNorm: string,
+): { ref: string; refNorm: string } | null {
+  const inner = workingStock.get(chaveNorm);
+  if (!inner) return null;
+  for (const [refNorm, entry] of inner) {
+    if (entry.qty >= 1) {
+      entry.qty--;
+      if (entry.qty === 0) inner.delete(refNorm);
+      return { ref: entry.ref, refNorm };
+    }
+  }
+  return null;
+}
+
 function executeEngine(
   db: Db,
   runId: number,
@@ -188,7 +274,8 @@ function executeEngine(
     SELECT id, workflow_status, analysis_status, age_days, margin, manual_priority_active
     FROM repair_cases
     WHERE analysis_status = 'COMPLETED'
-      AND workflow_status NOT IN ('CONCLUIDO','VENDA_ESTADO','CANCELADO','DIRECIONADO_TECNICO','EM_REPARO','REPARO_EXECUTADO','TRIAGEM_FINAL','RETORNO_TECNICO')
+      AND workflow_status NOT IN ('CONCLUIDO','VENDA_ESTADO','CANCELADO',
+        'DIRECIONADO_TECNICO','EM_REPARO','REPARO_EXECUTADO','TRIAGEM_FINAL','RETORNO_TECNICO')
     ORDER BY id
   `).all() as unknown as CaseRow[];
 
@@ -196,7 +283,6 @@ function executeEngine(
     return { casesEvaluated: 0, fullKitsFound: 0, partialKitsFound: 0, casesChanged: 0 };
   }
 
-  // Load all active part_requests for these cases
   const caseIds = cases.map(c => c.id);
   const placeholders = caseIds.map(() => "?").join(",");
   const parts = db.prepare(`
@@ -207,7 +293,6 @@ function executeEngine(
       AND status NOT IN ('CANCELADA','SEPARADA','CONSUMIDA')
   `).all(...caseIds) as unknown as PartRow[];
 
-  // Group parts by case
   const partsByCase = new Map<number, PartRow[]>();
   for (const p of parts) {
     const arr = partsByCase.get(p.repair_case_id) ?? [];
@@ -215,24 +300,15 @@ function executeEngine(
     partsByCase.set(p.repair_case_id, arr);
   }
 
-  // Get current stock (available = physical - reserved)
-  const { groups: stockGroups } = getCurrentOperationalStock(db);
-  const availableStock = new Map<string, number>();
-  for (const g of stockGroups) {
-    if (g.chavePecaNorm) {
-      const prev = availableStock.get(g.chavePecaNorm) ?? 0;
-      availableStock.set(g.chavePecaNorm, prev + g.availableQuantity);
-    }
-  }
+  // Build REF-aware stock (mutable during simulation)
+  const workingStock = buildRefStock(db);
 
-  // Score each case
   interface ScoredCase {
     caseRow: CaseRow;
     caseParts: PartRow[];
     score: number;
     margin: number | null;
     openParts: number;
-    needsChaves: string[];
     isManualPriority: boolean;
   }
 
@@ -240,24 +316,14 @@ function executeEngine(
   for (const c of cases) {
     const caseParts = partsByCase.get(c.id) ?? [];
     if (caseParts.length === 0) continue;
-
     const { score } = computeScore(ruleSet, c.age_days, c.margin);
-    const needsChaves = caseParts
-      .filter(p => p.chave_peca_norm)
-      .map(p => p.chave_peca_norm!);
-
     scoredCases.push({
-      caseRow: c,
-      caseParts,
-      score,
-      margin: c.margin,
+      caseRow: c, caseParts, score, margin: c.margin,
       openParts: caseParts.length,
-      needsChaves,
       isManualPriority: c.manual_priority_active === 1,
     });
   }
 
-  // Sort: manual priority first → fewer open parts → higher score → higher margin → lower id
   scoredCases.sort((a, b) => {
     if (a.isManualPriority !== b.isManualPriority) return a.isManualPriority ? -1 : 1;
     if (a.openParts !== b.openParts) return a.openParts - b.openParts;
@@ -266,128 +332,167 @@ function executeEngine(
     return a.caseRow.id - b.caseRow.id;
   });
 
-  // Working stock (mutable during simulation)
-  const workingStock = new Map(availableStock);
-
+  // ── In-memory simulation ────────────────────────────────────────────────
+  const decisions: CaseDecision[] = [];
+  const fullKitCaseIds = new Set<number>();
   let fullKitsFound = 0;
   let partialKitsFound = 0;
   let casesChanged = 0;
 
-  const deleteStmt = db.prepare("DELETE FROM repair_match_results WHERE run_id = ?");
-  deleteStmt.run(runId);
-
-  // Pass 1 — full kits
+  // Pass 1 — full kits (only cases where ALL chave_peca_norm parts have stock WITH REF)
   for (const sc of scoredCases) {
-    const neededNorms = sc.needsChaves;
-    if (neededNorms.length === 0) continue;
+    const neededParts = sc.caseParts.filter(p => p.chave_peca_norm);
+    if (neededParts.length === 0) continue;
 
-    const allAvailable = neededNorms.every(n => (workingStock.get(n) ?? 0) >= 1);
-    if (!allAvailable) continue;
+    // Check all needed — peek without consuming
+    const canAllocate = neededParts.every(p => {
+      const inner = workingStock.get(p.chave_peca_norm!);
+      if (!inner) return false;
+      // Must have at least 1 unit with a non-empty REF
+      for (const [refNorm, e] of inner) {
+        if (refNorm !== "" && e.qty >= 1) return true;
+      }
+      return false;
+    });
+    if (!canAllocate) continue;
 
-    // Allocate
-    for (const n of neededNorms) {
-      workingStock.set(n, (workingStock.get(n) ?? 0) - 1);
-    }
-
-    // Write results
     const { marginPoints, agePoints, score } = computeScore(ruleSet, sc.caseRow.age_days, sc.margin);
+    const allocations: AllocResult[] = [];
     let rank = 1;
+
     for (const p of sc.caseParts) {
       if (!p.chave_peca_norm) continue;
-      db.prepare(`
-        INSERT OR REPLACE INTO repair_match_results
-          (run_id, repair_case_id, part_request_id, chave_peca, chave_peca_norm,
-           result_status, margin_points, age_points, score, priority_rank)
-        VALUES (?,?,?,?,?,'MATCH',?,?,?,?)
-      `).run(runId, sc.caseRow.id, p.id, p.chave_peca ?? null, p.chave_peca_norm, marginPoints, agePoints, score, rank++);
-    }
-
-    const prevStatus = sc.caseRow.workflow_status;
-    if (prevStatus !== "MATCH" && prevStatus !== "EM_SEPARACAO" && prevStatus !== "APTO_REPARO") {
-      db.prepare(
-        "UPDATE repair_cases SET workflow_status = 'MATCH', updated_at = datetime('now') WHERE id = ?"
-      ).run(sc.caseRow.id);
-      casesChanged++;
-    }
-
-    // Update part_requests to INDICADA
-    for (const p of sc.caseParts) {
-      if (p.status === "PEDIR_PECA" || p.status === "VERIFICAR") {
-        db.prepare("UPDATE part_requests SET status = 'INDICADA', updated_at = datetime('now') WHERE id = ?").run(p.id);
+      const alloc = allocateOne(workingStock, p.chave_peca_norm);
+      if (!alloc || alloc.refNorm === "") {
+        // Shouldn't happen after canAllocate check, but be safe
+        allocations.push({
+          partRequestId: p.id, caseId: sc.caseRow.id,
+          chave: p.chave_peca ?? p.chave_peca_norm, chaveNorm: p.chave_peca_norm,
+          refAllocated: null, refAllocatedNorm: null,
+          resultStatus: "VERIFICAR", marginPoints, agePoints, score, rank: rank++,
+        });
+        continue;
       }
+      allocations.push({
+        partRequestId: p.id, caseId: sc.caseRow.id,
+        chave: p.chave_peca ?? p.chave_peca_norm, chaveNorm: p.chave_peca_norm,
+        refAllocated: alloc.ref || alloc.refNorm, refAllocatedNorm: alloc.refNorm,
+        resultStatus: "MATCH", marginPoints, agePoints, score, rank: rank++,
+      });
     }
 
+    const allMatch = allocations.every(a => a.resultStatus === "MATCH");
+    if (!allMatch) continue; // safety: revert and skip
+
+    decisions.push({ caseId: sc.caseRow.id, prevStatus: sc.caseRow.workflow_status, newStatus: "MATCH", parts: allocations });
+    fullKitCaseIds.add(sc.caseRow.id);
     fullKitsFound++;
   }
 
-  // Pass 2 — partial kits (with remaining stock)
+  // Pass 2 — partial kits
   for (const sc of scoredCases) {
-    // Skip cases already handled in pass 1
-    const currentStatus = (db.prepare("SELECT workflow_status FROM repair_cases WHERE id = ?").get(sc.caseRow.id) as { workflow_status: string }).workflow_status;
-    if (currentStatus === "MATCH" || currentStatus === "EM_SEPARACAO" || currentStatus === "APTO_REPARO") continue;
+    if (fullKitCaseIds.has(sc.caseRow.id)) continue;
 
     const { marginPoints, agePoints, score } = computeScore(ruleSet, sc.caseRow.age_days, sc.margin);
+    const allocations: AllocResult[] = [];
     let hasPartial = false;
     let hasAll = true;
     let rank = 1;
 
     for (const p of sc.caseParts) {
       if (!p.chave_peca_norm) {
-        db.prepare(`
-          INSERT OR REPLACE INTO repair_match_results
-            (run_id, repair_case_id, part_request_id, chave_peca, chave_peca_norm,
-             result_status, margin_points, age_points, score, priority_rank)
-          VALUES (?,?,?,?,?,'VERIFICAR',?,?,?,?)
-        `).run(runId, sc.caseRow.id, p.id, p.chave_peca ?? null, null, marginPoints, agePoints, score, rank++);
+        allocations.push({
+          partRequestId: p.id, caseId: sc.caseRow.id,
+          chave: p.chave_peca ?? "", chaveNorm: "",
+          refAllocated: null, refAllocatedNorm: null,
+          resultStatus: "VERIFICAR", marginPoints, agePoints, score, rank: rank++,
+        });
         hasAll = false;
         continue;
       }
-
-      const avail = workingStock.get(p.chave_peca_norm) ?? 0;
-      if (avail >= 1) {
-        workingStock.set(p.chave_peca_norm, avail - 1);
-        db.prepare(`
-          INSERT OR REPLACE INTO repair_match_results
-            (run_id, repair_case_id, part_request_id, chave_peca, chave_peca_norm,
-             result_status, allocated_units, margin_points, age_points, score, priority_rank)
-          VALUES (?,?,?,?,?,'MATCH_PARCIAL',1,?,?,?,?)
-        `).run(runId, sc.caseRow.id, p.id, p.chave_peca ?? null, p.chave_peca_norm, marginPoints, agePoints, score, rank++);
+      const alloc = allocateOne(workingStock, p.chave_peca_norm);
+      if (alloc && alloc.refNorm !== "") {
+        allocations.push({
+          partRequestId: p.id, caseId: sc.caseRow.id,
+          chave: p.chave_peca ?? p.chave_peca_norm, chaveNorm: p.chave_peca_norm,
+          refAllocated: alloc.ref || alloc.refNorm, refAllocatedNorm: alloc.refNorm,
+          resultStatus: "MATCH_PARCIAL", marginPoints, agePoints, score, rank: rank++,
+        });
         hasPartial = true;
-        if (p.status === "PEDIR_PECA" || p.status === "VERIFICAR") {
-          db.prepare("UPDATE part_requests SET status = 'INDICADA', updated_at = datetime('now') WHERE id = ?").run(p.id);
-        }
       } else {
-        db.prepare(`
-          INSERT OR REPLACE INTO repair_match_results
-            (run_id, repair_case_id, part_request_id, chave_peca, chave_peca_norm,
-             result_status, margin_points, age_points, score, priority_rank)
-          VALUES (?,?,?,?,?,'PEDIR_PECA',?,?,?,?)
-        `).run(runId, sc.caseRow.id, p.id, p.chave_peca ?? null, p.chave_peca_norm, marginPoints, agePoints, score, rank++);
+        allocations.push({
+          partRequestId: p.id, caseId: sc.caseRow.id,
+          chave: p.chave_peca ?? p.chave_peca_norm, chaveNorm: p.chave_peca_norm,
+          refAllocated: null, refAllocatedNorm: null,
+          resultStatus: "PEDIR_PECA", marginPoints, agePoints, score, rank: rank++,
+        });
         hasAll = false;
-        // Revert indicada → pedir_peca if no longer available
-        if (p.status === "INDICADA") {
-          db.prepare("UPDATE part_requests SET status = 'PEDIR_PECA', updated_at = datetime('now') WHERE id = ?").run(p.id);
-        }
       }
     }
 
-    const prevStatus = sc.caseRow.workflow_status;
     let newStatus: string;
-    if (hasPartial && !hasAll) {
-      newStatus = "MATCH_PARCIAL";
-    } else if (!hasPartial) {
-      newStatus = "PEDIR_PECA";
-    } else {
-      continue;
+    if (hasAll) newStatus = "MATCH"; // all parts found (shouldn't reach here but handle it)
+    else if (hasPartial) newStatus = "MATCH_PARCIAL";
+    else newStatus = "PEDIR_PECA";
+
+    decisions.push({ caseId: sc.caseRow.id, prevStatus: sc.caseRow.workflow_status, newStatus, parts: allocations });
+    if (hasPartial) partialKitsFound++;
+  }
+
+  // ── Atomic DB commit ────────────────────────────────────────────────────
+  db.exec("BEGIN");
+  try {
+    db.prepare("DELETE FROM repair_match_results WHERE run_id = ?").run(runId);
+
+    const insertResult = db.prepare(`
+      INSERT OR REPLACE INTO repair_match_results
+        (run_id, repair_case_id, part_request_id, chave_peca, chave_peca_norm,
+         allocated_reference, allocated_reference_norm,
+         result_status, allocated_units, margin_points, age_points, score, priority_rank)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `);
+
+    for (const dec of decisions) {
+      for (const a of dec.parts) {
+        const isAlloc = a.resultStatus === "MATCH" || a.resultStatus === "MATCH_PARCIAL";
+        insertResult.run(
+          runId, a.caseId, a.partRequestId,
+          a.chave, a.chaveNorm || null,
+          a.refAllocated, a.refAllocatedNorm,
+          a.resultStatus, isAlloc ? 1 : 0,
+          a.marginPoints, a.agePoints, a.score, a.rank,
+        );
+      }
+
+      // Update part_request statuses
+      for (const a of dec.parts) {
+        const part = parts.find(p => p.id === a.partRequestId);
+        if (!part) continue;
+        if (a.resultStatus === "MATCH" || a.resultStatus === "MATCH_PARCIAL") {
+          if (part.status === "PEDIR_PECA" || part.status === "VERIFICAR") {
+            db.prepare("UPDATE part_requests SET status = 'INDICADA', updated_at = datetime('now') WHERE id = ?").run(a.partRequestId);
+          }
+        } else if (a.resultStatus === "PEDIR_PECA") {
+          if (part.status === "INDICADA") {
+            db.prepare("UPDATE part_requests SET status = 'PEDIR_PECA', updated_at = datetime('now') WHERE id = ?").run(a.partRequestId);
+          }
+        }
+      }
+
+      // Update workflow_status (do not demote APTO_REPARO/EM_SEPARACAO/DIRECIONADO_TECNICO etc.)
+      const lockedStatuses = new Set(["APTO_REPARO","EM_SEPARACAO","DIRECIONADO_TECNICO","EM_REPARO","REPARO_EXECUTADO","TRIAGEM_FINAL","RETORNO_TECNICO","CONCLUIDO","VENDA_ESTADO","CANCELADO"]);
+      if (!lockedStatuses.has(dec.prevStatus) && dec.prevStatus !== dec.newStatus) {
+        db.prepare(
+          "UPDATE repair_cases SET workflow_status = ?, updated_at = datetime('now') WHERE id = ?"
+        ).run(dec.newStatus, dec.caseId);
+        casesChanged++;
+      }
     }
 
-    if (prevStatus !== newStatus) {
-      db.prepare(
-        "UPDATE repair_cases SET workflow_status = ?, updated_at = datetime('now') WHERE id = ?"
-      ).run(newStatus, sc.caseRow.id);
-      casesChanged++;
-    }
-    if (hasPartial) partialKitsFound++;
+    db.exec("COMMIT");
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* ignore */ }
+    throw err;
   }
 
   return {

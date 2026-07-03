@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { getDb } from "../db/database.js";
 import { runMigrations } from "../db/migrate.js";
 import { createApp } from "./app.js";
+import { processPendingRecompute } from "../match/engine-orchestrator.js";
 
 function main(): void {
   // Garante o esquema atualizado antes de aceitar requisições.
@@ -11,6 +12,11 @@ function main(): void {
   if (!outcome.alreadyUpToDate) {
     console.log(`[server] ${outcome.applied.length} migration(s) aplicada(s).`);
   }
+
+  // Dispara motor de match para recompute pendente (não-bloqueante).
+  processPendingRecompute(db).catch(err =>
+    console.warn("[server] match-engine startup recompute:", (err as Error).message)
+  );
 
   const app = createApp();
   app.listen(config.serverPort, config.serverHost, () => {

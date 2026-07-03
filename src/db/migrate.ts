@@ -134,20 +134,25 @@ export function runMigrations(db: Db, opts: { backup?: boolean } = {}): Migratio
 
     const sql = fs.readFileSync(path.join(dir, file), "utf8");
 
-    // Se a migration contém "PRAGMA foreign_keys = OFF", aplicá-lo fora da
-    // transação (dentro de uma transação SQLite o PRAGMA é ignorado silenciosamente,
-    // causando FK-violations ao fazer DROP TABLE em tabelas referenciadas).
+    // PRIAGMAs que devem ser executados FORA de BEGIN:
+    // — foreign_keys=OFF: silenciosamente ignorado dentro de uma transação;
+    // — legacy_alter_table=ON: necessário para que RENAME TO não atualize
+    //   referências de FK nas tabelas filhas (comportamento pré-SQLite 3.26.0).
     const needsFkOff = /PRAGMA\s+foreign_keys\s*=\s*OFF/i.test(sql);
+    const needsLegacyAlter = /PRAGMA\s+legacy_alter_table\s*=\s*ON/i.test(sql);
+
     if (needsFkOff) db.exec("PRAGMA foreign_keys = OFF;");
+    if (needsLegacyAlter) db.exec("PRAGMA legacy_alter_table = ON;");
 
     db.exec("BEGIN");
     try {
-      // Remover as linhas de PRAGMA do SQL da migration — já foram (ou serão)
-      // tratadas fora da transação.
-      const sqlWithoutFkPragmas = sql
-        .replace(/PRAGMA\s+foreign_keys\s*=\s*OFF\s*;?/gi, "-- [runner: PRAGMA executado fora da transação]")
-        .replace(/PRAGMA\s+foreign_keys\s*=\s*ON\s*;?/gi, "-- [runner: PRAGMA executado fora da transação]");
-      db.exec(sqlWithoutFkPragmas);
+      // Remover as linhas de PRAGMA do SQL da migration — já foram tratadas fora.
+      const sqlWithoutPragmas = sql
+        .replace(/PRAGMA\s+foreign_keys\s*=\s*OFF\s*;?/gi, "-- [runner: PRAGMA fora da tx]")
+        .replace(/PRAGMA\s+foreign_keys\s*=\s*ON\s*;?/gi, "-- [runner: PRAGMA fora da tx]")
+        .replace(/PRAGMA\s+legacy_alter_table\s*=\s*ON\s*;?/gi, "-- [runner: PRAGMA fora da tx]")
+        .replace(/PRAGMA\s+legacy_alter_table\s*=\s*OFF\s*;?/gi, "-- [runner: PRAGMA fora da tx]");
+      db.exec(sqlWithoutPragmas);
       db.prepare("INSERT INTO schema_migrations (name) VALUES (?)").run(file);
       db.exec("COMMIT");
       applied.push(file);
@@ -159,6 +164,7 @@ export function runMigrations(db: Db, opts: { backup?: boolean } = {}): Migratio
       );
     } finally {
       if (needsFkOff) db.exec("PRAGMA foreign_keys = ON;");
+      if (needsLegacyAlter) db.exec("PRAGMA legacy_alter_table = OFF;");
     }
   }
   return { applied, alreadyUpToDate: false };

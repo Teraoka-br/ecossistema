@@ -21,6 +21,7 @@
     "user:ensure-admin": "tsx scripts/ensure-admin.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "cleanup:invalid-reservations": "tsx scripts/cleanup-invalid-reservations.ts",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.scripts.json --noEmit"
   },
   "dependencies": {

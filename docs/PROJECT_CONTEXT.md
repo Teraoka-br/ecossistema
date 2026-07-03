@@ -1,7 +1,8 @@
 # Contexto do projeto — Sistema de Peças (Outlet do Celular)
 
-> Atualizado em: 2026-07-02, após concluir macrofase 1 (migration 012, identidade temporal
-> de repair_cases, segurança datasys, auth melhorada, autocomplete CHAVEPECA, 373 testes).
+> Atualizado em: 2026-07-03, após concluir macrofase 2 (migration 016, motor REF-based
+> atômico, reservas APTO_REPARO, stock-service com operational_reservations + blockedQty,
+> direcionamento a técnico, auto-trigger, 400 testes).
 > Mantenha este documento enxuto — veja "Regras de manutenção" no final antes de editar.
 
 ## 1. Projeto
@@ -490,14 +491,14 @@ reimportação.
 
 ## 10. Pendências
 
-**Bloqueadores:** nenhum conhecido. 373 testes + typecheck + build limpos.
+**Bloqueadores:** nenhum conhecido. 400 testes + typecheck + build limpos.
 
 **Últimas mudanças relevantes (mais recentes primeiro, máx. 5):**
-1. **Macrofase 1 concluída** (migration 012): identidade temporal `repair_date`+`repair_date_source`+`legacy_case_key` em `repair_cases`; índice único parcial por `(legacy_import_batch_id, legacy_case_key)`; `staged_file_path`+`cancelled_at` em `datasys_imports`; proteção último admin; rate-limit login; autocomplete `GET /api/repair-cases/chave-peca-search`; save-analysis transacional; `migrate:repair-domain` aplicado ao DB operacional (1108 casos, 1387 peças). 78 novos testes.
-2. **Auth, staff, repair domain, Datasys intake e shell visual** (migrations 010–011): autenticação PIN scryptSync, sessões cookie, middleware global; técnicos CRUD; auditoria silenciosa; `repair_cases`/`part_requests`/prioridades; intake `RELATORIO.xlsx`; telas `/analise`, admin pages; shell dark mode. 45 testes.
-3. **Separação operacional** (migration 009): reserva lógica, confirmação com `REPAIR_CONSUMPTION`+`PART_SEPARATED`, cancelamento sem movimento, stale-check. 57 testes.
-4. **Motor de match** (migration 007): algoritmo puro em 2 passagens, fingerprint SHA-256. 74 testes.
-5. **Estoque operacional + pedidos de compra + recebimento** (migration 006): base oficial + movimentações posteriores, recebimento transacional idempotente.
+1. **Macrofase 2 concluída** (migration 016 + engine rewrite): `repair_cases.workflow_status` expandido com `DIRECIONADO_TECNICO`, `EM_REPARO`, `REPARO_EXECUTADO`, `TRIAGEM_FINAL`, `RETORNO_TECNICO`; `part_requests.status` com `CONSUMIDA`. Runner de migrations suporta `PRAGMA legacy_alter_table = ON` (fora de BEGIN). Motor de match reescrito: REF-based (`chaveNorm → refNorm → qty`), completamente atômico (compute in-memory, um BEGIN/COMMIT no final). `getCurrentOperationalStock` passa a usar `operational_reservations` ACTIVE + `separation_items` RESERVED para `reservedQuantity` e `count_divergences` PENDING/APPROVED para `blockedQuantity`. `reserveKit` transiciona para `APTO_REPARO` (não mais `EM_SEPARACAO`). `directToTechnician` exige `APTO_REPARO`. Auto-trigger de `processPendingRecompute` no boot do servidor. Script `cleanup:invalid-reservations`. 400 testes.
+2. **Macrofase 2 WIP** (migrations 013–015): motor de match para `repair_cases`, fila de reparo, reservas operacionais em `operational_reservations`, importações sistêmicas (SH/HIS/PEACS/BKP). Motor de match com regras configuráveis, engine state, fila de recompute, rotas `/api/repair-queue/*`.
+3. **Macrofase 1 concluída** (migration 012): identidade temporal `repair_date`; autocomplete `GET /api/repair-cases/chave-peca-search`; save-analysis transacional; `migrate:repair-domain` ao DB operacional (1108 casos, 1387 peças). 78 novos testes.
+4. **Auth, staff, repair domain, Datasys intake e shell visual** (migrations 010–011): autenticação PIN scryptSync, sessões cookie, middleware global; técnicos CRUD; `repair_cases`/`part_requests`/prioridades; intake `RELATORIO.xlsx`. 45 testes.
+5. **Separação operacional** (migration 009): reserva lógica via `separation_items`, confirmação com `REPAIR_CONSUMPTION`+`PART_SEPARATED`, cancelamento sem movimento, stale-check. 57 testes.
 
 **Melhorias futuras (fora do escopo das tarefas já concluídas):**
 - `confirm()` (importação) re-lê os arquivos copiados no diretório do lote; se o servidor
@@ -515,13 +516,14 @@ reimportação.
 
 ## 11. Próxima fase
 
-Com auth, repair domain e Datasys implementados, as próximas fases possíveis são:
-- **Motor de match para repair_cases** — conectar `part_requests` ao estoque operacional real
-  (análogo ao `match_engine` existente, mas operando sobre `repair_cases`/`part_requests`).
-- **Estorno de separação** — desfazer uma confirmação já realizada, criando `stock_movements`
-  de crédito e revertendo status de `CONFIRMED`.
-- **Tela /reparo** — visualização e gestão de `repair_cases` com partes, status e prioridade.
-- ~~**Execução do `migrate:repair-domain`**~~ — concluída: 1108 casos + 1387 peças no DB operacional.
+Com o motor de match REF-based e o fluxo MATCH → APTO_REPARO → DIRECIONADO_TECNICO implementados,
+as próximas fases possíveis são:
+- **Fluxo pós-DIRECIONADO_TECNICO** — transições EM_REPARO → REPARO_EXECUTADO → TRIAGEM_FINAL →
+  RETORNO_TECNICO → CONCLUIDO; UI de acompanhamento técnico; consumo de peças (CONSUMIDA).
+- **Estorno de separação** (`separation_items`) — desfazer confirmação com `stock_movements` de crédito.
+- **UI da fila de reparos** — tela `/reparo` consumindo `/api/repair-queue/*` com drawer por caso.
+- **Importações sistêmicas** — SH Oficina, His Estoque, PEACS, BKP (migrations 015 já criam as tabelas).
+
 Nenhuma dessas fases deve ser implementada sem solicitação explícita.
 
 ## 12. Comandos

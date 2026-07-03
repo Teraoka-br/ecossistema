@@ -59,7 +59,7 @@ describe("reserveKit", () => {
     expect(reservations[1].status).toBe("ACTIVE");
 
     const caseRow = db.prepare("SELECT workflow_status FROM repair_cases WHERE id = ?").get(caseId) as { workflow_status: string };
-    expect(caseRow.workflow_status).toBe("EM_SEPARACAO");
+    expect(caseRow.workflow_status).toBe("APTO_REPARO");
   });
 
   it("não reserva duas vezes o mesmo part_request", () => {
