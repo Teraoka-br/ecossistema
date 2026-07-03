@@ -13,7 +13,6 @@
 import type { Db } from "../db/database.js";
 import { getActiveRuleSet, computeScore, type MatchRuleSet } from "./match-rule-service.js";
 import { getCurrentOperationalStock } from "../operational/stock-service.js";
-import { normalizeKey } from "../domain/text.js";
 
 // ---------------------------------------------------------------------------
 // Queue helpers
@@ -191,7 +190,7 @@ function executeEngine(
     WHERE analysis_status = 'COMPLETED'
       AND workflow_status NOT IN ('CONCLUIDO','VENDA_ESTADO','CANCELADO','DIRECIONADO_TECNICO','EM_REPARO','REPARO_EXECUTADO','TRIAGEM_FINAL','RETORNO_TECNICO')
     ORDER BY id
-  `).all() as CaseRow[];
+  `).all() as unknown as CaseRow[];
 
   if (cases.length === 0) {
     return { casesEvaluated: 0, fullKitsFound: 0, partialKitsFound: 0, casesChanged: 0 };
@@ -206,7 +205,7 @@ function executeEngine(
     WHERE repair_case_id IN (${placeholders})
       AND cancelled_at IS NULL
       AND status NOT IN ('CANCELADA','SEPARADA','CONSUMIDA')
-  `).all(...caseIds) as PartRow[];
+  `).all(...caseIds) as unknown as PartRow[];
 
   // Group parts by case
   const partsByCase = new Map<number, PartRow[]>();

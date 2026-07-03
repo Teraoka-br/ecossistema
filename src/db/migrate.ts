@@ -133,18 +133,32 @@ export function runMigrations(db: Db, opts: { backup?: boolean } = {}): Migratio
     PRE_MIGRATION_GUARDS[file]?.(db);
 
     const sql = fs.readFileSync(path.join(dir, file), "utf8");
+
+    // Se a migration contém "PRAGMA foreign_keys = OFF", aplicá-lo fora da
+    // transação (dentro de uma transação SQLite o PRAGMA é ignorado silenciosamente,
+    // causando FK-violations ao fazer DROP TABLE em tabelas referenciadas).
+    const needsFkOff = /PRAGMA\s+foreign_keys\s*=\s*OFF/i.test(sql);
+    if (needsFkOff) db.exec("PRAGMA foreign_keys = OFF;");
+
     db.exec("BEGIN");
     try {
-      db.exec(sql);
+      // Remover as linhas de PRAGMA do SQL da migration — já foram (ou serão)
+      // tratadas fora da transação.
+      const sqlWithoutFkPragmas = sql
+        .replace(/PRAGMA\s+foreign_keys\s*=\s*OFF\s*;?/gi, "-- [runner: PRAGMA executado fora da transação]")
+        .replace(/PRAGMA\s+foreign_keys\s*=\s*ON\s*;?/gi, "-- [runner: PRAGMA executado fora da transação]");
+      db.exec(sqlWithoutFkPragmas);
       db.prepare("INSERT INTO schema_migrations (name) VALUES (?)").run(file);
       db.exec("COMMIT");
       applied.push(file);
       console.log(`[migrate] aplicada: ${file}`);
     } catch (err) {
-      db.exec("ROLLBACK");
+      try { db.exec("ROLLBACK"); } catch { /* ignore */ }
       throw new Error(
         `Falha ao aplicar migration ${file}: ${(err as Error).message}`,
       );
+    } finally {
+      if (needsFkOff) db.exec("PRAGMA foreign_keys = ON;");
     }
   }
   return { applied, alreadyUpToDate: false };

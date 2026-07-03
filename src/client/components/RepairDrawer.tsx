@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   X, Package, Clock, Star, ChevronRight, AlertTriangle, CheckCircle2,
-  UserCheck, Wrench, History, Info, Loader2, Users,
+  UserCheck, History, Info, Loader2, Users,
 } from "lucide-react";
 
 interface PartInfo {
@@ -57,7 +57,7 @@ const CANCEL_REASONS = [
 
 type DrawerTab = "parts" | "score" | "history";
 
-export function RepairDrawer({ repairCaseId, onClose, userRole }: RepairDrawerProps) {
+export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
   const [data, setData] = useState<CaseDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<DrawerTab>("parts");

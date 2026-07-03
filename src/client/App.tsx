@@ -2,8 +2,8 @@ import { useState } from "react";
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import {
   Wrench, List, ShoppingCart, Boxes, ScanBarcode,
-  Users, UserCog, Database, Activity, FileInput, LogOut,
-  PanelLeftClose, PanelLeftOpen, Settings, Stethoscope, Sliders,
+  Users, Database, Activity, FileInput, LogOut,
+  PanelLeftClose, PanelLeftOpen, Stethoscope, Sliders,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "./auth.js";
 import { Login } from "./pages/Login.js";
@@ -18,7 +18,6 @@ import { Bipagem } from "./pages/Bipagem.js";
 import { Compras } from "./pages/Compras.js";
 import { Movimentacoes } from "./pages/Movimentacoes.js";
 import { Match } from "./pages/Match.js";
-import { Separacao } from "./pages/Separacao.js";
 import { AdminUsuarios } from "./pages/AdminUsuarios.js";
 import { AdminTecnicos } from "./pages/AdminTecnicos.js";
 import { AdminDatasys } from "./pages/AdminDatasys.js";

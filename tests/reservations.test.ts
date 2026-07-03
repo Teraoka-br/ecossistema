@@ -17,25 +17,24 @@ function seedRepairCase(db: Db, imei: string): number {
 }
 
 function seedPartRequest(db: Db, caseId: number, chave: string): number {
+  // normalizeKey faz toUpperCase(), então chave_peca_norm deve ser maiúsculo
+  const norm = chave.toUpperCase();
   const r = db.prepare(`
     INSERT INTO part_requests (repair_case_id, chave_peca, chave_peca_norm, status, created_at, updated_at)
-    VALUES (?, ?, lower(?), 'AGUARDANDO', datetime('now'), datetime('now'))
-  `).run(caseId, chave, chave);
+    VALUES (?, ?, ?, 'PEDIR_PECA', datetime('now'), datetime('now'))
+  `).run(caseId, chave, norm);
   return r.lastInsertRowid as number;
 }
 
+let _seedStockSeq = 0;
 function seedStock(db: Db, chaveNorm: string, qty: number): void {
-  // Insert an OFFICIAL snapshot with items to serve as the stock base
-  const snap = db.prepare(
-    "INSERT INTO stock_snapshots (session_id, status, finalized_at) SELECT id, 'OFFICIAL', datetime('now') FROM count_sessions LIMIT 1"
-  ).run();
-  if (!snap.lastInsertRowid) return;
-
-  // Seed directly via stock_movements (INITIAL_BALANCE)
+  // normalizeKey faz toUpperCase() — seeds devem usar maiúsculo para bater com getPhysicalStock
+  const norm = chaveNorm.toUpperCase();
+  _seedStockSeq++;
   db.prepare(`
-    INSERT INTO stock_movements (movement_type, chave_peca, chave_peca_norm, quantity, source_type, source_id, created_at)
-    VALUES ('INITIAL_BALANCE', ?, ?, ?, 'seed', 0, datetime('now', '-1 day'))
-  `).run(chaveNorm, chaveNorm, qty);
+    INSERT INTO stock_movements (movement_type, chave_peca, chave_peca_norm, referencia, referencia_norm, quantity, source_type, source_id, created_at)
+    VALUES ('PURCHASE_RECEIPT', ?, ?, '', '', ?, 'test_seed', ?, datetime('now', '-1 day'))
+  `).run(norm, norm, qty, _seedStockSeq);
 }
 
 beforeEach(async () => {
@@ -100,19 +99,19 @@ describe("reserveKit", () => {
     const pr1 = seedPartRequest(db, caseId, "CONECTOR-Z");
     seedStock(db, "conector-z", 3);
 
-    const qtyBefore = getReservedQuantity(db, "conector-z");
+    const qtyBefore = getReservedQuantity(db, "CONECTOR-Z");
     expect(qtyBefore).toBe(0);
 
     reserveKit(db, caseId, [
       { partRequestId: pr1, chavePeca: "CONECTOR-Z", reference: null, quantity: 1, availableQty: 3 },
     ], null);
 
-    const qtyAfter = getReservedQuantity(db, "conector-z");
+    const qtyAfter = getReservedQuantity(db, "CONECTOR-Z");
     expect(qtyAfter).toBe(1);
 
     // No stock_movement was created for a reservation (physical unchanged)
     const moves = db.prepare(
-      "SELECT COUNT(*) AS c FROM stock_movements WHERE chave_peca_norm = 'conector-z' AND movement_type != 'INITIAL_BALANCE'"
+      "SELECT COUNT(*) AS c FROM stock_movements WHERE chave_peca_norm = 'CONECTOR-Z' AND movement_type != 'PURCHASE_RECEIPT'"
     ).get() as { c: number };
     expect(moves.c).toBe(0);
   });
@@ -147,11 +146,11 @@ describe("releaseReservation", () => {
       { partRequestId: pr1, chavePeca: "VISOR-C", reference: null, quantity: 1, availableQty: 2 },
     ], null);
 
-    expect(getReservedQuantity(db, "visor-c")).toBe(1);
+    expect(getReservedQuantity(db, "VISOR-C")).toBe(1);
 
     releaseReservation(db, pr1, { reason: "Peça trocada por modelo correto", userId: null });
 
-    expect(getReservedQuantity(db, "visor-c")).toBe(0);
+    expect(getReservedQuantity(db, "VISOR-C")).toBe(0);
 
     // part_request should revert to PEDIR_PECA
     const pr = db.prepare("SELECT status FROM part_requests WHERE id = ?").get(pr1) as { status: string };
@@ -197,7 +196,7 @@ describe("consumeReservation", () => {
 
     // A REPAIR_CONSUMPTION movement should exist
     const move = db.prepare(
-      "SELECT * FROM stock_movements WHERE movement_type = 'REPAIR_CONSUMPTION' AND chave_peca_norm = 'botao-d'"
+      "SELECT * FROM stock_movements WHERE movement_type = 'REPAIR_CONSUMPTION' AND chave_peca_norm = 'BOTAO-D'"
     ).get() as { quantity: number } | undefined;
     expect(move).toBeDefined();
     expect(move!.quantity).toBe(-1);

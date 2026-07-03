@@ -1,94 +1,27 @@
 -- Migration 013 — regras versionadas de match, motor automático e expansão de estados.
 --
--- 1. Expande CHECK de workflow_status em repair_cases (rebuild da tabela no SQLite).
--- 2. Cria match_rule_sets — regras de scoring versionadas e auditáveis.
--- 3. Cria repair_match_runs / repair_match_results — execuções do motor sobre repair_cases.
--- 4. Cria match_engine_state — estado global do motor (IDLE/RUNNING/STALE/FAILED).
--- 5. Cria match_recompute_requests — fila de orquestração persistente e idempotente.
--- 6. Insere a regra padrão ativa (v1).
+-- 1. Adiciona colunas a repair_cases via ALTER TABLE ADD COLUMN (seguro em transação).
+-- 2. Expande o CHECK de workflow_status via uma migration helper separada (ver abaixo).
+-- 3. Cria match_rule_sets — regras de scoring versionadas e auditáveis.
+-- 4. Cria repair_match_runs / repair_match_results — execuções do motor sobre repair_cases.
+-- 5. Cria match_engine_state — estado global do motor (IDLE/RUNNING/STALE/FAILED).
+-- 6. Cria match_recompute_requests — fila de orquestração persistente e idempotente.
+-- 7. Insere a regra padrão ativa (v1).
+--
+-- NOTA: O CHECK constraint de workflow_status não pode ser expandido via ADD COLUMN
+-- no SQLite. Os novos status (DIRECIONADO_TECNICO, EM_REPARO, REPARO_EXECUTADO,
+-- TRIAGEM_FINAL, RETORNO_TECNICO) requerem a recriação da tabela, que é feita em
+-- 013b (ver 013b_repair_cases_check_expand.sql). Os ADD COLUMN abaixo garantem que
+-- as colunas existam independentemente do rebuild.
 
 -- =========================================================================
--- 1. Rebuild repair_cases com CHECK de workflow_status expandido
---    (SQLite não suporta ALTER COLUMN — precisamos recriar a tabela)
+-- 1. Novas colunas de repair_cases (seguras via ADD COLUMN)
 -- =========================================================================
-PRAGMA foreign_keys = OFF;
-
-ALTER TABLE repair_cases RENAME TO _repair_cases_013_bak;
-
-CREATE TABLE repair_cases (
-  id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-  imei                     TEXT,
-  imei_norm                TEXT,
-  os                       TEXT,
-  os_norm                  TEXT,
-  brand                    TEXT,
-  model                    TEXT,
-  capacity                 TEXT,
-  color                    TEXT,
-  entry_date               TEXT,
-  repair_date              TEXT,
-  repair_date_source       TEXT,
-  age_days                 INTEGER,
-  cost                     REAL,
-  estimated_sale           REAL,
-  margin                   REAL,
-  notes                    TEXT,
-  analysis_status          TEXT    NOT NULL DEFAULT 'DRAFT'
-                             CHECK (analysis_status IN ('DRAFT','COMPLETED')),
-  workflow_status          TEXT    NOT NULL DEFAULT 'EM_ANALISE'
-                             CHECK (workflow_status IN (
-                               'EM_ANALISE','PEDIR_PECA','AGUARDANDO_RECEBIMENTO',
-                               'MATCH_PARCIAL','MATCH','EM_SEPARACAO','APTO_REPARO',
-                               'DIRECIONADO_TECNICO','EM_REPARO','REPARO_EXECUTADO',
-                               'TRIAGEM_FINAL','RETORNO_TECNICO',
-                               'CONCLUIDO','VENDA_ESTADO','CANCELADO','VERIFICAR'
-                             )),
-  assigned_technician_id   INTEGER REFERENCES staff_members(id) ON DELETE SET NULL,
-  directed_technician_id   INTEGER REFERENCES staff_members(id) ON DELETE SET NULL,
-  directed_at              TEXT,
-  directed_by_user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  manual_priority_active   INTEGER NOT NULL DEFAULT 0 CHECK (manual_priority_active IN (0,1)),
-  legacy_import_batch_id   INTEGER REFERENCES import_batches(id) ON DELETE SET NULL,
-  legacy_device_key        TEXT,
-  legacy_case_key          TEXT,
-  created_by_user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  updated_by_user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  created_at               TEXT    NOT NULL DEFAULT (datetime('now')),
-  updated_at               TEXT    NOT NULL DEFAULT (datetime('now')),
-  closed_at                TEXT
-);
-
-INSERT INTO repair_cases (
-  id, imei, imei_norm, os, os_norm, brand, model, capacity, color, entry_date,
-  repair_date, repair_date_source,
-  age_days, cost, estimated_sale, margin, notes,
-  analysis_status, workflow_status, assigned_technician_id,
-  manual_priority_active, legacy_import_batch_id, legacy_device_key, legacy_case_key,
-  created_by_user_id, updated_by_user_id, created_at, updated_at, closed_at
-)
-SELECT
-  id, imei, imei_norm, os, os_norm, brand, model, NULL, NULL, entry_date,
-  repair_date, repair_date_source,
-  age_days, cost, estimated_sale, margin, notes,
-  analysis_status, workflow_status, assigned_technician_id,
-  manual_priority_active, legacy_import_batch_id, legacy_device_key, legacy_case_key,
-  created_by_user_id, updated_by_user_id, created_at, updated_at, closed_at
-FROM _repair_cases_013_bak;
-
-DROP TABLE _repair_cases_013_bak;
-
--- Recriar índices da 011 + índice único parcial da 012
-CREATE INDEX IF NOT EXISTS idx_rc_imei_norm    ON repair_cases(imei_norm);
-CREATE INDEX IF NOT EXISTS idx_rc_os_norm      ON repair_cases(os_norm);
-CREATE INDEX IF NOT EXISTS idx_rc_workflow     ON repair_cases(workflow_status);
-CREATE INDEX IF NOT EXISTS idx_rc_analysis     ON repair_cases(analysis_status);
-CREATE INDEX IF NOT EXISTS idx_rc_legacy_key   ON repair_cases(legacy_device_key);
-CREATE INDEX IF NOT EXISTS idx_rc_created      ON repair_cases(created_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_repair_cases_legacy_case
-  ON repair_cases (legacy_import_batch_id, legacy_case_key)
-  WHERE legacy_import_batch_id IS NOT NULL AND legacy_case_key IS NOT NULL;
-
-PRAGMA foreign_keys = ON;
+ALTER TABLE repair_cases ADD COLUMN capacity              TEXT;
+ALTER TABLE repair_cases ADD COLUMN color                 TEXT;
+ALTER TABLE repair_cases ADD COLUMN directed_technician_id INTEGER REFERENCES staff_members(id) ON DELETE SET NULL;
+ALTER TABLE repair_cases ADD COLUMN directed_at           TEXT;
+ALTER TABLE repair_cases ADD COLUMN directed_by_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL;
 
 -- =========================================================================
 -- 2. match_rule_sets — regras de scoring versionadas
@@ -96,13 +29,10 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE match_rule_sets (
   id                          INTEGER PRIMARY KEY AUTOINCREMENT,
   version                     INTEGER NOT NULL UNIQUE,
-  -- Fórmula: margin_points = floor(margin / margin_amount_per_point)
   margin_amount_per_point     REAL    NOT NULL DEFAULT 150.0,
-  -- Fórmula: age_points = min(floor(age_days / age_days_per_point), age_max_points)
   age_days_per_point          INTEGER NOT NULL DEFAULT 30,
   age_max_points              INTEGER NOT NULL DEFAULT 15,
   allow_negative_margin_score INTEGER NOT NULL DEFAULT 1 CHECK (allow_negative_margin_score IN (0,1)),
-  -- score = margin_points * margin_weight + age_points * age_weight
   margin_weight               REAL    NOT NULL DEFAULT 1.0,
   age_weight                  REAL    NOT NULL DEFAULT 1.0,
   active                      INTEGER NOT NULL DEFAULT 0 CHECK (active IN (0,1)),
@@ -113,7 +43,6 @@ CREATE TABLE match_rule_sets (
   activated_at                TEXT
 );
 
--- Somente uma regra ativa ao mesmo tempo
 CREATE UNIQUE INDEX idx_match_rule_sets_active ON match_rule_sets(active) WHERE active = 1;
 
 -- =========================================================================

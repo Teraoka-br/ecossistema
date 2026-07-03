@@ -29,7 +29,7 @@ export interface NextAction {
 
 export function deriveNextAction(
   workflowStatus: WorkflowStatus,
-  opts: {
+  _opts: {
     analysisCompleted: boolean;
     allPartsReserved: boolean;
     hasActiveReservations: boolean;

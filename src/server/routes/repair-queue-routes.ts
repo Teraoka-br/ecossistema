@@ -2,7 +2,7 @@ import { Router, type Request } from "express";
 import { getDb } from "../../db/database.js";
 import { requireAuth, requireAdmin } from "../middleware/auth-middleware.js";
 import {
-  listRepairCases, getRepairCaseWithParts, getPartsByCase,
+  getRepairCaseWithParts,
   type WorkflowStatus,
 } from "../../repair/repair-service.js";
 import {
@@ -10,7 +10,7 @@ import {
 } from "../../match/next-action-service.js";
 import {
   reserveKit, reservePartial, releaseReservation, directToTechnician,
-  listReservationsByCase, getReservedQuantity,
+  listReservationsByCase,
 } from "../../operational/reservation-service.js";
 import {
   getEngineState, runRepairMatchEngine, getPendingRequestCount,
@@ -31,7 +31,7 @@ repairQueueRouter.get("/engine/state", requireAuth, (_req, res) => {
   res.json({ state, pending, lastRun });
 });
 
-repairQueueRouter.post("/engine/run", requireAuth, requireAdmin, async (_req, res, next) => {
+repairQueueRouter.post("/engine/run", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const db = getDb();
     const userId = (req as Request).sessionUser?.id ?? null;
@@ -52,10 +52,6 @@ repairQueueRouter.get("/fila-reparos", requireAuth, (req, res) => {
   const offset = (page - 1) * limit;
 
   const statuses = QUEUE_FILTER_STATUSES[filter] ?? null;
-
-  const opts = statuses
-    ? { limit, offset }
-    : { limit, offset };
 
   // Build query manually for multiple status filter
   let where = "";
@@ -189,8 +185,8 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
     const technician = rc.assignedTechnicianId
       ? db.prepare("SELECT * FROM staff_members WHERE id = ?").get(rc.assignedTechnicianId)
       : null;
-    const directedTechnician = (rc as Record<string, unknown>).directedTechnicianId
-      ? db.prepare("SELECT * FROM staff_members WHERE id = ?").get((rc as Record<string, unknown>).directedTechnicianId as number)
+    const directedTechnician = rc.directedTechnicianId
+      ? db.prepare("SELECT * FROM staff_members WHERE id = ?").get(rc.directedTechnicianId)
       : null;
 
     res.json({

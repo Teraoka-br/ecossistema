@@ -294,14 +294,14 @@ export function consumeReservation(
     // Create REPAIR_CONSUMPTION movement
     const moveRes = db.prepare(`
       INSERT INTO stock_movements
-        (movement_type, chave_peca, chave_peca_norm, reference, reference_norm, quantity,
+        (movement_type, chave_peca, chave_peca_norm, referencia, referencia_norm, quantity,
          source_type, source_id, reservation_id, created_by_user_id)
       VALUES ('REPAIR_CONSUMPTION',?,?,?,?,-1,'operational_reservation',?,?,?)
     `).run(
       row.chave_peca as string,
       row.chave_peca_norm as string,
-      row.reference as string | null,
-      row.reference_norm as string | null,
+      (row.reference as string | null) ?? "",
+      (row.reference_norm as string | null) ?? "",
       row.id as number,
       row.id as number,
       userId ?? null,

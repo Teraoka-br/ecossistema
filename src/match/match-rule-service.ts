@@ -91,7 +91,7 @@ export function createDraftRuleSet(db: Db, input: MatchRuleSetInput): MatchRuleS
   return getRuleSetById(db, res.lastInsertRowid as number)!;
 }
 
-export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput, userId: number | null): MatchRuleSet {
+export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput, _userId: number | null): MatchRuleSet {
   const rs = getRuleSetById(db, id);
   if (!rs) throw new MatchRuleError("NOT_FOUND", "Regra não encontrada.");
   if (rs.active) throw new MatchRuleError("ALREADY_ACTIVE", "Regra ativa não pode ser editada. Crie uma nova versão.");

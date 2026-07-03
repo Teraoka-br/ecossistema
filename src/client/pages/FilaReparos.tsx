@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Clock, Wrench, Package, AlertTriangle, CheckCircle2, ChevronRight,
-  Star, RefreshCw, Filter, X, ArrowRight, UserCheck, Loader2,
+  Star, RefreshCw, X, UserCheck, Loader2,
   PackageCheck, ShoppingBag, Eye,
 } from "lucide-react";
 import { RepairDrawer } from "../components/RepairDrawer.js";
