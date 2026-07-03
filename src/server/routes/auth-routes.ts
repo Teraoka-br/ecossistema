@@ -12,7 +12,7 @@ import {
   AuthError,
 } from "../../auth/auth-service.js";
 import { getDb } from "../../db/database.js";
-import { requireAuth, SESSION_COOKIE } from "../middleware/auth-middleware.js";
+import { requireAuth, requireAdmin, SESSION_COOKIE } from "../middleware/auth-middleware.js";
 import { logAudit } from "../../audit/audit-service.js";
 import { rateLimitLogin, clearRateLimit } from "../middleware/rate-limit.js";
 
@@ -106,7 +106,7 @@ authRouter.post("/logout", requireAuth, (req, res) => {
 
 // ─── Admin: gestão de usuários ────────────────────────────────────────────
 
-authRouter.get("/users", requireAuth, (_req, res) => {
+authRouter.get("/users", requireAuth, requireAdmin, (_req, res) => {
   res.json({ users: listUsers(getDb()) });
 });
 
@@ -117,7 +117,7 @@ const CreateUserSchema = z.object({
   role: z.enum(["ADMIN", "OPERATOR"]).default("OPERATOR"),
 });
 
-authRouter.post("/users", requireAuth, async (req, res, next) => {
+authRouter.post("/users", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const body = CreateUserSchema.parse(req.body);
     const user = await createUser(getDb(), body);
@@ -136,7 +136,7 @@ const UpdateUserSchema = z.object({
   active: z.boolean().optional(),
 });
 
-authRouter.patch("/users/:id", requireAuth, (req, res, next) => {
+authRouter.patch("/users/:id", requireAuth, requireAdmin, (req, res, next) => {
   try {
     const id = Number(req.params.id);
     const body = UpdateUserSchema.parse(req.body);
@@ -156,7 +156,7 @@ authRouter.patch("/users/:id", requireAuth, (req, res, next) => {
 
 const ResetPinSchema = z.object({ pin: z.string().regex(/^\d{4,8}$/) });
 
-authRouter.post("/users/:id/reset-pin", requireAuth, async (req, res, next) => {
+authRouter.post("/users/:id/reset-pin", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const id = Number(req.params.id);
     const { pin } = ResetPinSchema.parse(req.body);

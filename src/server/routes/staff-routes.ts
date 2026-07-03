@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { listStaff, createStaff, updateStaff, StaffError } from "../../staff/staff-service.js";
 import { getDb } from "../../db/database.js";
-import { requireAuth } from "../middleware/auth-middleware.js";
+import { requireAuth, requireAdmin } from "../middleware/auth-middleware.js";
 import { logAudit } from "../../audit/audit-service.js";
 
 export const staffRouter = Router();
@@ -16,7 +16,7 @@ const CreateSchema = z.object({
   type: z.enum(["TECHNICIAN"]).default("TECHNICIAN"),
 });
 
-staffRouter.post("/staff", requireAuth, (req, res, next) => {
+staffRouter.post("/staff", requireAuth, requireAdmin, (req, res, next) => {
   try {
     const body = CreateSchema.parse(req.body);
     const member = createStaff(getDb(), body);
@@ -34,7 +34,7 @@ const UpdateSchema = z.object({
   active: z.boolean().optional(),
 });
 
-staffRouter.patch("/staff/:id", requireAuth, (req, res, next) => {
+staffRouter.patch("/staff/:id", requireAuth, requireAdmin, (req, res, next) => {
   try {
     const id = Number(req.params.id);
     const body = UpdateSchema.parse(req.body);

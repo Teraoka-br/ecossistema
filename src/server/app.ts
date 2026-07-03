@@ -15,6 +15,7 @@ import { repairRouter } from "./routes/repair-routes.js";
 import { datasysRouter } from "./routes/datasys-routes.js";
 import { repairQueueRouter } from "./routes/repair-queue-routes.js";
 import { requireAuth } from "./middleware/auth-middleware.js";
+import { getDb } from "../db/database.js";
 
 export function createApp(): Express {
   const app = express();
@@ -23,6 +24,30 @@ export function createApp(): Express {
 
   // ─── Públicas (não exigem auth) ──────────────────────────────────────────
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
+
+  app.get("/api/ready", (_req, res) => {
+    const checks: Record<string, boolean | string | number> = {};
+    try {
+      const db = getDb();
+      const migrations = db.prepare("SELECT COUNT(*) AS c FROM schema_migrations").get() as { c: number };
+      checks.db = true;
+      checks.migrations = migrations.c;
+
+      const tables = ["repair_cases", "repair_match_results", "operational_reservations", "stock_movements"];
+      for (const t of tables) {
+        const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(t);
+        checks[t] = !!row;
+      }
+
+      const cols = db.prepare("PRAGMA table_info(repair_match_results)").all() as { name: string }[];
+      checks.allocated_reference_norm_col = cols.some(c => c.name === "allocated_reference_norm");
+
+      const allOk = Object.values(checks).every(v => v === true || typeof v === "number" && v > 0);
+      res.status(allOk ? 200 : 503).json({ ok: allOk, checks });
+    } catch (err) {
+      res.status(503).json({ ok: false, error: (err as Error).message, checks });
+    }
+  });
   app.use("/api/auth", authRouter);
 
   // ─── Protegidas ──────────────────────────────────────────────────────────

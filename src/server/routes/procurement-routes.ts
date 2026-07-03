@@ -57,7 +57,6 @@ procurementRouter.get("/purchase-requests/:id", (req, res) => {
 // ===========================================================================
 
 const createOrderSchema = z.object({
-  createdBy: z.string().min(1),
   supplier: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
   items: z
@@ -78,7 +77,8 @@ procurementRouter.post("/purchase-orders", (req, res) => {
     return res.status(400).json({ error: "Corpo inválido.", details: parsed.error.flatten() });
   }
   try {
-    const order = proc.createPurchaseOrder(getDb(), parsed.data);
+    const createdBy = req.sessionUser!.displayName;
+    const order = proc.createPurchaseOrder(getDb(), { ...parsed.data, createdBy });
     res.status(201).json({ order });
   } catch (err) {
     handleError(err, res);
@@ -100,7 +100,6 @@ procurementRouter.get("/purchase-orders/:id", (req, res) => {
 });
 
 const cancelOrderSchema = z.object({
-  cancelledBy: z.string().min(1),
   cancelReason: z.string().min(1),
 });
 
@@ -111,7 +110,8 @@ procurementRouter.post("/purchase-orders/:id/cancel", (req, res) => {
   }
   try {
     const id = idParam(req.params.id);
-    res.json({ order: proc.cancelPurchaseOrder(getDb(), id, parsed.data) });
+    const cancelledBy = req.sessionUser!.displayName;
+    res.json({ order: proc.cancelPurchaseOrder(getDb(), id, { ...parsed.data, cancelledBy }) });
   } catch (err) {
     handleError(err, res);
   }
@@ -139,7 +139,6 @@ procurementRouter.post("/purchase-orders/:id/receipts/preview", (req, res) => {
 });
 
 const confirmReceiptSchema = z.object({
-  receivedBy: z.string().min(1),
   notes: z.string().optional().nullable(),
   allowOverReceipt: z.boolean().optional(),
   justification: z.string().optional().nullable(),
@@ -153,7 +152,8 @@ procurementRouter.post("/purchase-orders/:id/receipts/confirm", (req, res) => {
   }
   try {
     const id = idParam(req.params.id);
-    res.json(recv.confirmReceipt(getDb(), id, parsed.data));
+    const receivedBy = req.sessionUser!.displayName;
+    res.json(recv.confirmReceipt(getDb(), id, { ...parsed.data, receivedBy }));
   } catch (err) {
     handleError(err, res);
   }

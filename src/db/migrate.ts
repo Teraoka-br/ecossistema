@@ -104,8 +104,34 @@ function guardOrderIdentityMigration(db: Db): void {
  * Nunca edite uma migration já existente para corrigir um problema: adicione
  * a guarda aqui, ou crie uma nova migration.
  */
-const PRE_MIGRATION_GUARDS: Record<string, (db: Db) => void> = {
-  "002_fix_order_identity.sql": guardOrderIdentityMigration,
+/**
+ * Sinal especial que uma guarda pode lançar para indicar que a migration
+ * já está efetivamente aplicada (e deve ser registrada como tal sem rodar
+ * o SQL). Tratado pelo runner, não propagado para o chamador.
+ */
+export class MigrationAlreadyApplied extends Error {
+  constructor(public readonly migrationName: string) {
+    super(`[migrate] migration ${migrationName} já aplicada — registrada sem rodar SQL.`);
+    this.name = "MigrationAlreadyApplied";
+  }
+}
+
+/**
+ * Guarda para 017: SQLite não tem ALTER TABLE ADD COLUMN IF NOT EXISTS.
+ * Se a coluna `allocated_reference_norm` já existir (banco criado por outro
+ * caminho), sinaliza ao runner para registrar a migration sem executar o SQL.
+ */
+function guard017AllocRefNorm(_db: Db, file: string): void {
+  if (!tableExists(_db, "repair_match_results")) return;
+  const cols = _db.prepare("PRAGMA table_info(repair_match_results)").all() as { name: string }[];
+  if (cols.some(c => c.name === "allocated_reference_norm")) {
+    throw new MigrationAlreadyApplied(file);
+  }
+}
+
+const PRE_MIGRATION_GUARDS: Record<string, (db: Db, file: string) => void> = {
+  "002_fix_order_identity.sql": (db) => guardOrderIdentityMigration(db),
+  "017_fix_allocated_ref_norm_column.sql": guard017AllocRefNorm,
 };
 
 /** Aplica todas as migrations pendentes, cada uma em sua própria transação. */
@@ -128,9 +154,20 @@ export function runMigrations(db: Db, opts: { backup?: boolean } = {}): Migratio
 
   const applied: string[] = [];
   for (const file of pending) {
-    // Guarda de segurança: roda FORA da transação da migration; se abortar,
-    // nenhuma linha é tocada e nenhuma migration (esta ou as seguintes) é aplicada.
-    PRE_MIGRATION_GUARDS[file]?.(db);
+    // Guarda de segurança: roda FORA da transação da migration.
+    // — Lança MigrationAlreadyApplied → registra e pula (sem rodar SQL).
+    // — Lança outro erro → aborta o lote inteiro sem tocar o banco.
+    try {
+      PRE_MIGRATION_GUARDS[file]?.(db, file);
+    } catch (guardErr) {
+      if (guardErr instanceof MigrationAlreadyApplied) {
+        db.prepare("INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)").run(file);
+        applied.push(file);
+        console.log(`[migrate] pulada (já aplicada): ${file}`);
+        continue;
+      }
+      throw guardErr; // erro real de guarda — aborta
+    }
 
     const sql = fs.readFileSync(path.join(dir, file), "utf8");
 
