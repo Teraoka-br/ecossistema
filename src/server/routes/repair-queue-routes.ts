@@ -9,7 +9,7 @@ import {
   deriveNextAction, QUEUE_FILTER_STATUSES, type QueueFilter,
 } from "../../match/next-action-service.js";
 import {
-  reserveKit, reservePartial, releaseReservation, directToTechnician,
+  reserveKitFromEngine, reservePartial, releaseReservation, directToTechnician,
   listReservationsByCase,
 } from "../../operational/reservation-service.js";
 import {
@@ -206,16 +206,15 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
 
 // ─── Separação / Reservas ─────────────────────────────────────────────────
 
+// Backend-driven: peças e referências determinadas pelo servidor via resultado do motor.
+// Frontend envia apenas o repairCaseId (URL). Body é ignorado.
 repairQueueRouter.post("/fila-reparos/:id/reserve-kit", requireAuth, (req, res, next) => {
   try {
     const db = getDb();
     const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
     const userId = (req as Request).sessionUser?.id ?? null;
-    const { parts } = req.body as { parts: Array<{ partRequestId: number; chavePeca: string; reference: string | null; quantity: number; availableQty: number }> };
-    if (!Array.isArray(parts) || parts.length === 0) {
-      return res.status(400).json({ error: "Lista de peças obrigatória." });
-    }
-    const reservations = reserveKit(db, repairCaseId, parts, userId);
+    const reservations = reserveKitFromEngine(db, repairCaseId, userId);
     res.json({ reservations });
   } catch (err) {
     next(err);

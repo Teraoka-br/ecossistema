@@ -5,7 +5,7 @@ import {
   listDatasysImports, searchDatasysRecords, DatasysError,
 } from "../../datasys/datasys-service.js";
 import { getDb } from "../../db/database.js";
-import { requireAuth } from "../middleware/auth-middleware.js";
+import { requireAuth, requireAdmin } from "../middleware/auth-middleware.js";
 import { logAudit } from "../../audit/audit-service.js";
 import { config } from "../config.js";
 
@@ -18,7 +18,7 @@ const upload = multer({
 
 datasysRouter.post(
   "/datasys/import/preview",
-  requireAuth,
+  requireAuth, requireAdmin,
   upload.single("file"),
   async (req, res, next) => {
     if (!req.file) { res.status(400).json({ error: "Arquivo não enviado." }); return; }
@@ -37,7 +37,7 @@ datasysRouter.post(
   },
 );
 
-datasysRouter.post("/datasys/import/confirm", requireAuth, async (req, res, next) => {
+datasysRouter.post("/datasys/import/confirm", requireAuth, requireAdmin, async (req, res, next) => {
   const { importId } = req.body as { importId?: number };
   if (!importId) { res.status(400).json({ error: "importId obrigatório." }); return; }
 

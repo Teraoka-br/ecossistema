@@ -85,8 +85,8 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
   useEffect(() => {
     fetch("/api/staff")
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then((d: { members: Array<{ id: number; name: string; active: number }> }) => {
-        setTechnicians(d.members.filter(m => m.active === 1));
+      .then((d: { staff: Array<{ id: number; name: string; active: boolean }> }) => {
+        setTechnicians(d.staff.filter(m => m.active));
       })
       .catch(() => {});
   }, []);
@@ -98,24 +98,14 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
 
   async function handleSeparateKit() {
     if (!data) return;
-    const indicadas = data.parts.filter(p => p.matchResultStatus === "MATCH" && p.reservationId === null && p.availableQty > 0);
-    if (indicadas.length === 0) return;
-
     setWorking(true);
     setError(null);
     try {
+      // Backend determina quais peças e referências reservar — não enviamos partes do cliente
       const r = await fetch(`/api/fila-reparos/${repairCaseId}/reserve-kit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          parts: indicadas.map(p => ({
-            partRequestId: p.id,
-            chavePeca: p.chavePeca ?? "",
-            reference: p.allocatedReference,
-            quantity: 1,
-            availableQty: p.availableQty,
-          })),
-        }),
+        body: JSON.stringify({}),
       });
       if (!r.ok) {
         const j = await r.json() as { error?: string };
