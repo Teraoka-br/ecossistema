@@ -1,68 +1,81 @@
 -- Migration 019 — Central de Dados: esquema corrigido para todos os 7 cards.
 --
--- Adds:
---   import_staged_files          — staging persistente (substitui Map em memória)
---   analise_mi_imports/rows      — Card 3: ANALISE MI ativa (não legado)
---   pedidos_imports/rows         — Card 4: PEDIDOS aba + BIPAGEM snapshot
---   central_import_issues        — log de problemas (todas as fontes, sem CHECK fixo)
--- Extends:
---   repair_cases                 — depot, filial
---   his_import_rows              — age_days
---   rel_seriais_rows             — colunas reais do CSV (Serial, Produto, etc.)
---   triagem_saida_rows           — repair_effective, motivo, apsn, datas
+-- Revisa e expande o esquema original (nunca aplicado ao banco operacional):
+--   import_staged_files      — staging persistente com ciclo de vida completo
+--   analise_mi_imports/rows  — Card 3: ANALISE MI como fonte ativa (não legado)
+--   pedidos_imports/rows     — Card 4: PEDIDOS 3 abas (reconciliação + BIPAGEM + PEACS)
+--   pedidos_bipagem_rows     — snapshot de unidades físicas da aba BIPAGEM
+--   sh_catalog_imports/rows  — Card 7: catálogo SH (CODIGO-based, não ordens de serviço)
+--   central_import_issues    — log genérico sem CHECK fixo de fonte
+-- Estende tabelas de 015/018:
+--   his_import_rows          — age_days
+--   rel_seriais_rows         — colunas reais do CSV datasys
+--   triagem_saida_rows       — concat_key, repair_effective, motivo, datas, tecnico
 
 -- =========================================================================
--- import_staged_files — staging de arquivos pendentes (resistente a reinício)
+-- import_staged_files — staging persistente (substitui Map em memória)
+-- Ciclo: UPLOADED → PREVIEW_READY → CONFIRMED | FAILED | CANCELLED | EXPIRED
 -- =========================================================================
 CREATE TABLE import_staged_files (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  source      TEXT    NOT NULL,
-  import_id   INTEGER NOT NULL,
-  staged_path TEXT    NOT NULL,
-  file_hash   TEXT    NOT NULL,
-  created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(source, import_id)
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  source          TEXT    NOT NULL,
+  filename        TEXT    NOT NULL,
+  file_hash       TEXT    NOT NULL,
+  staged_path     TEXT    NOT NULL,
+  file_size       INTEGER NOT NULL DEFAULT 0,
+  status          TEXT    NOT NULL DEFAULT 'UPLOADED'
+                    CHECK (status IN ('UPLOADED','PREVIEW_READY','CONFIRMED','FAILED','CANCELLED','EXPIRED')),
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+  expires_at      TEXT    NOT NULL DEFAULT (datetime('now','+4 hours')),
+  preview_json    TEXT,   -- resultado da prévia (JSON serializado)
+  error           TEXT,   -- mensagem de erro quando status=FAILED
+  confirmed_at    TEXT,   -- preenchido quando status=CONFIRMED
+  import_id_created INTEGER -- id do registro de importação criado na confirmação
 );
-CREATE INDEX idx_staged_source ON import_staged_files(source);
+CREATE INDEX idx_staged_source   ON import_staged_files(source);
+CREATE INDEX idx_staged_hash     ON import_staged_files(file_hash, source);
+CREATE INDEX idx_staged_status   ON import_staged_files(status);
+CREATE INDEX idx_staged_expires  ON import_staged_files(expires_at);
 
 -- =========================================================================
--- repair_cases: adicionar depot e filial para Card 2
+-- his_import_rows: adicionar age_days (Dias em Estoque) e source_line
 -- =========================================================================
-ALTER TABLE repair_cases ADD COLUMN depot  TEXT;
-ALTER TABLE repair_cases ADD COLUMN filial TEXT;
-
--- =========================================================================
--- his_import_rows: adicionar age_days (Dias em Estoque)
--- =========================================================================
-ALTER TABLE his_import_rows ADD COLUMN age_days INTEGER;
+ALTER TABLE his_import_rows ADD COLUMN age_days    INTEGER;
+ALTER TABLE his_import_rows ADD COLUMN source_line INTEGER;  -- linha da planilha de origem
 
 -- =========================================================================
 -- rel_seriais_rows: colunas reais do CSV datasys
--- (old cols imei/technician_name/age_days/cost ficam como deprecated)
+-- (cols antigas imei/technician_name/age_days/cost permanecem por compatibilidade)
 -- =========================================================================
-ALTER TABLE rel_seriais_rows ADD COLUMN serial        TEXT;
-ALTER TABLE rel_seriais_rows ADD COLUMN produto       TEXT;
-ALTER TABLE rel_seriais_rows ADD COLUMN descricao     TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN serial         TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN produto        TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN descricao      TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN codigo_comercial TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN fabricante     TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN disponivel     TEXT;
 ALTER TABLE rel_seriais_rows ADD COLUMN deposito_atual TEXT;
-ALTER TABLE rel_seriais_rows ADD COLUMN filial_atual  TEXT;
-ALTER TABLE rel_seriais_rows ADD COLUMN disponivel    TEXT;
-ALTER TABLE rel_seriais_rows ADD COLUMN dias_estoque  INTEGER;
+ALTER TABLE rel_seriais_rows ADD COLUMN filial_atual   TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN filial_entrada TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN rfid           TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN ean            TEXT;
+ALTER TABLE rel_seriais_rows ADD COLUMN dias_estoque   INTEGER;
 
 -- =========================================================================
--- triagem_saida_rows: colunas do TRIAGEM SAIDA.xlsx
+-- triagem_saida_rows: colunas completas do TRIAGEM SAIDA.xlsx
 -- =========================================================================
-ALTER TABLE triagem_saida_rows ADD COLUMN concat_key     TEXT;
-ALTER TABLE triagem_saida_rows ADD COLUMN apsn           TEXT;
-ALTER TABLE triagem_saida_rows ADD COLUMN data_reparo    TEXT;
-ALTER TABLE triagem_saida_rows ADD COLUMN data_triagem   TEXT;
-ALTER TABLE triagem_saida_rows ADD COLUMN repair_effective TEXT;  -- SIM | NÃO
-ALTER TABLE triagem_saida_rows ADD COLUMN motivo         TEXT;
-ALTER TABLE triagem_saida_rows ADD COLUMN assistencia    TEXT;
-ALTER TABLE triagem_saida_rows ADD COLUMN triador        TEXT;
-ALTER TABLE triagem_saida_rows ADD COLUMN manutencao     TEXT;
-ALTER TABLE triagem_saida_rows ADD COLUMN tipo_reparo    TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN concat_key      TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN apsn            TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN data_reparo     TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN data_triagem    TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN repair_effective TEXT;   -- SIM | NÃO
+ALTER TABLE triagem_saida_rows ADD COLUMN motivo          TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN assistencia     TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN triador         TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN manutencao      TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN tipo_reparo     TEXT;
 ALTER TABLE triagem_saida_rows ADD COLUMN estoque_destino TEXT;
-ALTER TABLE triagem_saida_rows ADD COLUMN tecnico        TEXT;
+ALTER TABLE triagem_saida_rows ADD COLUMN tecnico         TEXT;
 
 CREATE INDEX idx_triagem_saida_concat ON triagem_saida_rows(concat_key);
 
@@ -76,9 +89,7 @@ CREATE TABLE analise_mi_imports (
   status              TEXT    NOT NULL DEFAULT 'PENDING'
                         CHECK (status IN ('PENDING','COMPLETED','FAILED','CANCELLED')),
   rows_found          INTEGER NOT NULL DEFAULT 0,
-  rows_created        INTEGER NOT NULL DEFAULT 0,
-  rows_updated        INTEGER NOT NULL DEFAULT 0,
-  rows_skipped        INTEGER NOT NULL DEFAULT 0,
+  rows_valid          INTEGER NOT NULL DEFAULT 0,
   issues_count        INTEGER NOT NULL DEFAULT 0,
   created_by_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -89,7 +100,7 @@ CREATE UNIQUE INDEX idx_analise_mi_hash ON analise_mi_imports(file_hash)
 CREATE INDEX idx_analise_mi_created ON analise_mi_imports(created_at);
 
 -- =========================================================================
--- analise_mi_rows — uma linha por solicitação do ANALISE MI
+-- analise_mi_rows — uma linha por solicitação persistida do ANALISE MI
 -- =========================================================================
 CREATE TABLE analise_mi_rows (
   id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,27 +109,27 @@ CREATE TABLE analise_mi_rows (
   imei                  TEXT,
   imei_norm             TEXT,
   os                    TEXT,
-  os_norm               TEXT,
   brand                 TEXT,
   model                 TEXT,
   color                 TEXT,
   peca_solicitada       TEXT,
+  cor_na_peca           TEXT,
   concat_peca           TEXT,
+  data_pedido           TEXT,
   status_src            TEXT,
   deposito_src          TEXT,
+  descricao             TEXT,
   ref_peca              TEXT,
   solicitante           TEXT,
   raw_data_json         TEXT,
-  part_request_id       INTEGER REFERENCES part_requests(id) ON DELETE SET NULL,
-  action                TEXT,  -- CREATED | UPDATED | SKIPPED | ERROR
   created_at            TEXT    NOT NULL DEFAULT (datetime('now'))
 );
-CREATE INDEX idx_analise_mi_rows_import ON analise_mi_rows(analise_mi_import_id);
-CREATE INDEX idx_analise_mi_rows_idped  ON analise_mi_rows(id_pedido);
-CREATE INDEX idx_analise_mi_rows_pr     ON analise_mi_rows(part_request_id);
+CREATE INDEX idx_ami_rows_import ON analise_mi_rows(analise_mi_import_id);
+CREATE INDEX idx_ami_rows_idped  ON analise_mi_rows(id_pedido);
+CREATE INDEX idx_ami_rows_imei   ON analise_mi_rows(imei_norm);
 
 -- =========================================================================
--- pedidos_imports — cabeçalho de importações do PEDIDOS.xlsx (3 abas)
+-- pedidos_imports — cabeçalho para importações do PEDIDOS.xlsx (3 abas)
 -- =========================================================================
 CREATE TABLE pedidos_imports (
   id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,15 +137,10 @@ CREATE TABLE pedidos_imports (
   file_hash             TEXT    NOT NULL,
   status                TEXT    NOT NULL DEFAULT 'PENDING'
                           CHECK (status IN ('PENDING','COMPLETED','FAILED','CANCELLED')),
-  -- Aba PEDIDOS
   pedidos_rows_found    INTEGER NOT NULL DEFAULT 0,
-  pedidos_updated       INTEGER NOT NULL DEFAULT 0,
-  -- Aba BIPAGEM DE PEÇAS (snapshot)
   bipagem_rows_found    INTEGER NOT NULL DEFAULT 0,
-  bipagem_applied       INTEGER NOT NULL DEFAULT 0,
-  -- Aba PEACS (catálogo)
+  bipagem_refs_unique   INTEGER NOT NULL DEFAULT 0,
   peacs_rows_found      INTEGER NOT NULL DEFAULT 0,
-  peacs_entries_updated INTEGER NOT NULL DEFAULT 0,
   issues_count          INTEGER NOT NULL DEFAULT 0,
   created_by_user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at            TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -145,7 +151,7 @@ CREATE UNIQUE INDEX idx_pedidos_imports_hash ON pedidos_imports(file_hash)
 CREATE INDEX idx_pedidos_imports_created ON pedidos_imports(created_at);
 
 -- =========================================================================
--- pedidos_reconciliation_rows — resultado da aba PEDIDOS (status sync)
+-- pedidos_reconciliation_rows — aba PEDIDOS (reconciliação de status)
 -- =========================================================================
 CREATE TABLE pedidos_reconciliation_rows (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,12 +163,31 @@ CREATE TABLE pedidos_reconciliation_rows (
   status_src          TEXT,
   chave_peca          TEXT,
   ref_peca            TEXT,
-  part_request_id     INTEGER REFERENCES part_requests(id) ON DELETE SET NULL,
-  action              TEXT,  -- UPDATED | SKIPPED | NOT_FOUND
+  raw_data_json       TEXT,
   created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_ped_recon_import ON pedidos_reconciliation_rows(pedidos_import_id);
 CREATE INDEX idx_ped_recon_idped  ON pedidos_reconciliation_rows(id_pedido);
+
+-- =========================================================================
+-- pedidos_bipagem_rows — snapshot da aba BIPAGEM DE PEÇAS
+-- =========================================================================
+CREATE TABLE pedidos_bipagem_rows (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  pedidos_import_id   INTEGER NOT NULL REFERENCES pedidos_imports(id) ON DELETE CASCADE,
+  referencia          TEXT,
+  referencia_corr     TEXT,   -- ARRUMAR quando preenchido, senão igual a referencia
+  descricao           TEXT,
+  fornecedor          TEXT,
+  chave_peca          TEXT,
+  chave_peca_norm     TEXT,
+  status_src          TEXT,
+  id_peca_estoque     TEXT,
+  raw_data_json       TEXT,
+  created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_bipagem_import    ON pedidos_bipagem_rows(pedidos_import_id);
+CREATE INDEX idx_bipagem_chave     ON pedidos_bipagem_rows(chave_peca_norm);
 
 -- =========================================================================
 -- sh_catalog_imports — cabeçalho de importações do catálogo SH (peças)
@@ -174,8 +199,7 @@ CREATE TABLE sh_catalog_imports (
   status              TEXT    NOT NULL DEFAULT 'PENDING'
                         CHECK (status IN ('PENDING','COMPLETED','FAILED','CANCELLED')),
   rows_found          INTEGER NOT NULL DEFAULT 0,
-  rows_inserted       INTEGER NOT NULL DEFAULT 0,
-  rows_updated        INTEGER NOT NULL DEFAULT 0,
+  rows_valid          INTEGER NOT NULL DEFAULT 0,
   issues_count        INTEGER NOT NULL DEFAULT 0,
   created_by_user_id  INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -186,19 +210,19 @@ CREATE UNIQUE INDEX idx_sh_cat_hash ON sh_catalog_imports(file_hash)
 CREATE INDEX idx_sh_cat_created ON sh_catalog_imports(created_at);
 
 -- =========================================================================
--- sh_catalog_rows — uma linha por item do catálogo SH
+-- sh_catalog_rows — um item por linha do catálogo SH
 -- =========================================================================
 CREATE TABLE sh_catalog_rows (
   id                    INTEGER PRIMARY KEY AUTOINCREMENT,
   sh_catalog_import_id  INTEGER NOT NULL REFERENCES sh_catalog_imports(id) ON DELETE CASCADE,
-  codigo                TEXT,       -- CODIGO: identificador único do item
+  codigo                TEXT,
   numero                TEXT,
   nome                  TEXT,
   nomecurto             TEXT,
   grupo                 TEXT,
   subgrupo              TEXT,
   fabricante            TEXT,
-  estoque_disp          REAL,       -- saldo comparativo SH (não operacional)
+  estoque_disp          REAL,
   custo                 REAL,
   venda                 REAL,
   fornecedor            TEXT,
@@ -208,18 +232,17 @@ CREATE TABLE sh_catalog_rows (
   gtin                  TEXT,
   usa_serial            TEXT,
   raw_data_json         TEXT,
-  active                INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   created_at            TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_sh_cat_rows_import ON sh_catalog_rows(sh_catalog_import_id);
 CREATE INDEX idx_sh_cat_rows_codigo ON sh_catalog_rows(codigo);
 
 -- =========================================================================
--- central_import_issues — log genérico de problemas (todas as fontes)
+-- central_import_issues — log de issues de qualquer fonte da Central de Dados
 -- =========================================================================
 CREATE TABLE central_import_issues (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  source      TEXT    NOT NULL,  -- SH|HIS|REL_SERIAIS|BKP|TRIAGEM_SAIDA|ANALISE_MI|PEDIDOS
+  source      TEXT    NOT NULL,
   import_id   INTEGER NOT NULL,
   row_number  INTEGER,
   severity    TEXT    NOT NULL CHECK (severity IN ('ERROR','WARNING','INFO')),

@@ -12,15 +12,23 @@ import {
   getSourceHistory,
   cancelImport,
   getLegadoStatus,
-  previewRelSeriais, confirmRelSeriais,
-  previewSh, confirmSh,
+  cancelStaging,
+  listStagingBySource,
+  expireOldStagings,
   previewHis, confirmHis,
+  previewRelSeriais, confirmRelSeriais,
+  previewAnaliseMi, confirmAnaliseMi,
+  previewPedidos, confirmPedidos,
   previewBkp, confirmBkp,
   previewTriagemSaida, confirmTriagemSaida,
-  previewPeacs, confirmPeacs,
+  previewSh, confirmSh,
 } from "../../import-central/import-central-service.js";
 
 export const importCentralRouter = Router();
+
+const VALID_SOURCES: SourceKey[] = [
+  "his", "rel-seriais", "analise-mi", "pedidos", "bkp", "triagem-saida", "sh",
+];
 
 const upload = multer({
   dest: config.uploadTmpDir,
@@ -28,7 +36,7 @@ const upload = multer({
 });
 
 // ---------------------------------------------------------------------------
-// Status geral de todas as fontes
+// Status geral
 // ---------------------------------------------------------------------------
 
 importCentralRouter.get("/status", requireAuth, requireAdmin, (_req, res, next) => {
@@ -41,10 +49,6 @@ importCentralRouter.get("/status", requireAuth, requireAdmin, (_req, res, next) 
     next(err);
   }
 });
-
-// ---------------------------------------------------------------------------
-// Legado (somente leitura)
-// ---------------------------------------------------------------------------
 
 importCentralRouter.get("/legado/status", requireAuth, requireAdmin, (_req, res, next) => {
   try {
@@ -61,8 +65,7 @@ importCentralRouter.get("/legado/status", requireAuth, requireAdmin, (_req, res,
 importCentralRouter.get("/:source/history", requireAuth, requireAdmin, (req, res, next) => {
   try {
     const source = req.params.source as SourceKey;
-    const validSources: SourceKey[] = ["rel-seriais", "sh", "his", "bkp", "triagem-saida", "peacs"];
-    if (!validSources.includes(source)) return res.status(400).json({ error: "Fonte inválida." });
+    if (!VALID_SOURCES.includes(source)) return res.status(400).json({ error: "Fonte inválida." });
     res.json({ history: getSourceHistory(getDb(), source) });
   } catch (err) {
     next(err);
@@ -70,70 +73,114 @@ importCentralRouter.get("/:source/history", requireAuth, requireAdmin, (req, res
 });
 
 // ---------------------------------------------------------------------------
-// Cancel
+// Staging — listar, cancelar
 // ---------------------------------------------------------------------------
 
-importCentralRouter.delete("/:source/imports/:id", requireAuth, requireAdmin, (req, res, next) => {
+importCentralRouter.get("/:source/staged", requireAuth, requireAdmin, (req, res, next) => {
   try {
-    const db = getDb();
     const source = req.params.source as SourceKey;
-    const importId = parseInt(req.params.id);
-    const userId = (req as Request).sessionUser!.id;
-    cancelImport(db, source, importId, userId);
+    if (!VALID_SOURCES.includes(source)) return res.status(400).json({ error: "Fonte inválida." });
+    res.json({ staged: listStagingBySource(getDb(), source) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+importCentralRouter.delete("/:source/staged/:id", requireAuth, requireAdmin, (req, res, next) => {
+  try {
+    const source = req.params.source as SourceKey;
+    if (!VALID_SOURCES.includes(source)) return res.status(400).json({ error: "Fonte inválida." });
+    const stagingId = parseInt(req.params.id);
+    if (isNaN(stagingId)) return res.status(400).json({ error: "id inválido." });
+    const { stagedPath } = cancelStaging(getDb(), stagingId);
+    if (stagedPath) {
+      try { fs.unlinkSync(stagedPath); } catch { /* ignore */ }
+    }
     res.json({ ok: true });
   } catch (err) {
     if (err instanceof ImportCentralError) {
-      const status = err.code === "NOT_FOUND" ? 404 : 409;
-      return res.status(status).json({ error: err.message, code: err.code });
+      return res.status(err.code === "NOT_FOUND" ? 404 : 409).json({ error: err.message, code: err.code });
     }
     next(err);
   }
 });
 
 // ---------------------------------------------------------------------------
-// Upload → Preview (per source)
+// Cancel import record
 // ---------------------------------------------------------------------------
 
-type PreviewFn = (db: ReturnType<typeof getDb>, filePath: string, filename: string, userId: number | null) => Promise<unknown>;
+importCentralRouter.delete("/:source/imports/:id", requireAuth, requireAdmin, (req, res, next) => {
+  try {
+    const source = req.params.source as SourceKey;
+    if (!VALID_SOURCES.includes(source)) return res.status(400).json({ error: "Fonte inválida." });
+    const importId = parseInt(req.params.id);
+    if (isNaN(importId)) return res.status(400).json({ error: "id inválido." });
+    cancelImport(getDb(), source, importId);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof ImportCentralError) {
+      return res.status(err.code === "NOT_FOUND" ? 404 : 409).json({ error: err.message, code: err.code });
+    }
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Upload → Preview (DB-backed staging)
+// ---------------------------------------------------------------------------
+
+type PreviewFn = (
+  db: ReturnType<typeof getDb>,
+  filePath: string,
+  filename: string,
+  userId: number | null,
+) => Promise<unknown>;
 
 const previewFns: Record<SourceKey, PreviewFn> = {
-  "rel-seriais":   (db, fp, fn, uid) => previewRelSeriais(db, fp, fn, uid),
-  sh:              (db, fp, fn, uid) => previewSh(db, fp, fn, uid),
   his:             (db, fp, fn, uid) => previewHis(db, fp, fn, uid),
+  "rel-seriais":   (db, fp, fn, uid) => previewRelSeriais(db, fp, fn, uid),
+  "analise-mi":    (db, fp, fn, uid) => previewAnaliseMi(db, fp, fn, uid),
+  pedidos:         (db, fp, fn, uid) => previewPedidos(db, fp, fn, uid),
   bkp:             (db, fp, fn, uid) => previewBkp(db, fp, fn, uid),
   "triagem-saida": (db, fp, fn, uid) => previewTriagemSaida(db, fp, fn, uid),
-  peacs:           (db, fp, fn, uid) => previewPeacs(db, fp, fn, uid),
+  sh:              (db, fp, fn, uid) => previewSh(db, fp, fn, uid),
 };
 
 importCentralRouter.post(
   "/:source/preview",
-  requireAuth, requireAdmin,
+  requireAuth,
+  requireAdmin,
   upload.single("file"),
   async (req, res, next) => {
     const source = req.params.source as SourceKey;
-    const validSources = Object.keys(previewFns) as SourceKey[];
-    if (!validSources.includes(source)) return res.status(400).json({ error: "Fonte inválida." });
+    if (!VALID_SOURCES.includes(source)) return res.status(400).json({ error: "Fonte inválida." });
     if (!req.file) return res.status(400).json({ error: "Arquivo não enviado." });
 
     const userId = (req as Request).sessionUser!.id;
-    const filePath = req.file.path;
-    const filename = req.file.originalname;
 
-    // Stage the file for confirm step (move to named location so it survives temp cleanup)
-    const stagedPath = path.join(config.uploadTmpDir, `import-central-${source}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    fs.copyFileSync(filePath, stagedPath);
-    fs.unlinkSync(filePath);
+    // Move para caminho nomeado com TTL (staging persistente)
+    const ext = path.extname(req.file.originalname) || "";
+    const stagedPath = path.join(
+      config.uploadTmpDir,
+      `staged-${source}-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`,
+    );
+    try {
+      fs.renameSync(req.file.path, stagedPath);
+    } catch {
+      fs.copyFileSync(req.file.path, stagedPath);
+      try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+    }
 
     try {
       const db = getDb();
-      const result = await previewFns[source](db, stagedPath, filename, userId);
+      // Expirar previews antigos em background
+      const expired = expireOldStagings(db);
+      for (const p of expired) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
 
-      // Store staged file path in-memory (preview→confirm, same process)
-      stagedFiles.set(`${source}:${(result as { importId: number }).importId}`, stagedPath);
-
-      res.json({ ...result as object, stagedPath: undefined });
+      const result = await previewFns[source](db, stagedPath, req.file.originalname, userId);
+      res.json(result as object);
     } catch (err) {
-      // Clean up staged file on error
+      // O staging já foi marcado como FAILED no service; só limpa o arquivo físico
       try { fs.unlinkSync(stagedPath); } catch { /* ignore */ }
       if (err instanceof ImportCentralError) {
         return res.status(422).json({ error: err.message, code: err.code });
@@ -143,50 +190,45 @@ importCentralRouter.post(
   },
 );
 
-// In-memory map: "source:importId" → staged file path
-// Fine for single-process usage; restarts lose pending previews (user must re-upload)
-const stagedFiles = new Map<string, string>();
-
 // ---------------------------------------------------------------------------
-// Confirm
+// Confirm (usa stagingId em vez de importId+filePath em memória)
 // ---------------------------------------------------------------------------
 
-type ConfirmFn = (db: ReturnType<typeof getDb>, importId: number, filePath: string, userId: number | null) => unknown;
+type ConfirmFn = (
+  db: ReturnType<typeof getDb>,
+  stagingId: number,
+  userId: number | null,
+) => Promise<unknown>;
 
 const confirmFns: Record<SourceKey, ConfirmFn> = {
-  "rel-seriais":   (db, id, fp, uid) => confirmRelSeriais(db, id, fp, uid),
-  sh:              (db, id, fp, uid) => confirmSh(db, id, fp, uid),
-  his:             (db, id, fp, uid) => confirmHis(db, id, fp, uid),
-  bkp:             (db, id, fp, uid) => confirmBkp(db, id, fp, uid),
-  "triagem-saida": (db, id, fp, uid) => confirmTriagemSaida(db, id, fp, uid),
-  peacs:           (db, id, fp, uid) => confirmPeacs(db, id, fp, uid),
+  his:             async (db, sid, uid) => confirmHis(db, sid, uid),
+  "rel-seriais":   (db, sid, uid) => confirmRelSeriais(db, sid, uid),
+  "analise-mi":    async (db, sid, uid) => confirmAnaliseMi(db, sid, uid),
+  pedidos:         async (db, sid, uid) => confirmPedidos(db, sid, uid),
+  bkp:             async (db, sid, uid) => confirmBkp(db, sid, uid),
+  "triagem-saida": async (db, sid, uid) => confirmTriagemSaida(db, sid, uid),
+  sh:              async (db, sid, uid) => confirmSh(db, sid, uid),
 };
 
-importCentralRouter.post("/:source/confirm", requireAuth, requireAdmin, (req, res, next) => {
+importCentralRouter.post("/:source/confirm", requireAuth, requireAdmin, async (req, res, next) => {
   const source = req.params.source as SourceKey;
-  const validSources = Object.keys(confirmFns) as SourceKey[];
-  if (!validSources.includes(source)) return res.status(400).json({ error: "Fonte inválida." });
+  if (!VALID_SOURCES.includes(source)) return res.status(400).json({ error: "Fonte inválida." });
 
-  const { importId } = req.body as { importId?: number };
-  if (!importId) return res.status(400).json({ error: "importId obrigatório." });
-
-  const stagedKey = `${source}:${importId}`;
-  const stagedPath = stagedFiles.get(stagedKey);
-  if (!stagedPath || !fs.existsSync(stagedPath)) {
-    return res.status(410).json({ error: "Arquivo temporário não encontrado. Faça o upload novamente.", code: "STAGED_FILE_GONE" });
-  }
+  const { stagingId } = req.body as { stagingId?: number };
+  if (!stagingId) return res.status(400).json({ error: "stagingId obrigatório." });
 
   const userId = (req as Request).sessionUser!.id;
 
   try {
     const db = getDb();
-    const result = confirmFns[source](db, importId, stagedPath, userId);
-    stagedFiles.delete(stagedKey);
-    try { fs.unlinkSync(stagedPath); } catch { /* ignore */ }
+    const result = await confirmFns[source](db, stagingId, userId);
     res.json({ ok: true, ...(result as object) });
   } catch (err) {
     if (err instanceof ImportCentralError) {
-      const status = err.code === "NOT_FOUND" ? 404 : err.code === "ALREADY_IMPORTED" ? 409 : 422;
+      const status =
+        err.code === "NOT_FOUND" ? 404 :
+        err.code === "ALREADY_IMPORTED" ? 409 :
+        err.code === "FILE_GONE" ? 410 : 422;
       return res.status(status).json({ error: err.message, code: err.code });
     }
     next(err);

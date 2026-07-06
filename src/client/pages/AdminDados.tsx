@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import {
   Upload, Clock, CheckCircle2, XCircle, AlertTriangle,
-  X, Loader2, RefreshCw, Lock,
+  X, Loader2, RefreshCw, Info,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -15,25 +15,27 @@ interface SourceStatus {
   totalImports: number;
   lastRowsFound: number;
   lastIssuesCount: number;
+  pendingStaging: number;
 }
 
+type SourceKey = "his" | "rel-seriais" | "analise-mi" | "pedidos" | "bkp" | "triagem-saida" | "sh";
+
 interface AllStatus {
-  "rel-seriais": SourceStatus;
-  sh: SourceStatus;
   his: SourceStatus;
+  "rel-seriais": SourceStatus;
+  "analise-mi": SourceStatus;
+  pedidos: SourceStatus;
   bkp: SourceStatus;
   "triagem-saida": SourceStatus;
-  peacs: SourceStatus;
-  legado: SourceStatus;
+  sh: SourceStatus;
 }
 
 interface LegadoStatus {
   initialized: boolean;
-  batchId: number | null;
-  batchStatus: string | null;
+  lastBatchId: number | null;
+  lastBatchAt: string | null;
   ordersFound: number;
   inventoryFound: number;
-  createdAt: string | null;
 }
 
 interface PreviewIssue {
@@ -44,16 +46,19 @@ interface PreviewIssue {
 }
 
 interface PreviewResult {
-  importId: number;
-  source: string;
+  stagingId: number;
+  source: SourceKey;
   filename: string;
   fileHash: string;
+  fileSize: number;
+  status: string;
   rowsFound: number;
   rowsValid: number;
   issues: PreviewIssue[];
   alreadyImported: boolean;
   existingImportId: number | null;
   previewRows: Record<string, unknown>[];
+  extra?: Record<string, unknown>;
 }
 
 interface HistoryEntry {
@@ -62,8 +67,6 @@ interface HistoryEntry {
   fileHash: string;
   status: string;
   rowsFound: number;
-  rowsLinked?: number;
-  rowsUnlinked?: number;
   rowsValid?: number;
   issuesCount: number;
   createdAt: string;
@@ -71,15 +74,22 @@ interface HistoryEntry {
   createdByName?: string | null;
 }
 
-type SourceKey = "rel-seriais" | "sh" | "his" | "bkp" | "triagem-saida" | "peacs";
+interface SourceConfig {
+  arquivo: string;
+  aba: string;
+  chave: string;
+  camposPrincipais: string[];
+  destino: string;
+  observacoes: string;
+}
 
 interface SourceDefinition {
   key: SourceKey;
   label: string;
   description: string;
-  sourceType: "Snapshot" | "Eventos" | "Enriquecimento" | "Catálogo" | "Legado";
-  expectedFile: string;
+  sourceType: "Snapshot" | "Eventos" | "Enriquecimento" | "Catálogo";
   accept: string;
+  config: SourceConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,52 +98,109 @@ interface SourceDefinition {
 
 const SOURCES: SourceDefinition[] = [
   {
+    key: "his",
+    label: "His Estoque",
+    description: "Histórico de custo e idade dos aparelhos em estoque (Trade-In). Regra: última ocorrência por IMEI.",
+    sourceType: "Snapshot",
+    accept: ".xls,.xlsx",
+    config: {
+      arquivo: "PEDIDOS.xlsx (ou qualquer .xlsx com a aba)",
+      aba: "His Estoque",
+      chave: "IMEI (col B = Serial)",
+      camposPrincipais: ["Serial → IMEI", "Dias em Estoque (col R)", "Custo estoque (col S)", "Data Relatorio (col U)"],
+      destino: "his_import_rows",
+      observacoes: "Última ocorrência física por IMEI (equivalente a PROCX search_mode=-1). Zero preservado.",
+    },
+  },
+  {
     key: "rel-seriais",
     label: "Rel. Estoque de Seriais",
-    description: "CSV do Datasys com IMEI, técnico responsável, idade e custo auditado dos aparelhos em estoque.",
+    description: "CSV do Datasys com localização, depósito e filial de cada aparelho. Chave: Serial.",
     sourceType: "Snapshot",
-    expectedFile: "Rel_Estoque_de_Seriais.csv",
     accept: ".csv",
+    config: {
+      arquivo: "Rel_Estoque_de_Seriais (...).csv",
+      aba: "CSV (separado por ;)",
+      chave: "Serial",
+      camposPrincipais: ["Serial", "Produto", "Descrição", "Depósito Atual", "Filial Atual", "Disponível", "Dias em Estoque"],
+      destino: "rel_seriais_rows",
+      observacoes: "Arquivo grande (~18 MB, ~97k linhas). Lido em streaming. Não exige IMEI válido.",
+    },
   },
   {
-    key: "sh",
-    label: "SH Oficina",
-    description: "Exportação do sistema SH com dados técnicos de reparo por IMEI (OS, defeito, status, data).",
-    sourceType: "Enriquecimento",
-    expectedFile: "sH.xls / sH.xlsx",
-    accept: ".xls,.xlsx",
-  },
-  {
-    key: "his",
-    label: "His Estoque (Trade-In)",
-    description: "Controle de entrada de aparelhos Trade-In com IMEI, OS, custo auditado e data de entrada.",
+    key: "analise-mi",
+    label: "Análise MI",
+    description: "Demandas de peças por aparelho (IMEI/OS/ID PEDIDO). Base de reconciliação de solicitações.",
     sourceType: "Eventos",
-    expectedFile: "CONTROLE DE ENTRADA TRADE-IN.xlsx",
     accept: ".xls,.xlsx",
+    config: {
+      arquivo: "ANALISE MI.xlsx",
+      aba: "ANALISEMI (fallback: ANALISE)",
+      chave: "ID PEDIDO",
+      camposPrincipais: ["ID PEDIDO", "IMEI", "OS", "PEÇASOLICITADA", "STATUS", "DEPÓSITO", "REF", "SOLICITANTE"],
+      destino: "analise_mi_rows",
+      observacoes: "ID PEDIDO como chave de idempotência. Sem IMEI válido: linha sem vínculo a aparelho.",
+    },
+  },
+  {
+    key: "pedidos",
+    label: "Pedidos (3 abas)",
+    description: "PEDIDOS.xlsx completo: reconciliação de pedidos, snapshot da BIPAGEM DE PEÇAS e catálogo PEACS.",
+    sourceType: "Eventos",
+    accept: ".xls,.xlsx",
+    config: {
+      arquivo: "PEDIDOS.xlsx",
+      aba: "PEDIDOS + BIPAGEM DE PEÇAS + TABELA DE AVALIAÇÃO (PEACS)",
+      chave: "ID PEDIDO (PEDIDOS) · REFERENCIA (BIPAGEM) · MARCA/MODELO (PEACS)",
+      camposPrincipais: ["ID PEDIDO", "IMEI", "STATUS", "REFPEÇA", "CHAVEPECA", "REFERENCIA", "ARRUMAR", "TABELA SEMINOVO PRAZO"],
+      destino: "pedidos_reconciliation_rows + pedidos_bipagem_rows + peacs_catalog",
+      observacoes: "A aba His Estoque não é lida aqui — use o card 'His Estoque'. PEACS substitui catálogo ativo atomicamente.",
+    },
   },
   {
     key: "bkp",
     label: "BKP Sistêmico",
-    description: "Backup do sistema com 3 abas: reparos técnicos, baixas de peças e triagem de entrada.",
+    description: "Backup com 3 abas: reparos técnicos realizados, baixas de peças e triagem de entrada.",
     sourceType: "Eventos",
-    expectedFile: "BKP SISTEMICO.xlsx",
     accept: ".xls,.xlsx",
+    config: {
+      arquivo: "BKP SISTEMICO.xlsx",
+      aba: "REPAROS TECNICOS + BAIXA_DE_PEÇA + TRIAGEM ENTRADA",
+      chave: "ID (REPAROS/BAIXA) · OS SH + IMEI (TRIAGEM)",
+      camposPrincipais: ["ID", "IMEI", "OS", "DATA", "STATUS", "PEÇA UTILIZADA", "REF", "TÉCNICO RESPONSÁVEL", "TIPO DE REPARO"],
+      destino: "systemic_repair_events + systemic_part_writeoffs + device_location_snapshots",
+      observacoes: "INSERT OR IGNORE — idempotente por ID interno. Triagem sem ID usa IMEI+OS como chave.",
+    },
   },
   {
     key: "triagem-saida",
-    label: "Triagem Saída",
-    description: "Registro de saída de aparelhos com destino (venda, reparo, sucata), grade e data.",
+    label: "Triagem de Saída",
+    description: "Saída de aparelhos: destino, reparo efetivo, motivo, técnico e datas. Chave: CONCAT.",
     sourceType: "Eventos",
-    expectedFile: "TRIAGEM SAIDA.xlsx",
     accept: ".xls,.xlsx",
+    config: {
+      arquivo: "TRIAGEM SAIDA.xlsx",
+      aba: "triagem saida",
+      chave: "CONCAT",
+      camposPrincipais: ["CONCAT", "IMEI", "OS", "REPARO EFETIVO", "MOTIVO", "ESTOQUE DESTINO", "DATA REPARO", "DATA TRIAGEM", "TÉCNICO RESPONSÁVEL"],
+      destino: "triagem_saida_rows",
+      observacoes: "Aceita tanto MANUTEÇÃO (com typo) quanto MANUTENÇÃO. REPARO EFETIVO=NÃO sem motivo gera aviso.",
+    },
   },
   {
-    key: "peacs",
-    label: "PEACS — Catálogo de Preços",
-    description: "Tabela de avaliação com preços estimados de venda por marca / modelo / capacidade.",
+    key: "sh",
+    label: "SH — Catálogo",
+    description: "Catálogo de peças do sistema SH: código, nome, grupo, estoque e preços.",
     sourceType: "Catálogo",
-    expectedFile: "PEDIDOS.xlsx (aba TABELA DE AVALIAÇÃO PEACS)",
     accept: ".xls,.xlsx",
+    config: {
+      arquivo: "sH.xlsx",
+      aba: "sH (ou primeira aba)",
+      chave: "CODIGO",
+      camposPrincipais: ["CODIGO", "NOME", "GRUPO", "SUBGRUPO", "FABRICANTE", "ESTOQUE_DISP", "CUSTO", "VENDA"],
+      destino: "sh_catalog_rows",
+      observacoes: "Se o arquivo tiver DEFEITO/SERIE (ordens de serviço) em vez de NOME/GRUPO, gera aviso FORMAT_OS.",
+    },
   },
 ];
 
@@ -142,7 +209,6 @@ const SOURCE_TYPE_COLORS: Record<string, string> = {
   Eventos:       "var(--color-warning)",
   Enriquecimento:"var(--color-success)",
   Catálogo:      "#a78bfa",
-  Legado:        "var(--color-text-muted)",
 };
 
 // ---------------------------------------------------------------------------
@@ -172,12 +238,60 @@ function StatusDot({ status }: { status: string | null }) {
 
   return (
     <span style={{
-      display: "inline-block",
-      width: 8, height: 8,
-      borderRadius: "50%",
-      backgroundColor: color,
-      flexShrink: 0,
+      display: "inline-block", width: 8, height: 8,
+      borderRadius: "50%", backgroundColor: color, flexShrink: 0,
     }} />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Configuração modal
+// ---------------------------------------------------------------------------
+
+function ConfigModal({ def, onClose }: { def: SourceDefinition; onClose: () => void }) {
+  const c = def.config;
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div onClick={onClose} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.5)" }} />
+      <div style={{
+        position: "relative", width: "min(520px, 95vw)",
+        background: "var(--color-surface)", borderRadius: 8,
+        boxShadow: "0 8px 40px rgba(0,0,0,0.5)",
+        maxHeight: "85vh", overflowY: "auto",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 20px", borderBottom: "1px solid var(--color-border)" }}>
+          <Info size={15} style={{ color: "var(--color-accent)" }} />
+          <span style={{ fontWeight: 600, flex: 1 }}>Configuração — {def.label}</span>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}><X size={14} /></button>
+        </div>
+        <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
+          {([
+            ["Arquivo esperado", c.arquivo],
+            ["Aba(s)",           c.aba],
+            ["Chave",            c.chave],
+            ["Tabela destino",   c.destino],
+            ["Observações",      c.observacoes],
+          ] as [string, string][]).map(([label, val]) => (
+            <div key={label}>
+              <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginBottom: 3 }}>{label}</div>
+              <div style={{ fontSize: 13 }}>{val}</div>
+            </div>
+          ))}
+          <div>
+            <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginBottom: 6 }}>Campos principais</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {c.camposPrincipais.map(f => (
+                <span key={f} style={{
+                  fontSize: 11, padding: "2px 8px",
+                  background: "var(--color-surface-alt)", border: "1px solid var(--color-border)",
+                  borderRadius: 10, fontFamily: "monospace",
+                }}>{f}</span>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -197,10 +311,7 @@ function HistoryDrawer({ source, label, onClose }: { source: SourceKey; label: s
   }, [source]);
 
   return (
-    <div style={{
-      position: "fixed", inset: 0, zIndex: 1000,
-      display: "flex", justifyContent: "flex-end",
-    }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", justifyContent: "flex-end" }}>
       <div onClick={onClose} style={{ flex: 1, background: "rgba(0,0,0,0.4)" }} />
       <div style={{
         width: 480, background: "var(--color-surface)", boxShadow: "-4px 0 24px rgba(0,0,0,0.4)",
@@ -224,8 +335,6 @@ function HistoryDrawer({ source, label, onClose }: { source: SourceKey; label: s
               <div style={{ fontSize: 12, color: "var(--color-text-muted)", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
                 <span>Status: {h.status}</span>
                 <span>Linhas: {h.rowsFound}</span>
-                {h.rowsLinked !== undefined && <span>Vinculadas: {h.rowsLinked}</span>}
-                {h.rowsUnlinked !== undefined && <span>Sem vínculo: {h.rowsUnlinked}</span>}
                 {h.rowsValid !== undefined && <span>Válidas: {h.rowsValid}</span>}
                 <span>Problemas: {h.issuesCount}</span>
                 <span style={{ gridColumn: "1 / -1" }}>Importado: {fmtDate(h.createdAt)}</span>
@@ -256,10 +365,10 @@ function UploadDialog({
   onDone: () => void;
 }) {
   const [step, setStep] = useState<"upload" | "preview" | "confirming" | "done" | "error">("upload");
-  const [preview, setPreview]     = useState<PreviewResult | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [preview, setPreview]       = useState<PreviewResult | null>(null);
+  const [uploading, setUploading]   = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [errorMsg, setErrorMsg]   = useState<string | null>(null);
+  const [errorMsg, setErrorMsg]     = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function handleFileSelect(file: File) {
@@ -292,7 +401,7 @@ function UploadDialog({
       const r = await fetch(`/api/import-central/${source.key}/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ importId: preview.importId }),
+        body: JSON.stringify({ stagingId: preview.stagingId }),
       });
       const data = await r.json() as { ok?: boolean; error?: string };
       if (!r.ok) {
@@ -310,9 +419,9 @@ function UploadDialog({
     }
   }
 
-  async function handleCancel() {
-    if (preview && !preview.alreadyImported) {
-      await fetch(`/api/import-central/${source.key}/imports/${preview.importId}`, { method: "DELETE" }).catch(() => null);
+  function handleCancel() {
+    if (preview) {
+      fetch(`/api/import-central/${source.key}/staged/${preview.stagingId}`, { method: "DELETE" }).catch(() => null);
     }
     onClose();
   }
@@ -328,7 +437,6 @@ function UploadDialog({
         boxShadow: "0 8px 40px rgba(0,0,0,0.5)",
         display: "flex", flexDirection: "column", maxHeight: "90vh", overflow: "hidden",
       }}>
-        {/* Header */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 20px", borderBottom: "1px solid var(--color-border)" }}>
           <Upload size={15} style={{ color: "var(--color-accent)" }} />
           <span style={{ fontWeight: 600, flex: 1 }}>Importar — {source.label}</span>
@@ -336,18 +444,13 @@ function UploadDialog({
         </div>
 
         <div style={{ overflowY: "auto", padding: 20, flex: 1 }}>
-          {/* Upload step */}
           {step === "upload" && (
             <div>
               <p style={{ fontSize: 13, color: "var(--color-text-muted)", marginBottom: 16 }}>
-                Arquivo esperado: <strong>{source.expectedFile}</strong>
+                Arquivo esperado: <strong>{source.config.arquivo}</strong>
               </p>
               <div
-                style={{
-                  border: "2px dashed var(--color-border)", borderRadius: 8,
-                  padding: 32, textAlign: "center", cursor: "pointer",
-                  transition: "border-color 0.15s",
-                }}
+                style={{ border: "2px dashed var(--color-border)", borderRadius: 8, padding: 32, textAlign: "center", cursor: "pointer" }}
                 onClick={() => inputRef.current?.click()}
                 onDragOver={e => { e.preventDefault(); }}
                 onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) handleFileSelect(f); }}
@@ -362,7 +465,6 @@ function UploadDialog({
             </div>
           )}
 
-          {/* Preview step */}
           {step === "preview" && preview && (
             <div>
               {preview.alreadyImported && (
@@ -373,22 +475,17 @@ function UploadDialog({
               )}
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
-                <div style={{ padding: 10, background: "var(--color-surface-alt)", borderRadius: 6 }}>
-                  <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>Arquivo</div>
-                  <div style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={preview.filename}>{preview.filename}</div>
-                </div>
-                <div style={{ padding: 10, background: "var(--color-surface-alt)", borderRadius: 6 }}>
-                  <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>Hash (SHA-256)</div>
-                  <div style={{ fontFamily: "monospace", fontSize: 11 }}>{preview.fileHash.slice(0, 16)}…</div>
-                </div>
-                <div style={{ padding: 10, background: "var(--color-surface-alt)", borderRadius: 6 }}>
-                  <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>Linhas encontradas</div>
-                  <div style={{ fontWeight: 600, fontSize: 18 }}>{preview.rowsFound}</div>
-                </div>
-                <div style={{ padding: 10, background: "var(--color-surface-alt)", borderRadius: 6 }}>
-                  <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>Linhas válidas</div>
-                  <div style={{ fontWeight: 600, fontSize: 18, color: preview.rowsValid > 0 ? "var(--color-success)" : "var(--color-danger)" }}>{preview.rowsValid}</div>
-                </div>
+                {[
+                  { label: "Arquivo", value: preview.filename, mono: false },
+                  { label: "SHA-256", value: preview.fileHash.slice(0, 16) + "…", mono: true },
+                  { label: "Linhas encontradas", value: String(preview.rowsFound), mono: false },
+                  { label: "Linhas válidas", value: String(preview.rowsValid), mono: false },
+                ].map(({ label, value, mono }) => (
+                  <div key={label} style={{ padding: 10, background: "var(--color-surface-alt)", borderRadius: 6 }}>
+                    <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>{label}</div>
+                    <div style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: mono ? "monospace" : undefined }}>{value}</div>
+                  </div>
+                ))}
               </div>
 
               {preview.issues.length > 0 && (
@@ -398,12 +495,12 @@ function UploadDialog({
                     {preview.issues.map((issue, i) => (
                       <div key={i} style={{
                         display: "flex", gap: 8, padding: "6px 10px",
-                        background: issue.severity === "ERROR" ? "rgba(239,68,68,0.08)" : "rgba(245,158,11,0.08)",
+                        background: issue.severity === "ERROR" ? "rgba(239,68,68,0.08)" : issue.severity === "WARNING" ? "rgba(245,158,11,0.08)" : "rgba(99,102,241,0.06)",
                         borderRadius: 4, fontSize: 12,
-                        borderLeft: `3px solid ${issue.severity === "ERROR" ? "var(--color-danger)" : "var(--color-warning)"}`,
+                        borderLeft: `3px solid ${issue.severity === "ERROR" ? "var(--color-danger)" : issue.severity === "WARNING" ? "var(--color-warning)" : "var(--color-info)"}`,
                       }}>
-                        <span style={{ flexShrink: 0, color: issue.severity === "ERROR" ? "var(--color-danger)" : "var(--color-warning)" }}>
-                          {issue.severity === "ERROR" ? "ERRO" : "AVISO"}
+                        <span style={{ flexShrink: 0, color: issue.severity === "ERROR" ? "var(--color-danger)" : issue.severity === "WARNING" ? "var(--color-warning)" : "var(--color-info)" }}>
+                          {issue.severity}
                         </span>
                         <span style={{ color: "var(--color-text-muted)" }}>
                           {issue.row != null ? `linha ${issue.row}: ` : ""}{issue.message}
@@ -442,10 +539,18 @@ function UploadDialog({
                   </div>
                 </div>
               )}
+
+              {preview.extra && (
+                <details style={{ marginTop: 16 }}>
+                  <summary style={{ fontSize: 12, color: "var(--color-text-muted)", cursor: "pointer" }}>Detalhes técnicos do preview</summary>
+                  <pre style={{ fontSize: 11, background: "var(--color-surface-alt)", padding: 12, borderRadius: 4, overflowX: "auto", marginTop: 8 }}>
+                    {JSON.stringify(preview.extra, null, 2)}
+                  </pre>
+                </details>
+              )}
             </div>
           )}
 
-          {/* Done */}
           {step === "done" && (
             <div style={{ textAlign: "center", padding: 24 }}>
               <CheckCircle2 size={40} style={{ color: "var(--color-success)", marginBottom: 12 }} />
@@ -453,7 +558,6 @@ function UploadDialog({
             </div>
           )}
 
-          {/* Error */}
           {step === "error" && (
             <div style={{ textAlign: "center", padding: 24 }}>
               <XCircle size={40} style={{ color: "var(--color-danger)", marginBottom: 12 }} />
@@ -463,7 +567,6 @@ function UploadDialog({
           )}
         </div>
 
-        {/* Footer */}
         {(step === "preview" || step === "error") && (
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "12px 20px", borderTop: "1px solid var(--color-border)" }}>
             <button className="btn btn-secondary btn-sm" onClick={handleCancel}>
@@ -494,11 +597,13 @@ function SourceCard({
   status,
   onUpload,
   onHistory,
+  onConfig,
 }: {
   def: SourceDefinition;
   status: SourceStatus;
   onUpload: () => void;
   onHistory: () => void;
+  onConfig: () => void;
 }) {
   const typeColor = SOURCE_TYPE_COLORS[def.sourceType] ?? "var(--color-text-muted)";
 
@@ -507,35 +612,41 @@ function SourceCard({
       background: "var(--color-surface)", border: "1px solid var(--color-border)",
       borderRadius: 8, padding: 16, display: "flex", flexDirection: "column", gap: 10,
     }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-            <StatusDot status={status.lastStatus} />
-            <span style={{ fontWeight: 600, fontSize: 14 }}>{def.label}</span>
-          </div>
-          <span style={{
-            display: "inline-block", fontSize: 10, padding: "2px 6px",
-            borderRadius: 10, background: typeColor + "22", color: typeColor,
-            fontWeight: 500, marginBottom: 6,
-          }}>{def.sourceType}</span>
-          <p style={{ fontSize: 12, color: "var(--color-text-muted)", lineHeight: 1.5, margin: 0 }}>{def.description}</p>
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+          <StatusDot status={status.lastStatus} />
+          <span style={{ fontWeight: 600, fontSize: 14, flex: 1 }}>{def.label}</span>
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ padding: "2px 6px" }}
+            title="Ver configuração"
+            onClick={onConfig}
+          >
+            <Info size={13} />
+          </button>
         </div>
+        <span style={{
+          display: "inline-block", fontSize: 10, padding: "2px 6px",
+          borderRadius: 10, background: typeColor + "22", color: typeColor,
+          fontWeight: 500, marginBottom: 6,
+        }}>{def.sourceType}</span>
+        <p style={{ fontSize: 12, color: "var(--color-text-muted)", lineHeight: 1.5, margin: 0 }}>{def.description}</p>
       </div>
 
       <div style={{ fontSize: 12, color: "var(--color-text-muted)", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-        <span>
-          <Clock size={11} style={{ verticalAlign: "middle", marginRight: 3 }} />
-          {fmtDate(status.lastImportAt)}
-        </span>
-        <span>
-          {status.totalImports} importaç{status.totalImports === 1 ? "ão" : "ões"}
-        </span>
+        <span><Clock size={11} style={{ verticalAlign: "middle", marginRight: 3 }} />{fmtDate(status.lastImportAt)}</span>
+        <span>{status.totalImports} importaç{status.totalImports === 1 ? "ão" : "ões"}</span>
         {status.lastStatus && <>
           <span>Linhas: {status.lastRowsFound}</span>
           <span style={{ color: status.lastIssuesCount > 0 ? "var(--color-warning)" : "var(--color-success)" }}>
             {status.lastIssuesCount > 0 ? `⚠ ${status.lastIssuesCount} probl.` : "✓ Sem probl."}
           </span>
         </>}
+        {status.pendingStaging > 0 && (
+          <span style={{ gridColumn: "1 / -1", color: "var(--color-warning)" }}>
+            {status.pendingStaging} preview(s) pendente(s)
+          </span>
+        )}
       </div>
 
       <div style={{ display: "flex", gap: 6, marginTop: "auto" }}>
@@ -551,45 +662,27 @@ function SourceCard({
 }
 
 // ---------------------------------------------------------------------------
-// Legado card (read-only)
+// Legado info (read-only, não é card de grid)
 // ---------------------------------------------------------------------------
 
-function LegadoCard({ legado }: { legado: LegadoStatus | null }) {
+function LegadoBanner({ legado }: { legado: LegadoStatus | null }) {
+  if (!legado) return null;
   return (
     <div style={{
-      background: "var(--color-surface)", border: "1px solid var(--color-border)",
-      borderRadius: 8, padding: 16, display: "flex", flexDirection: "column", gap: 10,
+      marginTop: 24, padding: "10px 16px", borderRadius: 6,
+      border: "1px solid var(--color-border)", background: "var(--color-surface)",
+      fontSize: 12, color: "var(--color-text-muted)",
+      display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap",
     }}>
-      <div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-          <StatusDot status={legado?.initialized ? "COMPLETED" : null} />
-          <span style={{ fontWeight: 600, fontSize: 14 }}>PEDIDOS + ANALISE MI (Legado)</span>
-        </div>
-        <span style={{
-          display: "inline-block", fontSize: 10, padding: "2px 6px",
-          borderRadius: 10, background: "var(--color-text-muted)22", color: "var(--color-text-muted)",
-          fontWeight: 500, marginBottom: 6,
-        }}>Legado</span>
-        <p style={{ fontSize: 12, color: "var(--color-text-muted)", lineHeight: 1.5, margin: 0 }}>
-          Inicialização única do sistema a partir de PEDIDOS.xlsx e ANALISE MI.xlsx. Somente leitura após inicialização.
-        </p>
-      </div>
-
-      {legado && (
-        <div style={{ fontSize: 12, color: "var(--color-text-muted)", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-          <span>Status: {legado.batchStatus ?? "Não inicializado"}</span>
-          <span>Lote: #{legado.batchId ?? "—"}</span>
-          <span>Pedidos: {legado.ordersFound}</span>
-          <span>Estoque: {legado.inventoryFound}</span>
-          <span style={{ gridColumn: "1 / -1" }}>{fmtDate(legado.createdAt)}</span>
-        </div>
-      )}
-
-      <div style={{ display: "flex", gap: 6, marginTop: "auto" }}>
-        <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} disabled title="Somente leitura — importação bloqueada após inicialização">
-          <Lock size={12} /> Bloqueado
-        </button>
-      </div>
+      <StatusDot status={legado.initialized ? "COMPLETED" : null} />
+      <span style={{ fontWeight: 500 }}>Legado (inicialização única)</span>
+      <span>Pedidos: {legado.ordersFound}</span>
+      <span>Estoque legado: {legado.inventoryFound}</span>
+      <span>Lote: #{legado.lastBatchId ?? "—"}</span>
+      <span>{fmtDate(legado.lastBatchAt)}</span>
+      <span style={{ color: legado.initialized ? "var(--color-success)" : "var(--color-warning)" }}>
+        {legado.initialized ? "Inicializado" : "Não inicializado"}
+      </span>
     </div>
   );
 }
@@ -599,12 +692,13 @@ function LegadoCard({ legado }: { legado: LegadoStatus | null }) {
 // ---------------------------------------------------------------------------
 
 export function AdminDados() {
-  const [allStatus, setAllStatus] = useState<AllStatus | null>(null);
-  const [legado, setLegado]       = useState<LegadoStatus | null>(null);
-  const [loading, setLoading]     = useState(true);
-  const [uploadFor, setUploadFor] = useState<SourceDefinition | null>(null);
+  const [allStatus, setAllStatus]   = useState<AllStatus | null>(null);
+  const [legado, setLegado]         = useState<LegadoStatus | null>(null);
+  const [loading, setLoading]       = useState(true);
+  const [uploadFor, setUploadFor]   = useState<SourceDefinition | null>(null);
   const [historyFor, setHistoryFor] = useState<SourceDefinition | null>(null);
-  const [error, setError]         = useState<string | null>(null);
+  const [configFor, setConfigFor]   = useState<SourceDefinition | null>(null);
+  const [error, setError]           = useState<string | null>(null);
 
   function loadStatus() {
     setLoading(true);
@@ -626,7 +720,7 @@ export function AdminDados() {
       <div className="page-header">
         <div>
           <h1 className="page-title">Central de Dados</h1>
-          <p className="page-subtitle">Importações sistêmicas por fonte — preview → confirmar → auditável</p>
+          <p className="page-subtitle">Sete fontes sistêmicas — preview → confirmar → auditável</p>
         </div>
         <button className="btn btn-ghost btn-sm" onClick={loadStatus} disabled={loading} title="Atualizar status">
           <RefreshCw size={13} className={loading ? "spin" : ""} />
@@ -645,41 +739,41 @@ export function AdminDados() {
         </div>
       )}
 
-      {/* Summary bar */}
       {allStatus && (
-        <div style={{ display: "flex", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
-          {[
-            { label: "Fontes com importação", value: Object.values(allStatus).filter(s => s.lastStatus === "COMPLETED").length },
-            { label: "Nunca importadas",       value: Object.values(allStatus).filter(s => !s.lastStatus).length },
-            { label: "Total de importações",   value: Object.values(allStatus).reduce((a, s) => a + s.totalImports, 0) },
-          ].map(stat => (
-            <div key={stat.label} style={{ padding: "10px 16px", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 6 }}>
-              <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>{stat.label}</div>
-              <div style={{ fontWeight: 600, fontSize: 20 }}>{stat.value}</div>
-            </div>
-          ))}
-        </div>
+        <>
+          <div style={{ display: "flex", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
+            {[
+              { label: "Fontes importadas", value: Object.values(allStatus).filter(s => s.lastStatus === "COMPLETED").length },
+              { label: "Nunca importadas",  value: Object.values(allStatus).filter(s => !s.lastStatus).length },
+              { label: "Total importações", value: Object.values(allStatus).reduce((a, s) => a + s.totalImports, 0) },
+              { label: "Previews pendentes",value: Object.values(allStatus).reduce((a, s) => a + s.pendingStaging, 0) },
+            ].map(stat => (
+              <div key={stat.label} style={{ padding: "10px 16px", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 6 }}>
+                <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>{stat.label}</div>
+                <div style={{ fontWeight: 600, fontSize: 20 }}>{stat.value}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+            {SOURCES.map(def => (
+              <SourceCard
+                key={def.key}
+                def={def}
+                status={allStatus[def.key]}
+                onUpload={() => setUploadFor(def)}
+                onHistory={() => setHistoryFor(def)}
+                onConfig={() => setConfigFor(def)}
+              />
+            ))}
+          </div>
+
+          <LegadoBanner legado={legado} />
+        </>
       )}
 
-      {/* Cards grid */}
-      {allStatus && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
-          {SOURCES.map(def => (
-            <SourceCard
-              key={def.key}
-              def={def}
-              status={allStatus[def.key]}
-              onUpload={() => setUploadFor(def)}
-              onHistory={() => setHistoryFor(def)}
-            />
-          ))}
-          <LegadoCard legado={legado} />
-        </div>
-      )}
-
-      {/* Legend */}
-      <div style={{ marginTop: 24, display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "var(--color-text-muted)" }}>
-        {(["Snapshot", "Eventos", "Enriquecimento", "Catálogo", "Legado"] as const).map(t => (
+      <div style={{ marginTop: 16, display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "var(--color-text-muted)" }}>
+        {(["Snapshot", "Eventos", "Catálogo"] as const).map(t => (
           <span key={t} style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: SOURCE_TYPE_COLORS[t] }} />
             {t}
@@ -687,7 +781,6 @@ export function AdminDados() {
         ))}
       </div>
 
-      {/* Dialogs */}
       {uploadFor && (
         <UploadDialog
           source={uploadFor}
@@ -701,6 +794,9 @@ export function AdminDados() {
           label={historyFor.label}
           onClose={() => setHistoryFor(null)}
         />
+      )}
+      {configFor && (
+        <ConfigModal def={configFor} onClose={() => setConfigFor(null)} />
       )}
     </div>
   );
