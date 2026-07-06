@@ -145,17 +145,34 @@ const confirmReceiptSchema = z.object({
   items: z.array(z.object({ purchaseOrderItemId: z.number().int().positive(), quantity: z.number().int().positive() })).min(1),
 });
 
-procurementRouter.post("/purchase-orders/:id/receipts/confirm", (req, res) => {
+procurementRouter.post("/purchase-orders/:id/receipts/confirm", async (req, res, next) => {
   const parsed = confirmReceiptSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Corpo inválido.", details: parsed.error.flatten() });
   }
   try {
     const id = idParam(req.params.id);
+    const db = getDb();
     const receivedBy = req.sessionUser!.displayName;
-    res.json(recv.confirmReceipt(getDb(), id, { ...parsed.data, receivedBy }));
+    const result = recv.confirmReceipt(db, id, { ...parsed.data, receivedBy });
+
+    // Disparar recompute do motor após o COMMIT — falha não desfaz o recebimento
+    let matchTriggered = false;
+    let matchError: string | null = null;
+    try {
+      const { requestMatchRecompute } = await import("../../match/engine-orchestrator.js");
+      requestMatchRecompute(db, `RECEIPT_${id}`, "goods_receipt", result.receiptId);
+      matchTriggered = true;
+    } catch (e) {
+      matchError = (e as Error).message;
+    }
+
+    res.json({ ...result, matchTriggered, matchError });
   } catch (err) {
-    handleError(err, res);
+    if (err instanceof ProcurementError || err instanceof StockError) {
+      return res.status(err.statusCode).json({ error: err.message, details: err.details });
+    }
+    next(err);
   }
 });
 

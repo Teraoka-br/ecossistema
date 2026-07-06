@@ -23,6 +23,14 @@ import {
   previewTriagemSaida, confirmTriagemSaida,
   previewSh, confirmSh,
 } from "../../import-central/import-central-service.js";
+import {
+  applyHisToRepairCases,
+  applyRelSeriaisToRepairCases,
+  applyAnaliseMiToRepairCases,
+  applyBipagemToStock,
+  applyPeacsToRepairCases,
+  applyPedidosReconciliation,
+} from "../../import-central/operational-sync-service.js";
 
 export const importCentralRouter = Router();
 
@@ -222,7 +230,52 @@ importCentralRouter.post("/:source/confirm", requireAuth, requireAdmin, async (r
   try {
     const db = getDb();
     const result = await confirmFns[source](db, stagingId, userId);
-    res.json({ ok: true, ...(result as object) });
+
+    // Recuperar importId criado pelo confirm (via staged_files)
+    const importIdRow = db
+      .prepare(`SELECT import_id_created FROM import_staged_files WHERE id = ?`)
+      .get(stagingId) as { import_id_created: number | null } | undefined;
+    const importId = importIdRow?.import_id_created ?? null;
+
+    // Aplicar sync operacional e coletar resultados — falha não desfaz a importação
+    const sync: Record<string, unknown> = {};
+    let shouldTriggerMatch = false;
+
+    if (importId) {
+      try {
+        if (source === "his") {
+          sync.his = applyHisToRepairCases(db, importId);
+          shouldTriggerMatch = true;
+        } else if (source === "rel-seriais") {
+          sync.relSeriais = applyRelSeriaisToRepairCases(db, importId);
+        } else if (source === "analise-mi") {
+          sync.analiseMi = applyAnaliseMiToRepairCases(db, importId);
+          shouldTriggerMatch = true;
+        } else if (source === "pedidos") {
+          try { sync.bipagem = applyBipagemToStock(db, importId); } catch (e) { sync.bipagemError = (e as Error).message; }
+          try { sync.peacs = applyPeacsToRepairCases(db); } catch (e) { sync.peacsError = (e as Error).message; }
+          try { sync.reconciliacao = applyPedidosReconciliation(db, importId); } catch (e) { sync.reconciliacaoError = (e as Error).message; }
+          shouldTriggerMatch = true;
+        }
+      } catch (syncErr) {
+        sync.syncError = (syncErr as Error).message;
+      }
+    }
+
+    // Disparar recompute do motor após imports relevantes — falha não desfaz a importação
+    let matchTriggered = false;
+    let matchError: string | null = null;
+    if (shouldTriggerMatch) {
+      try {
+        const { requestMatchRecompute } = await import("../../match/engine-orchestrator.js");
+        requestMatchRecompute(db, `IMPORT_${source}_${importId}`, "import_central", importId ?? 0);
+        matchTriggered = true;
+      } catch (e) {
+        matchError = (e as Error).message;
+      }
+    }
+
+    res.json({ ok: true, ...(result as object), sync, matchTriggered, matchError });
   } catch (err) {
     if (err instanceof ImportCentralError) {
       const status =

@@ -313,7 +313,6 @@ export async function getPurchaseOrders(status?: string): Promise<PurchaseOrder[
 }
 
 export async function createPurchaseOrder(input: {
-  createdBy: string;
   supplier?: string | null;
   notes?: string | null;
   items: { purchaseRequestId?: number | null; referencia: string; chavePeca?: string | null; quantity: number }[];
@@ -322,8 +321,8 @@ export async function createPurchaseOrder(input: {
   return r.order;
 }
 
-export async function cancelPurchaseOrder(id: number, cancelledBy: string, cancelReason: string): Promise<PurchaseOrder> {
-  const r = await postJson<{ order: PurchaseOrder }>(`/api/purchase-orders/${id}/cancel`, { cancelledBy, cancelReason });
+export async function cancelPurchaseOrder(id: number, cancelReason: string): Promise<PurchaseOrder> {
+  const r = await postJson<{ order: PurchaseOrder }>(`/api/purchase-orders/${id}/cancel`, { cancelReason });
   return r.order;
 }
 
@@ -347,7 +346,6 @@ export async function previewReceipt(
 export async function confirmReceipt(
   orderId: number,
   input: {
-    receivedBy: string;
     notes?: string | null;
     allowOverReceipt?: boolean;
     justification?: string | null;
@@ -355,6 +353,10 @@ export async function confirmReceipt(
   },
 ): Promise<{ receiptId: number; order: PurchaseOrder; movementsCreated: number; unitsReceived: number }> {
   return postJson(`/api/purchase-orders/${orderId}/receipts/confirm`, input);
+}
+
+export async function addToPurchase(repairCaseId: number): Promise<{ partIds: number[]; created: number; existing: number; total: number }> {
+  return postJson(`/api/fila-reparos/${repairCaseId}/add-to-purchase`, {});
 }
 
 export interface OperationalStockGroup {

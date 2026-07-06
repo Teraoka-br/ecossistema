@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
 import {
   X, Package, Clock, Star, ChevronRight, AlertTriangle, CheckCircle2,
-  UserCheck, History, Info, Loader2, Users,
+  UserCheck, History, Info, Loader2, Users, ShoppingCart,
 } from "lucide-react";
+import { addToPurchase } from "../api.js";
 
 interface PartInfo {
   id: number;
@@ -66,6 +67,8 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
   const [technicians, setTechnicians] = useState<Array<{ id: number; name: string }>>([]);
   const [selectedTechId, setSelectedTechId] = useState<number | null>(null);
   const [showDirectModal, setShowDirectModal] = useState(false);
+  const [addingToPurchase, setAddingToPurchase] = useState(false);
+  const [purchaseMsg, setPurchaseMsg] = useState<string | null>(null);
   const [cancelingPartId, setCancelingPartId] = useState<number | null>(null);
   const [cancelReason, setCancelReason] = useState("");
   const [cancelReasonCode, setCancelReasonCode] = useState("");
@@ -199,6 +202,25 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
     }
   }
 
+  async function handleAddToPurchase() {
+    setAddingToPurchase(true);
+    setPurchaseMsg(null);
+    setError(null);
+    try {
+      const res = await addToPurchase(repairCaseId);
+      setPurchaseMsg(
+        res.created > 0
+          ? `${res.created} solicitação(ões) criada(s) em compra.`
+          : "Todas as peças já estavam em compra.",
+      );
+      if (res.created > 0) refresh(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erro ao incluir em compra");
+    } finally {
+      setAddingToPurchase(false);
+    }
+  }
+
   const modelStr = data ? [data.model, data.capacity].filter(Boolean).join(" ") : "";
 
   return (
@@ -289,6 +311,22 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                       Direcionar
                     </button>
                   )}
+                </div>
+              )}
+
+              {/* Incluir em compra — visível quando status = PEDIR_PECA */}
+              {data.workflowStatus === "PEDIR_PECA" && (
+                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: "0.6rem 0", borderBottom: "1px solid var(--border)" }}>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleAddToPurchase}
+                    disabled={addingToPurchase}
+                    style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}
+                  >
+                    {addingToPurchase ? <Loader2 size={13} className="spin" /> : <ShoppingCart size={13} />}
+                    Incluir em compra
+                  </button>
+                  {purchaseMsg && <span style={{ fontSize: "0.8rem", color: "var(--success)" }}>{purchaseMsg}</span>}
                 </div>
               )}
 

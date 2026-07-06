@@ -13,6 +13,9 @@ import {
   listReservationsByCase,
 } from "../../operational/reservation-service.js";
 import {
+  ensurePurchaseRequestsForCase, PurchaseRequestLinkError,
+} from "../../operational/purchase-request-service.js";
+import {
   getEngineState, runRepairMatchEngine, getPendingRequestCount,
 } from "../../match/engine-orchestrator.js";
 import { getCurrentOperationalStock } from "../../operational/stock-service.js";
@@ -50,19 +53,32 @@ repairQueueRouter.get("/fila-reparos", requireAuth, (req, res) => {
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 30));
   const offset = (page - 1) * limit;
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
 
   const statuses = QUEUE_FILTER_STATUSES[filter] ?? null;
 
-  // Build query manually for multiple status filter
-  let where = "";
+  const conditions: string[] = [];
   const params: (string | number)[] = [];
 
   if (statuses && statuses.length > 0) {
-    where = `WHERE workflow_status IN (${statuses.map(() => "?").join(",")})`;
+    conditions.push(`rc.workflow_status IN (${statuses.map(() => "?").join(",")})`);
     params.push(...statuses);
   }
 
-  const total = (db.prepare(`SELECT COUNT(*) AS c FROM repair_cases ${where}`).get(...params) as { c: number }).c;
+  if (q) {
+    const like = `%${q}%`;
+    conditions.push(
+      `(rc.imei LIKE ? OR rc.os LIKE ? OR rc.brand LIKE ? OR rc.model LIKE ?
+        OR rc.deposito_atual LIKE ?
+        OR EXISTS (SELECT 1 FROM part_requests pr WHERE pr.repair_case_id = rc.id AND pr.cancelled_at IS NULL
+                   AND (pr.chave_peca LIKE ? OR pr.description LIKE ?)))`,
+    );
+    params.push(like, like, like, like, like, like, like);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const total = (db.prepare(`SELECT COUNT(*) AS c FROM repair_cases rc ${where}`).get(...params) as { c: number }).c;
 
   const rows = db.prepare(`
     SELECT rc.*,
@@ -114,6 +130,7 @@ repairQueueRouter.get("/fila-reparos", requireAuth, (req, res) => {
       totalParts: r.total_parts,
       matchedParts: r.matched_parts,
       reservedCount: r.reserved_count,
+      depositoAtual: r.deposito_atual,
       nextAction,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
@@ -260,6 +277,26 @@ repairQueueRouter.post("/fila-reparos/:id/direct-technician", requireAuth, (req,
     directToTechnician(db, repairCaseId, { technicianId, userId, notes });
     res.json({ ok: true });
   } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Incluir em compra ────────────────────────────────────────────────────
+
+repairQueueRouter.post("/fila-reparos/:id/add-to-purchase", requireAuth, (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const { results, partIds } = ensurePurchaseRequestsForCase(db, repairCaseId, userId);
+    const created = results.filter((r) => r.created).length;
+    const existing = results.filter((r) => r.alreadyExisted).length;
+    res.json({ partIds, created, existing, total: results.length });
+  } catch (err) {
+    if (err instanceof PurchaseRequestLinkError) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
     next(err);
   }
 });

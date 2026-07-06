@@ -15,7 +15,6 @@ export function Compras() {
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [responsibleName, setResponsibleName] = useState("");
 
   async function loadAll() {
     setLoading(true);
@@ -58,22 +57,6 @@ export function Compras() {
 
       {error && <ErrorBanner message={error} />}
 
-      {/* Campo de responsável */}
-      <div className="responsible-bar">
-        <span className="responsible-label">Responsável</span>
-        <input
-          value={responsibleName}
-          onChange={(e) => setResponsibleName(e.target.value)}
-          placeholder="Seu nome para registrar as ações"
-          style={{ flex: 1, minWidth: 200, maxWidth: 300 }}
-        />
-        {!responsibleName.trim() && (
-          <span style={{ fontSize: "0.72rem", color: "var(--warn-text)" }}>
-            ⚠ Preencha antes de gerar ou receber pedidos
-          </span>
-        )}
-      </div>
-
       {/* Tabs */}
       <div className="tab-bar">
         {tabs.map((t) => (
@@ -92,10 +75,10 @@ export function Compras() {
       {loading && <Loading what="compras" />}
 
       {!loading && tab === "APROVADOS" && (
-        <AprovadosTab requests={requests} responsibleName={responsibleName} onChanged={loadAll} />
+        <AprovadosTab requests={requests} onChanged={loadAll} />
       )}
       {!loading && tab === "AGUARDANDO" && (
-        <AguardandoTab orders={awaiting} responsibleName={responsibleName} onChanged={loadAll} />
+        <AguardandoTab orders={awaiting} onChanged={loadAll} />
       )}
       {!loading && tab === "RECEBIDOS" && <RecebidosTab orders={received} />}
       {!loading && tab === "CANCELADOS" && <CanceladosTab orders={cancelled} />}
@@ -104,8 +87,8 @@ export function Compras() {
 }
 
 function AprovadosTab({
-  requests, responsibleName, onChanged,
-}: { requests: PurchaseRequest[]; responsibleName: string; onChanged: () => void }) {
+  requests, onChanged,
+}: { requests: PurchaseRequest[]; onChanged: () => void }) {
   const [selected, setSelected] = useState<Record<number, number>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -127,10 +110,6 @@ function AprovadosTab({
   }, 0);
 
   async function gerarPedido() {
-    if (!responsibleName.trim()) {
-      setError("Informe o responsável antes de gerar o pedido.");
-      return;
-    }
     setBusy(true);
     setError(null);
     try {
@@ -138,7 +117,7 @@ function AprovadosTab({
         const req = requests.find((r) => r.id === id)!;
         return { purchaseRequestId: id, referencia: req.referencia ?? req.chave_peca ?? `PED-${id}`, chavePeca: req.chave_peca, quantity: selected[id] };
       });
-      await createPurchaseOrder({ createdBy: responsibleName, supplier: supplier || null, items });
+      await createPurchaseOrder({ supplier: supplier || null, items });
       setSelected({});
       onChanged();
     } catch (e) {
@@ -238,17 +217,16 @@ function AprovadosTab({
 }
 
 function AguardandoTab({
-  orders, responsibleName, onChanged,
-}: { orders: PurchaseOrder[]; responsibleName: string; onChanged: () => void }) {
+  orders, onChanged,
+}: { orders: PurchaseOrder[]; onChanged: () => void }) {
   const [receivingOrder, setReceivingOrder] = useState<PurchaseOrder | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function onCancel(o: PurchaseOrder) {
     const reason = window.prompt(`Motivo para cancelar o pedido ${o.order_number}:`);
     if (!reason || reason.trim() === "") return;
-    if (!responsibleName.trim()) { setError("Informe o responsável antes de cancelar."); return; }
     try {
-      await cancelPurchaseOrder(o.id, responsibleName, reason.trim());
+      await cancelPurchaseOrder(o.id, reason.trim());
       onChanged();
     } catch (e) {
       setError((e as Error).message);
@@ -311,7 +289,6 @@ function AguardandoTab({
       {receivingOrder && (
         <ReceberModal
           order={receivingOrder}
-          responsibleName={responsibleName}
           onClose={() => setReceivingOrder(null)}
           onDone={() => { setReceivingOrder(null); onChanged(); }}
         />
@@ -321,8 +298,8 @@ function AguardandoTab({
 }
 
 function ReceberModal({
-  order, responsibleName, onClose, onDone,
-}: { order: PurchaseOrder; responsibleName: string; onClose: () => void; onDone: () => void }) {
+  order, onClose, onDone,
+}: { order: PurchaseOrder; onClose: () => void; onDone: () => void }) {
   const [quantities, setQuantities] = useState<Record<number, number>>(() => {
     const init: Record<number, number> = {};
     for (const it of order.items) init[it.id] = Math.max(0, it.quantity_ordered - it.quantity_received);
@@ -348,10 +325,9 @@ function ReceberModal({
   }
 
   async function doConfirm() {
-    if (!responsibleName.trim()) { setError("Informe o responsável antes de confirmar."); return; }
     setBusy(true); setError(null);
     try {
-      const result = await confirmReceipt(order.id, { receivedBy: responsibleName, allowOverReceipt, justification: justification || null, items });
+      const result = await confirmReceipt(order.id, { allowOverReceipt, justification: justification || null, items });
       setConfirmed({ unitsReceived: result.unitsReceived });
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }

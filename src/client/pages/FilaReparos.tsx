@@ -202,6 +202,8 @@ export function FilaReparos() {
   const [loading, setLoading] = useState(false);
   const [engineState, setEngineState] = useState<EngineState | null>(null);
   const [pending, setPending] = useState(0);
+  const [searchInput, setSearchInput] = useState("");
+  const [q, setQ] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const { user } = useAuth();
 
@@ -218,10 +220,18 @@ export function FilaReparos() {
     } catch { /* ignore */ }
   }, []);
 
+  // Debounce search input → q
+  useEffect(() => {
+    const t = setTimeout(() => { setQ(searchInput.trim()); setPage(1); }, 350);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
   const loadItems = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch(`/api/fila-reparos?filter=${filter}&page=${page}&limit=${LIMIT}`);
+      const qs = new URLSearchParams({ filter, page: String(page), limit: String(LIMIT) });
+      if (q) qs.set("q", q);
+      const r = await fetch(`/api/fila-reparos?${qs.toString()}`);
       if (r.ok) {
         const data = await r.json() as { items: QueueItem[]; total: number };
         setItems(data.items);
@@ -230,7 +240,7 @@ export function FilaReparos() {
     } finally {
       setLoading(false);
     }
-  }, [filter, page]);
+  }, [filter, page, q]);
 
   useEffect(() => {
     void loadItems();
@@ -317,6 +327,17 @@ export function FilaReparos() {
           )}
         </div>
       )}
+
+      {/* Busca */}
+      <div className="search-bar" style={{ marginBottom: "0.75rem" }}>
+        <input
+          type="search"
+          placeholder="Buscar por IMEI, OS, marca, modelo, peça, depósito…"
+          value={searchInput}
+          onChange={e => setSearchInput(e.target.value)}
+          style={{ width: "100%", padding: "0.5rem 0.75rem", borderRadius: "var(--radius)", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: "0.875rem" }}
+        />
+      </div>
 
       {/* Filtros */}
       <div className="filter-bar">
