@@ -1,16 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  cancelPurchaseOrder,
-  confirmReceipt,
-  createPurchaseOrder,
-  getPurchaseOrders,
-  getPurchaseRequests,
-  previewReceipt,
-  type PurchaseOrder,
-  type PurchaseRequest,
-  type ReceivePreviewLine,
+  cancelPurchaseOrder, confirmReceipt, createPurchaseOrder,
+  getPurchaseOrders, getPurchaseRequests, previewReceipt,
+  type PurchaseOrder, type PurchaseRequest, type ReceivePreviewLine,
 } from "../api.js";
 import { ErrorBanner, Loading, fmtInt, fmtMoney } from "../ui.js";
+import { ShoppingCart, Package, CheckCircle2, X, Loader2, RefreshCw } from "lucide-react";
 
 type Tab = "APROVADOS" | "AGUARDANDO" | "RECEBIDOS" | "CANCELADOS";
 
@@ -36,37 +31,60 @@ export function Compras() {
     }
   }
 
-  useEffect(() => {
-    void loadAll();
-  }, []);
+  useEffect(() => { void loadAll(); }, []);
 
-  const awaiting = orders.filter((o) => o.status === "AWAITING_RECEIPT" || o.status === "PARTIALLY_RECEIVED");
-  const received = orders.filter((o) => o.status === "RECEIVED");
+  const awaiting  = orders.filter((o) => o.status === "AWAITING_RECEIPT" || o.status === "PARTIALLY_RECEIVED");
+  const received  = orders.filter((o) => o.status === "RECEIVED");
   const cancelled = orders.filter((o) => o.status === "CANCELLED");
 
+  const tabs: { key: Tab; label: string; count: number; icon: React.ReactNode }[] = [
+    { key: "APROVADOS",  label: "Aprovados",  count: requests.length, icon: <CheckCircle2 size={13} /> },
+    { key: "AGUARDANDO", label: "Aguardando", count: awaiting.length,  icon: <Package size={13} /> },
+    { key: "RECEBIDOS",  label: "Recebidos",  count: received.length,  icon: <CheckCircle2 size={13} /> },
+    { key: "CANCELADOS", label: "Cancelados", count: cancelled.length, icon: <X size={13} /> },
+  ];
+
   return (
-    <div>
-      <h1>Compras</h1>
-      <p className="subtitle">Solicitações aprovadas → pedidos de compra → recebimento → entrada imediata no estoque.</p>
+    <div className="page-container">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Pedidos de Compra</h1>
+          <p className="page-subtitle">Solicitações aprovadas → pedidos → recebimento → estoque</p>
+        </div>
+        <button className="btn btn-ghost btn-sm" onClick={loadAll} disabled={loading} title="Atualizar">
+          <RefreshCw size={13} className={loading ? "spin" : ""} />
+        </button>
+      </div>
 
       {error && <ErrorBanner message={error} />}
 
-      <div className="card">
-        <div className="row">
-          <div className="field">
-            <label>Seu nome (responsável pelas ações nesta tela)</label>
-            <input value={responsibleName} onChange={(e) => setResponsibleName(e.target.value)} placeholder="ex.: João" />
-          </div>
-        </div>
+      {/* Campo de responsável */}
+      <div className="responsible-bar">
+        <span className="responsible-label">Responsável</span>
+        <input
+          value={responsibleName}
+          onChange={(e) => setResponsibleName(e.target.value)}
+          placeholder="Seu nome para registrar as ações"
+          style={{ flex: 1, minWidth: 200, maxWidth: 300 }}
+        />
+        {!responsibleName.trim() && (
+          <span style={{ fontSize: "0.72rem", color: "var(--warn-text)" }}>
+            ⚠ Preencha antes de gerar ou receber pedidos
+          </span>
+        )}
       </div>
 
-      <div className="row" style={{ gap: "0.4rem", marginBottom: "0.6rem" }}>
-        {(["APROVADOS", "AGUARDANDO", "RECEBIDOS", "CANCELADOS"] as Tab[]).map((t) => (
-          <button key={t} className={tab === t ? "" : "secondary"} onClick={() => setTab(t)}>
-            {t === "APROVADOS" && `APROVADOS (${requests.length})`}
-            {t === "AGUARDANDO" && `AGUARDANDO RECEBIMENTO (${awaiting.length})`}
-            {t === "RECEBIDOS" && `RECEBIDOS (${received.length})`}
-            {t === "CANCELADOS" && `CANCELADOS (${cancelled.length})`}
+      {/* Tabs */}
+      <div className="tab-bar">
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            className={`tab-btn${tab === t.key ? " active" : ""}`}
+            onClick={() => setTab(t.key)}
+          >
+            {t.icon}
+            {t.label}
+            <span className="tab-count">{t.count}</span>
           </button>
         ))}
       </div>
@@ -86,15 +104,9 @@ export function Compras() {
 }
 
 function AprovadosTab({
-  requests,
-  responsibleName,
-  onChanged,
-}: {
-  requests: PurchaseRequest[];
-  responsibleName: string;
-  onChanged: () => void;
-}) {
-  const [selected, setSelected] = useState<Record<number, number>>({}); // requestId -> quantity
+  requests, responsibleName, onChanged,
+}: { requests: PurchaseRequest[]; responsibleName: string; onChanged: () => void }) {
+  const [selected, setSelected] = useState<Record<number, number>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [supplier, setSupplier] = useState("");
@@ -116,7 +128,7 @@ function AprovadosTab({
 
   async function gerarPedido() {
     if (!responsibleName.trim()) {
-      setError("Informe o responsável (campo no topo da tela) antes de gerar o pedido.");
+      setError("Informe o responsável antes de gerar o pedido.");
       return;
     }
     setBusy(true);
@@ -126,7 +138,7 @@ function AprovadosTab({
         const req = requests.find((r) => r.id === id)!;
         return { purchaseRequestId: id, referencia: req.referencia ?? req.chave_peca ?? `PED-${id}`, chavePeca: req.chave_peca, quantity: selected[id] };
       });
-      await createPurchaseOrder(db_input(responsibleName, supplier, items));
+      await createPurchaseOrder({ createdBy: responsibleName, supplier: supplier || null, items });
       setSelected({});
       onChanged();
     } catch (e) {
@@ -136,8 +148,16 @@ function AprovadosTab({
     }
   }
 
-  function db_input(createdBy: string, sup: string, items: { purchaseRequestId: number; referencia: string; chavePeca: string | null; quantity: number }[]) {
-    return { createdBy, supplier: sup || null, items };
+  if (requests.length === 0) {
+    return (
+      <div className="empty-state">
+        <ShoppingCart size={36} style={{ opacity: 0.25 }} />
+        <div>
+          <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>Sem solicitações aprovadas</div>
+          <div style={{ fontSize: "0.8rem" }}>Nenhuma solicitação aguardando pedido.</div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -147,50 +167,70 @@ function AprovadosTab({
         <table>
           <thead>
             <tr>
-              <th></th><th>ID_PEDIDO</th><th>CHAVEPECA</th><th>Referência sugerida</th>
-              <th className="num">Qtde solicitada</th><th className="num">Qtde a pedir</th>
-              <th className="num">Custo previsto</th><th>Status</th>
+              <th style={{ width: 36 }}></th>
+              <th>ID Pedido</th>
+              <th>Chave Peça</th>
+              <th>Referência</th>
+              <th className="num">Qtde solicitada</th>
+              <th className="num">Qtde a pedir</th>
+              <th className="num">Custo previsto</th>
+              <th>Status</th>
             </tr>
           </thead>
           <tbody>
-            {requests.length === 0 && <tr><td colSpan={8} className="muted">Nenhuma solicitação aprovada pendente.</td></tr>}
             {requests.map((r) => (
-              <tr key={r.id}>
-                <td><input type="checkbox" checked={selected[r.id] !== undefined} onChange={() => toggle(r)} /></td>
+              <tr key={r.id} style={{ cursor: "pointer" }} onClick={() => toggle(r)}>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={selected[r.id] !== undefined}
+                    onChange={() => toggle(r)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </td>
                 <td className="mono">{r.id_pedido ?? "—"}</td>
-                <td className="small">{r.chave_peca ?? "—"}</td>
+                <td className="mono small">{r.chave_peca ?? "—"}</td>
                 <td className="mono">{r.referencia ?? r.chave_peca ?? "—"}</td>
                 <td className="num">{fmtInt(r.quantidade)}</td>
-                <td className="num">
+                <td className="num" onClick={(e) => e.stopPropagation()}>
                   {selected[r.id] !== undefined ? (
                     <input
-                      type="number"
-                      min={1}
+                      type="number" min={1}
                       style={{ width: "5rem" }}
                       value={selected[r.id]}
                       onChange={(e) => setSelected((prev) => ({ ...prev, [r.id]: Number(e.target.value) }))}
                     />
-                  ) : (
-                    "—"
-                  )}
+                  ) : "—"}
                 </td>
                 <td className="num">{fmtMoney(r.valor_unitario)}</td>
-                <td><span className="badge ok">{r.status}</span></td>
+                <td><span className="badge badge-ok">{r.status}</span></td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
       {selectedIds.length > 0 && (
-        <div className="row" style={{ marginTop: "0.8rem", alignItems: "center" }}>
-          <div className="field">
-            <label>Fornecedor (opcional)</label>
+        <div style={{
+          marginTop: "1rem", padding: "0.875rem 1rem",
+          background: "var(--surface-alt)", border: "1px solid var(--border)",
+          borderRadius: "var(--r-md)", display: "flex", gap: "0.75rem",
+          alignItems: "flex-end", flexWrap: "wrap",
+        }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <label style={{ fontSize: "0.68rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--text-muted)", display: "block", marginBottom: "0.35rem" }}>
+              Fornecedor (opcional)
+            </label>
             <input value={supplier} onChange={(e) => setSupplier(e.target.value)} placeholder="ex.: Fornecedor XPTO" />
           </div>
-          <span className="muted small">Total previsto: {fmtMoney(total)}</span>
-          <button onClick={gerarPedido} disabled={busy}>
-            {busy ? "Gerando…" : "GERAR PEDIDO"}
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+            <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+              Total previsto: <strong style={{ color: "var(--text)" }}>{fmtMoney(total)}</strong>
+            </span>
+            <button className="btn btn-primary" onClick={gerarPedido} disabled={busy}>
+              {busy ? <><Loader2 size={13} className="spin" /> Gerando…</> : <><ShoppingCart size={13} /> Gerar pedido</>}
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -198,24 +238,15 @@ function AprovadosTab({
 }
 
 function AguardandoTab({
-  orders,
-  responsibleName,
-  onChanged,
-}: {
-  orders: PurchaseOrder[];
-  responsibleName: string;
-  onChanged: () => void;
-}) {
+  orders, responsibleName, onChanged,
+}: { orders: PurchaseOrder[]; responsibleName: string; onChanged: () => void }) {
   const [receivingOrder, setReceivingOrder] = useState<PurchaseOrder | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function onCancel(o: PurchaseOrder) {
     const reason = window.prompt(`Motivo para cancelar o pedido ${o.order_number}:`);
     if (!reason || reason.trim() === "") return;
-    if (!responsibleName.trim()) {
-      setError("Informe o responsável no topo da tela antes de cancelar.");
-      return;
-    }
+    if (!responsibleName.trim()) { setError("Informe o responsável antes de cancelar."); return; }
     try {
       await cancelPurchaseOrder(o.id, responsibleName, reason.trim());
       onChanged();
@@ -224,6 +255,15 @@ function AguardandoTab({
     }
   }
 
+  if (orders.length === 0) {
+    return (
+      <div className="empty-state">
+        <Package size={36} style={{ opacity: 0.25 }} />
+        <div style={{ fontWeight: 600 }}>Nenhum pedido aguardando recebimento</div>
+      </div>
+    );
+  }
+
   return (
     <div className="card">
       {error && <ErrorBanner message={error} />}
@@ -231,25 +271,36 @@ function AguardandoTab({
         <table>
           <thead>
             <tr>
-              <th>Pedido</th><th>Fornecedor</th><th>Itens</th><th>Progresso</th><th>Criado em</th><th>Responsável</th><th></th>
+              <th>Pedido</th><th>Fornecedor</th><th>Itens</th>
+              <th className="num">Progresso</th><th>Criado em</th><th>Responsável</th><th></th>
             </tr>
           </thead>
           <tbody>
-            {orders.length === 0 && <tr><td colSpan={7} className="muted">Nenhum pedido aguardando recebimento.</td></tr>}
             {orders.map((o) => {
-              const totalOrdered = o.items.reduce((s, i) => s + i.quantity_ordered, 0);
+              const totalOrdered  = o.items.reduce((s, i) => s + i.quantity_ordered, 0);
               const totalReceived = o.items.reduce((s, i) => s + i.quantity_received, 0);
+              const pct = totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 100) : 0;
               return (
                 <tr key={o.id}>
-                  <td className="mono">{o.order_number}</td>
-                  <td>{o.supplier ?? "—"}</td>
+                  <td className="mono" style={{ fontWeight: 600 }}>{o.order_number}</td>
+                  <td>{o.supplier ?? <span style={{ color: "var(--text-muted)" }}>—</span>}</td>
                   <td className="small">{o.items.map((i) => `${i.referencia} (${i.quantity_received}/${i.quantity_ordered})`).join(", ")}</td>
-                  <td className="num">{totalReceived}/{totalOrdered}</td>
+                  <td className="num">
+                    <span style={{ color: pct === 100 ? "var(--ok-text)" : pct > 0 ? "var(--warn-text)" : "var(--text-muted)" }}>
+                      {totalReceived}/{totalOrdered}
+                    </span>
+                  </td>
                   <td className="small">{o.created_at}</td>
                   <td>{o.created_by ?? "—"}</td>
-                  <td className="row" style={{ gap: "0.3rem" }}>
-                    <button onClick={() => setReceivingOrder(o)}>RECEBER</button>
-                    <button className="secondary" onClick={() => onCancel(o)}>Cancelar</button>
+                  <td>
+                    <div style={{ display: "flex", gap: "0.4rem" }}>
+                      <button className="btn btn-primary btn-sm" onClick={() => setReceivingOrder(o)}>
+                        <Package size={12} /> Receber
+                      </button>
+                      <button className="btn btn-ghost btn-sm" style={{ color: "var(--err-text)" }} onClick={() => onCancel(o)}>
+                        Cancelar
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );
@@ -262,10 +313,7 @@ function AguardandoTab({
           order={receivingOrder}
           responsibleName={responsibleName}
           onClose={() => setReceivingOrder(null)}
-          onDone={() => {
-            setReceivingOrder(null);
-            onChanged();
-          }}
+          onDone={() => { setReceivingOrder(null); onChanged(); }}
         />
       )}
     </div>
@@ -273,16 +321,8 @@ function AguardandoTab({
 }
 
 function ReceberModal({
-  order,
-  responsibleName,
-  onClose,
-  onDone,
-}: {
-  order: PurchaseOrder;
-  responsibleName: string;
-  onClose: () => void;
-  onDone: () => void;
-}) {
+  order, responsibleName, onClose, onDone,
+}: { order: PurchaseOrder; responsibleName: string; onClose: () => void; onDone: () => void }) {
   const [quantities, setQuantities] = useState<Record<number, number>>(() => {
     const init: Record<number, number> = {};
     for (const it of order.items) init[it.id] = Math.max(0, it.quantity_ordered - it.quantity_received);
@@ -301,115 +341,92 @@ function ReceberModal({
   );
 
   async function doPreview() {
-    setError(null);
-    setBusy(true);
-    try {
-      const p = await previewReceipt(order.id, items);
-      setPreview(p.lines);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    setError(null); setBusy(true);
+    try { setPreview((await previewReceipt(order.id, items)).lines); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
   }
 
   async function doConfirm() {
-    if (!responsibleName.trim()) {
-      setError("Informe o responsável no topo da tela antes de confirmar.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
+    if (!responsibleName.trim()) { setError("Informe o responsável antes de confirmar."); return; }
+    setBusy(true); setError(null);
     try {
-      const result = await confirmReceipt(order.id, {
-        receivedBy: responsibleName,
-        allowOverReceipt,
-        justification: justification || null,
-        items,
-      });
+      const result = await confirmReceipt(order.id, { receivedBy: responsibleName, allowOverReceipt, justification: justification || null, items });
       setConfirmed({ unitsReceived: result.unitsReceived });
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
   }
 
   const anyOver = preview?.some((l) => l.over) ?? false;
 
   return (
     <div className="modal-overlay">
-      <div className="modal card">
-        <h2>Receber pedido {order.order_number}</h2>
+      <div className="modal">
+        <h3>Receber pedido {order.order_number}</h3>
         {error && <ErrorBanner message={error} />}
         {confirmed ? (
-          <div className="banner ok">
-            Recebimento confirmado. Unidades adicionadas ao estoque: <strong>{confirmed.unitsReceived}</strong>. Estoque atualizado imediatamente.
-            <div style={{ marginTop: "0.6rem" }}>
-              <button onClick={onDone}>Fechar</button>
+          <div style={{
+            background: "var(--ok-dim)", border: "1px solid rgba(16,185,129,0.3)",
+            borderRadius: "var(--r-md)", padding: "1rem", color: "var(--ok-text)",
+          }}>
+            <CheckCircle2 size={16} style={{ display: "inline", marginRight: 6 }} />
+            Recebimento confirmado. <strong>{confirmed.unitsReceived}</strong> unidade{confirmed.unitsReceived !== 1 ? "s" : ""} adicionada{confirmed.unitsReceived !== 1 ? "s" : ""} ao estoque.
+            <div style={{ marginTop: "0.75rem" }}>
+              <button className="btn btn-secondary btn-sm" onClick={onDone}>Fechar</button>
             </div>
           </div>
         ) : (
           <>
-            <div className="table-wrap">
+            <div className="table-wrap" style={{ marginBottom: "0.75rem" }}>
               <table>
                 <thead>
                   <tr>
-                    <th>Referência</th><th>CHAVEPECA</th><th className="num">Pedido</th>
-                    <th className="num">Recebido antes</th><th className="num">Saldo</th><th className="num">Recebendo agora</th>
+                    <th>Referência</th><th>Chave</th>
+                    <th className="num">Pedido</th><th className="num">Recebido</th>
+                    <th className="num">Saldo</th><th className="num">Agora</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {order.items.map((it) => {
-                    const remaining = it.quantity_ordered - it.quantity_received;
-                    return (
-                      <tr key={it.id}>
-                        <td className="mono">{it.referencia}</td>
-                        <td className="small">{it.chave_peca ?? "—"}</td>
-                        <td className="num">{it.quantity_ordered}</td>
-                        <td className="num">{it.quantity_received}</td>
-                        <td className="num">{remaining}</td>
-                        <td className="num">
-                          <input
-                            type="number"
-                            min={0}
-                            style={{ width: "5rem" }}
-                            value={quantities[it.id] ?? 0}
-                            onChange={(e) => setQuantities((prev) => ({ ...prev, [it.id]: Number(e.target.value) }))}
-                          />
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {order.items.map((it) => (
+                    <tr key={it.id}>
+                      <td className="mono">{it.referencia}</td>
+                      <td className="small">{it.chave_peca ?? "—"}</td>
+                      <td className="num">{it.quantity_ordered}</td>
+                      <td className="num">{it.quantity_received}</td>
+                      <td className="num">{it.quantity_ordered - it.quantity_received}</td>
+                      <td className="num">
+                        <input type="number" min={0} style={{ width: "5rem" }}
+                          value={quantities[it.id] ?? 0}
+                          onChange={(e) => setQuantities((prev) => ({ ...prev, [it.id]: Number(e.target.value) }))}
+                        />
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
 
-            <div className="row" style={{ marginTop: "0.6rem" }}>
-              <button onClick={doPreview} disabled={busy} className="secondary">Pré-visualizar</button>
-            </div>
-
-            {preview && anyOver && (
-              <div className="banner warn" style={{ marginTop: "0.6rem" }}>
-                Recebimento acima do saldo pedido detectado. Confirme explicitamente:
-                <div className="row" style={{ marginTop: "0.4rem" }}>
-                  <label className="row" style={{ gap: "0.3rem" }}>
+            {anyOver && preview && (
+              <div style={{ background: "var(--warn-dim)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: "var(--r-md)", padding: "0.75rem 1rem", marginBottom: "0.75rem", fontSize: "0.82rem", color: "var(--warn-text)" }}>
+                Recebimento acima do saldo detectado.
+                <div style={{ marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.82rem" }}>
                     <input type="checkbox" checked={allowOverReceipt} onChange={(e) => setAllowOverReceipt(e.target.checked)} />
                     Permitir recebimento acima do pedido
                   </label>
-                  <div className="field">
-                    <label>Justificativa (mín. 10 caracteres)</label>
-                    <input value={justification} onChange={(e) => setJustification(e.target.value)} />
-                  </div>
+                  <input value={justification} onChange={(e) => setJustification(e.target.value)} placeholder="Justificativa (mín. 10 caracteres)" />
                 </div>
               </div>
             )}
 
-            <div className="row" style={{ marginTop: "0.8rem" }}>
-              <button onClick={doConfirm} disabled={busy || items.length === 0}>
-                {busy ? "Confirmando…" : "Confirmar recebimento"}
+            <div className="modal-actions">
+              <button className="btn btn-secondary btn-sm" onClick={doPreview} disabled={busy}>
+                Pré-visualizar
               </button>
-              <button className="secondary" onClick={onClose} disabled={busy}>Cancelar</button>
+              <button className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>Cancelar</button>
+              <button className="btn btn-primary btn-sm" onClick={doConfirm} disabled={busy || items.length === 0}>
+                {busy ? <><Loader2 size={12} className="spin" /> Confirmando…</> : "Confirmar recebimento"}
+              </button>
             </div>
           </>
         )}
@@ -419,6 +436,7 @@ function ReceberModal({
 }
 
 function RecebidosTab({ orders }: { orders: PurchaseOrder[] }) {
+  if (orders.length === 0) return <div className="empty-state"><div style={{ fontWeight: 600 }}>Nenhum pedido recebido ainda.</div></div>;
   return (
     <div className="card">
       <div className="table-wrap">
@@ -427,13 +445,12 @@ function RecebidosTab({ orders }: { orders: PurchaseOrder[] }) {
             <tr><th>Pedido</th><th>Recebido em</th><th>Itens</th><th className="num">Total recebido</th></tr>
           </thead>
           <tbody>
-            {orders.length === 0 && <tr><td colSpan={4} className="muted">Nenhum pedido recebido ainda.</td></tr>}
             {orders.map((o) => (
               <tr key={o.id}>
-                <td className="mono">{o.order_number}</td>
+                <td className="mono" style={{ fontWeight: 600 }}>{o.order_number}</td>
                 <td className="small">{o.received_at ?? "—"}</td>
                 <td className="small">{o.items.map((i) => `${i.referencia} (${i.quantity_received})`).join(", ")}</td>
-                <td className="num">{o.items.reduce((s, i) => s + i.quantity_received, 0)}</td>
+                <td className="num"><strong>{o.items.reduce((s, i) => s + i.quantity_received, 0)}</strong></td>
               </tr>
             ))}
           </tbody>
@@ -444,6 +461,7 @@ function RecebidosTab({ orders }: { orders: PurchaseOrder[] }) {
 }
 
 function CanceladosTab({ orders }: { orders: PurchaseOrder[] }) {
+  if (orders.length === 0) return <div className="empty-state"><div style={{ fontWeight: 600 }}>Nenhum pedido cancelado.</div></div>;
   return (
     <div className="card">
       <div className="table-wrap">
@@ -452,7 +470,6 @@ function CanceladosTab({ orders }: { orders: PurchaseOrder[] }) {
             <tr><th>Pedido</th><th>Motivo</th><th>Responsável</th><th>Data</th></tr>
           </thead>
           <tbody>
-            {orders.length === 0 && <tr><td colSpan={4} className="muted">Nenhum pedido cancelado.</td></tr>}
             {orders.map((o) => (
               <tr key={o.id}>
                 <td className="mono">{o.order_number}</td>

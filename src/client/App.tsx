@@ -53,7 +53,10 @@ function AuthenticatedShell() {
         <button className="topbar-btn" onClick={() => setSidebarOpen((v) => !v)} title="Recolher menu">
           {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
         </button>
-        <span className="topbar-brand">Sistema de Peças</span>
+        <span className="topbar-brand">
+          <span className="topbar-brand-dot" />
+          Sistema de Peças
+        </span>
         <span className="topbar-user">
           <span>{user.displayName}</span>
           <span className="topbar-role">{isAdmin ? "Admin" : "Operador"}</span>
