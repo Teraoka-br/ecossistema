@@ -126,7 +126,24 @@ const ALLOWED_EXTENSIONS: Record<SourceKey, string[]> = {
 };
 
 const XLSX_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // ZIP PK header
-const XLS_MAGIC  = Buffer.from([0xd0, 0xcf, 0x11, 0xe0]); // OLE2 header
+const OLE2_MAGIC = Buffer.from([0xd0, 0xcf, 0x11, 0xe0]); // OLE2/BIFF8 header
+
+/**
+ * Verifica se os primeiros bytes são uma assinatura XLS conhecida:
+ * OLE2 (BIFF8/5), XLSX renomeado, ou BIFF2/3/4 legados.
+ * BIFF2: 09 00 04 00, BIFF3: 09 02, BIFF4: 09 04
+ */
+function isValidXlsSignature(header: Buffer): boolean {
+  if (header.slice(0, 4).equals(OLE2_MAGIC)) return true;  // BIFF8/5 (OLE2)
+  if (header.slice(0, 4).equals(XLSX_MAGIC)) return true;  // XLSX renomeado
+  // BIFF2 — byte 0 = 0x09, byte 1 = 0x00
+  if (header[0] === 0x09 && header[1] === 0x00) return true;
+  // BIFF3 — byte 0 = 0x09, byte 1 = 0x02
+  if (header[0] === 0x09 && header[1] === 0x02) return true;
+  // BIFF4 — byte 0 = 0x09, byte 1 = 0x04
+  if (header[0] === 0x09 && header[1] === 0x04) return true;
+  return false;
+}
 
 export function validateFileForSource(filePath: string, source: SourceKey, filename: string): void {
   const ext = path.extname(filename).toLowerCase();
@@ -154,14 +171,11 @@ export function validateFileForSource(filePath: string, source: SourceKey, filen
       "O arquivo não parece ser um XLSX válido (assinatura ZIP não encontrada).",
     );
   }
-  if (ext === ".xls" && !header.slice(0, 4).equals(XLS_MAGIC)) {
-    // Some XLS might actually be XLSX renamed; allow if it has XLSX magic
-    if (!header.slice(0, 4).equals(XLSX_MAGIC)) {
-      throw new ImportCentralError(
-        "INVALID_FILE_MAGIC",
-        "O arquivo não parece ser um XLS válido (assinatura OLE2 não encontrada).",
-      );
-    }
+  if (ext === ".xls" && !isValidXlsSignature(header)) {
+    throw new ImportCentralError(
+      "INVALID_FILE_MAGIC",
+      "O arquivo não parece ser um XLS válido (assinatura OLE2, XLSX ou BIFF2/3/4 não encontrada).",
+    );
   }
   if (ext === ".csv") {
     // CSV should start with printable ASCII or UTF-8/Latin1 text
@@ -923,9 +937,15 @@ export async function confirmRelSeriais(
       rl2.on("error", rej);
     });
 
+    const invalidCount = totalLines - rowsInserted;
+    const relIssues: ImportIssueRaw[] = [];
+    if (invalidCount > 0) {
+      relIssues.push({ row: null, severity: "WARNING", code: "INVALID_SERIAL", message: `${invalidCount} linha(s) com Serial inválido ignoradas.` });
+    }
+    persistIssues(db, "rel-seriais", importId, relIssues);
     db.prepare(
-      `UPDATE rel_seriais_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=? WHERE id=?`,
-    ).run(rowsInserted, importId);
+      `UPDATE rel_seriais_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, issues_count=? WHERE id=?`,
+    ).run(rowsInserted, relIssues.length, importId);
 
     confirmStaging(db, stagingId, importId);
   });
@@ -1112,9 +1132,20 @@ export function confirmAnaliseMi(
       rowsInserted++;
     }
 
+    const amiIssues: ImportIssueRaw[] = [];
+    let amiNoId = 0; let amiNoImei = 0;
+    for (let i = 1; i < rawRows.length; i++) {
+      const row2 = rawRows[i] as unknown[];
+      if (!row2 || row2.every((c) => c === null)) continue;
+      if (cIdPedido >= 0 && !cellStr(row2, cIdPedido)) { amiNoId++; continue; }
+      if (cImei >= 0 && !normalizeImei(cellStr(row2, cImei))) amiNoImei++;
+    }
+    if (amiNoId > 0)   amiIssues.push({ row: null, severity: "WARNING", code: "NO_ID_PEDIDO", message: `${amiNoId} linha(s) sem ID PEDIDO ignoradas.` });
+    if (amiNoImei > 0) amiIssues.push({ row: null, severity: "INFO",    code: "NO_IMEI",      message: `${amiNoImei} linha(s) sem IMEI válido.` });
+    persistIssues(db, "analise-mi", importId, amiIssues);
     db.prepare(
-      `UPDATE analise_mi_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=? WHERE id=?`,
-    ).run(rowsInserted, importId);
+      `UPDATE analise_mi_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, issues_count=? WHERE id=?`,
+    ).run(rowsInserted, amiIssues.length, importId);
 
     confirmStaging(db, stagingId, importId);
   });
@@ -1178,16 +1209,28 @@ export async function previewPedidos(
       if (r && cBipRef >= 0) { const ref = cellStr(r, cBipRef); if (ref) bipRefs.add(ref); }
     }
 
-    let peacsFound = 0; let peacsValid = 0;
+    let peacsFound = 0; let peacsValid = 0; let peacsDuplicates = 0; let peacsCapMismatch = 0;
     if (sheetPeacs && wb.Sheets[sheetPeacs]) {
       const wsPeacs = wb.Sheets[sheetPeacs];
       const rowsPeacs: unknown[][] = XLSX.utils.sheet_to_json(wsPeacs, { header: 1, defval: null });
       const hdrPeacs = (rowsPeacs[0] as unknown[]).map((h) => (h === null ? "" : String(h)));
-      const cPrice = colIdx(hdrPeacs, "TABELA SEMINOVO PRAZO");
+      const cPrice       = colIdx(hdrPeacs, "TABELA SEMINOVO PRAZO");
+      const cMarcaModelo = colIdx(hdrPeacs, "MARCA/MODELO");
+      const cMemoria     = colIdx(hdrPeacs, "MEMÓRIA", "MEMORIA");
       peacsFound = rowsPeacs.length - 1;
+      const seenNorms = new Set<string>();
       for (let i = 1; i < rowsPeacs.length; i++) {
         const r = rowsPeacs[i] as unknown[];
-        if (r && cPrice >= 0 && parseCostBR(row_get(r, cPrice)) !== null) peacsValid++;
+        if (!r || r.every((c) => c === null)) continue;
+        const mm = cMarcaModelo >= 0 ? cellStr(r, cMarcaModelo) : null;
+        if (!mm) continue;
+        if (cPrice >= 0 && parseCostBR(row_get(r, cPrice)) !== null) {
+          const norm = normalizeKey(mm);
+          if (seenNorms.has(norm)) peacsDuplicates++;
+          else { seenNorms.add(norm); peacsValid++; }
+          const mem = cMemoria >= 0 ? cellStr(r, cMemoria) : null;
+          if (mem && !normalizeKey(mm).includes(normalizeKey(mem))) peacsCapMismatch++;
+        }
       }
     }
 
@@ -1204,7 +1247,7 @@ export async function previewPedidos(
         sheetsFound: { pedidos: sheetPedidos, bipagem: sheetBipagem, peacs: sheetPeacs ?? null },
         pedidosRows: pedidosFound, pedidosValid,
         bipagemRows: bipRows, bipagemRefsUnique: bipRefs.size,
-        peacsRows: peacsFound, peacsValid,
+        peacsRows: peacsFound, peacsValid, peacsDuplicates, peacsCapMismatch,
       },
     };
 
@@ -1334,15 +1377,16 @@ export function confirmPedidos(
     }
     db.prepare(`UPDATE pedidos_imports SET bipagem_refs_unique=? WHERE id=?`).run(bipRefs2.size, importId);
 
-    // PEACS — atomic swap
+    // PEACS — atomic swap; chave por MARCA/MODELO normalizado
     if (sheetPeacs && peacsRows.length > 1) {
-      const hdrPeacs = (peacsRows[0] as unknown[]).map((h) => (h === null ? "" : String(h)));
-      const cMarcaModelo= colIdx(hdrPeacs, "MARCA/MODELO");
-      const cMarca  = colIdx(hdrPeacs, "MARCA");
-      const cFamilia= colIdx(hdrPeacs, "FAMÍLIA", "FAMILIA");
-      const cMemoria= colIdx(hdrPeacs, "MEMÓRIA", "MEMORIA");
-      const cPreco  = colIdx(hdrPeacs, "TABELA SEMINOVO PRAZO");
+      const hdrPeacs   = (peacsRows[0] as unknown[]).map((h) => (h === null ? "" : String(h)));
+      const cMarcaModelo = colIdx(hdrPeacs, "MARCA/MODELO");
+      const cMarca     = colIdx(hdrPeacs, "MARCA");
+      const cFamilia   = colIdx(hdrPeacs, "FAMÍLIA", "FAMILIA");
+      const cMemoria   = colIdx(hdrPeacs, "MEMÓRIA", "MEMORIA");
+      const cPreco     = colIdx(hdrPeacs, "TABELA SEMINOVO PRAZO");
       if (cPreco < 0) throw new ImportCentralError("MISSING_COL", `Coluna "TABELA SEMINOVO PRAZO" não encontrada.`);
+      if (cMarcaModelo < 0) throw new ImportCentralError("MISSING_COL", `Coluna "MARCA/MODELO" não encontrada na aba PEACS.`);
 
       const peacsImportRow = db.prepare(
         `INSERT INTO peacs_imports (filename, file_hash, status, rows_found, entries_matched, entries_unmatched, issues_count, created_by_user_id)
@@ -1351,32 +1395,95 @@ export function confirmPedidos(
       const peacsImportId = Number(peacsImportRow.lastInsertRowid);
 
       db.prepare(`UPDATE peacs_catalog SET active=0 WHERE active=1`).run();
+
       const insertPeacs = db.prepare(
         `INSERT INTO peacs_catalog
-           (peacs_import_id, brand, brand_norm, model, model_norm, capacity, capacity_norm, estimated_sale, raw_data_json, active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+           (peacs_import_id, brand, brand_norm, model, model_norm, capacity, capacity_norm,
+            marca_modelo, marca_modelo_norm, familia, memoria_src,
+            estimated_sale, raw_data_json, active, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))`,
       );
+
+      const peacsIssues: ImportIssueRaw[] = [];
+      // Dedup by marca_modelo_norm — última ocorrência física vence
+      const seenMarcaModelo = new Map<string, { rowIdx: number }>();
+
       for (let i = 1; i < peacsRows.length; i++) {
         const r = peacsRows[i] as unknown[];
         if (!r || r.every((c) => c === null)) continue;
-        const marca  = cMarca   >= 0 ? cellStr(r, cMarca)   : null;
-        const familia= cFamilia >= 0 ? cellStr(r, cFamilia) : null;
-        const memoria= cMemoria >= 0 ? cellStr(r, cMemoria) : null;
-        const preco  = parseCostBR(cPreco >= 0 ? r[cPreco] : null);
-        if (!marca || preco === null) continue;
+        const marcaModelo = cMarcaModelo >= 0 ? cellStr(r, cMarcaModelo) : null;
+        if (!marcaModelo) continue;
+        const preco = parseCostBR(cPreco >= 0 ? r[cPreco] : null);
+        if (preco === null) continue;
+        const norm = normalizeKey(marcaModelo);
+        if (seenMarcaModelo.has(norm)) {
+          const prev = seenMarcaModelo.get(norm)!;
+          peacsIssues.push({
+            row: i + 1, severity: "WARNING", code: "PEACS_DUPLICATE_MARCA_MODELO",
+            message: `MARCA/MODELO duplicado "${marcaModelo}": linha ${prev.rowIdx + 1} substituída pela linha ${i + 1}.`,
+          });
+        }
+        seenMarcaModelo.set(norm, { rowIdx: i });
+      }
+
+      for (const [norm, { rowIdx }] of seenMarcaModelo) {
+        const r = peacsRows[rowIdx] as unknown[];
+        const marcaModelo = cellStr(r, cMarcaModelo)!;
+        const marca   = cMarca   >= 0 ? cellStr(r, cMarca)   : null;
+        const familia = cFamilia >= 0 ? cellStr(r, cFamilia) : null;
+        const memoria = cMemoria >= 0 ? cellStr(r, cMemoria) : null;
+        const preco   = parseCostBR(r[cPreco])!;
+
+        // Detecta divergência entre capacidade em MARCA/MODELO e coluna MEMÓRIA
+        if (memoria) {
+          const normMm = normalizeKey(marcaModelo);
+          const normMem = normalizeKey(memoria);
+          if (!normMm.includes(normMem)) {
+            peacsIssues.push({
+              row: rowIdx + 1, severity: "WARNING", code: "PEACS_CAPACITY_MISMATCH",
+              message: `Divergência capacidade: MARCA/MODELO="${marcaModelo}" mas MEMÓRIA="${memoria}". Preservados ambos.`,
+              rawValue: `mm="${marcaModelo}" mem="${memoria}"`,
+            });
+          }
+        }
+
+        // model auxiliar (familia + memoria) para backward compat
         const model = [familia, memoria].filter(Boolean).join(" ");
         insertPeacs.run(
-          peacsImportId, marca, normalizeKey(marca), model, normalizeKey(model),
-          memoria, memoria ? normalizeKey(memoria) : null, preco,
-          JSON.stringify({ marcaModelo: cMarcaModelo >= 0 ? cellStr(r, cMarcaModelo) : null }),
+          peacsImportId,
+          marca ?? marcaModelo, marca ? normalizeKey(marca) : norm,
+          model || marcaModelo, normalizeKey(model || marcaModelo),
+          memoria, memoria ? normalizeKey(memoria) : null,
+          marcaModelo, norm,
+          familia, memoria,
+          preco,
+          JSON.stringify({ marcaModelo }),
         );
         peacsInserted++;
       }
-      db.prepare(`UPDATE peacs_imports SET status='COMPLETED', finished_at=datetime('now'), entries_matched=? WHERE id=?`).run(peacsInserted, peacsImportId);
+
+      persistIssues(db, "pedidos", peacsImportId, peacsIssues);
+      db.prepare(`UPDATE peacs_imports SET status='COMPLETED', finished_at=datetime('now'), entries_matched=?, issues_count=? WHERE id=?`)
+        .run(peacsInserted, peacsIssues.length, peacsImportId);
       db.prepare(`UPDATE pedidos_imports SET peacs_rows_found=? WHERE id=?`).run(peacsRows.length - 1, importId);
     }
 
-    db.prepare(`UPDATE pedidos_imports SET status='COMPLETED', finished_at=datetime('now') WHERE id=?`).run(importId);
+    // Issues gerais dos pedidos
+    const pedIssues: ImportIssueRaw[] = [];
+    const hdrPedCheck = (rowsPed[0] as unknown[]).map((h) => (h === null ? "" : String(h)));
+    const cPedIdCheck = colIdx(hdrPedCheck, "ID PEDIDO");
+    let pedNoId = 0; let pedNoImei = 0;
+    for (let i = 1; i < rowsPed.length; i++) {
+      const r2 = rowsPed[i] as unknown[];
+      if (!r2 || r2.every((c) => c === null)) continue;
+      if (cPedIdCheck >= 0 && !cellStr(r2, cPedIdCheck)) pedNoId++;
+      const cPedImeiCheck = colIdx(hdrPedCheck, "IMEI");
+      if (cPedImeiCheck >= 0 && !normalizeImei(cellStr(r2, cPedImeiCheck))) pedNoImei++;
+    }
+    if (pedNoId > 0)   pedIssues.push({ row: null, severity: "WARNING", code: "NO_ID_PEDIDO",   message: `${pedNoId} linha(s) sem ID PEDIDO ignoradas.` });
+    if (pedNoImei > 0) pedIssues.push({ row: null, severity: "INFO",    code: "NO_IMEI",         message: `${pedNoImei} linha(s) sem IMEI válido.` });
+    persistIssues(db, "pedidos", importId, pedIssues);
+    db.prepare(`UPDATE pedidos_imports SET status='COMPLETED', finished_at=datetime('now'), issues_count=? WHERE id=?`).run(pedIssues.length, importId);
     confirmStaging(db, stagingId, importId);
   });
 
@@ -1416,19 +1523,48 @@ export async function previewBkp(
     const sheetsToLoad = [sheetReparos, sheetBaixa, sheetTriagem].filter(Boolean) as string[];
     const wb = XLSX.readFile(filePath, { sheets: sheetsToLoad, cellFormula: false, cellHTML: false });
 
-    const countSheet = (name: string | undefined) => {
-      if (!name || !wb.Sheets[name]) return 0;
+    /** Conta linhas não-vazias e linhas com chave obrigatória. */
+    function countBkpSheet(
+      name: string | undefined,
+      keyColAliases: string[],
+    ): { found: number; valid: number; invalid: number; seenKeys: Set<string> } {
+      if (!name || !wb.Sheets[name]) return { found: 0, valid: 0, invalid: 0, seenKeys: new Set() };
       const rows: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null });
-      return Math.max(0, rows.length - 1);
-    };
+      if (rows.length === 0) return { found: 0, valid: 0, invalid: 0, seenKeys: new Set() };
+      const hdr = (rows[0] as unknown[]).map((h) => (h === null ? "" : String(h)));
+      const keyIdx = colIdx(hdr, ...keyColAliases);
+      const seenKeys = new Set<string>();
+      let valid = 0; let invalid = 0;
+      for (let i = 1; i < rows.length; i++) {
+        const r = rows[i] as unknown[];
+        if (!r || r.every((c) => c === null)) continue;
+        const key = keyIdx >= 0 ? cellStr(r, keyIdx) : null;
+        if (key) {
+          seenKeys.add(key);
+          valid++;
+        } else {
+          invalid++;
+        }
+      }
+      return { found: valid + invalid, valid, invalid, seenKeys };
+    }
+
+    const rStat = countBkpSheet(sheetReparos, ["IMEI"]);
+    const bStat = countBkpSheet(sheetBaixa,   ["REF"]);
+    const tStat = countBkpSheet(sheetTriagem,  ["IMEI 1"]);
 
     const preview: StagedPreview = {
       stagingId, source: "bkp", filename, fileHash, fileSize,
       status: "PREVIEW_READY", alreadyImported: !!existingId, existingImportId: existingId,
-      rowsFound: countSheet(sheetReparos) + countSheet(sheetBaixa) + countSheet(sheetTriagem),
-      rowsValid: countSheet(sheetReparos) + countSheet(sheetBaixa) + countSheet(sheetTriagem),
+      rowsFound: rStat.found + bStat.found + tStat.found,
+      rowsValid: rStat.valid + bStat.valid + tStat.valid,
       issues, previewRows: [],
-      extra: { sheets: { reparos: sheetReparos ?? null, baixa: sheetBaixa ?? null, triagem: sheetTriagem ?? null } },
+      extra: {
+        sheets: { reparos: sheetReparos ?? null, baixa: sheetBaixa ?? null, triagem: sheetTriagem ?? null },
+        reparos: { found: rStat.found, valid: rStat.valid, invalid: rStat.invalid },
+        baixas:  { found: bStat.found, valid: bStat.valid, invalid: bStat.invalid },
+        triagem: { found: tStat.found, valid: tStat.valid, invalid: tStat.invalid },
+      },
     };
 
     setStagingPreviewReady(db, stagingId, JSON.stringify(preview));
@@ -1602,9 +1738,22 @@ export function confirmBkp(
     }
 
     const total = reparosInserted + baixasInserted + triagemInserted;
+    const totalFound = (() => {
+      let n = 0;
+      if (sheetReparos && wb.Sheets[sheetReparos]) n += (XLSX.utils.sheet_to_json(wb.Sheets[sheetReparos], { header: 1, defval: null }) as unknown[][]).length - 1;
+      if (sheetBaixa   && wb.Sheets[sheetBaixa])   n += (XLSX.utils.sheet_to_json(wb.Sheets[sheetBaixa],   { header: 1, defval: null }) as unknown[][]).length - 1;
+      if (sheetTriagem && wb.Sheets[sheetTriagem])  n += (XLSX.utils.sheet_to_json(wb.Sheets[sheetTriagem], { header: 1, defval: null }) as unknown[][]).length - 1;
+      return n;
+    })();
+    const skippedBkp = totalFound - total;
+    const bkpIssues: ImportIssueRaw[] = [];
+    if (skippedBkp > 0) {
+      bkpIssues.push({ row: null, severity: "INFO", code: "DUPLICATE_IKEY", message: `${skippedBkp} linha(s) ignoradas por chave de idempotência duplicada (INSERT OR IGNORE).` });
+    }
+    persistIssues(db, "bkp", importId, bkpIssues);
     db.prepare(
-      `UPDATE bkp_imports SET status='COMPLETED', finished_at=datetime('now'), rows_found=?, events_unlinked=?, sheets_processed=? WHERE id=?`,
-    ).run(total, total, JSON.stringify([sheetReparos, sheetBaixa, sheetTriagem].filter(Boolean)), importId);
+      `UPDATE bkp_imports SET status='COMPLETED', finished_at=datetime('now'), rows_found=?, events_unlinked=?, issues_count=?, sheets_processed=? WHERE id=?`,
+    ).run(total, total, bkpIssues.length, JSON.stringify([sheetReparos, sheetBaixa, sheetTriagem].filter(Boolean)), importId);
 
     confirmStaging(db, stagingId, importId);
   });
@@ -1794,9 +1943,22 @@ export function confirmTriagemSaida(
       rowsInserted++;
     }
 
+    const tsIssues: ImportIssueRaw[] = [];
+    let tsNoImei = 0; let tsMotivoAusente = 0;
+    for (let i = 1; i < rawRows.length; i++) {
+      const r2 = rawRows[i] as unknown[];
+      if (!r2 || r2.every((c) => c === null)) continue;
+      if (!normalizeImei(cImei >= 0 ? cellStr(r2, cImei) : null)) tsNoImei++;
+      const efetivo2 = cRepEfetivo >= 0 ? cellStr(r2, cRepEfetivo) : null;
+      const motivo2  = cMotivo     >= 0 ? cellStr(r2, cMotivo)     : null;
+      if (normalizeHeader(efetivo2 ?? "") === "NAO" && (!motivo2 || !motivo2.trim() || normalizeHeader(motivo2) === "PREENCHER")) tsMotivoAusente++;
+    }
+    if (tsNoImei > 0)       tsIssues.push({ row: null, severity: "INFO",    code: "NO_IMEI",       message: `${tsNoImei} linha(s) sem IMEI válido.` });
+    if (tsMotivoAusente > 0) tsIssues.push({ row: null, severity: "WARNING", code: "MOTIVO_ABSENT", message: `${tsMotivoAusente} linha(s) com REPARO EFETIVO=NÃO sem motivo.` });
+    persistIssues(db, "triagem-saida", importId, tsIssues);
     db.prepare(
-      `UPDATE triagem_saida_imports SET status='COMPLETED', finished_at=datetime('now'), rows_found=?, rows_unlinked=? WHERE id=?`,
-    ).run(rowsInserted, rowsInserted, importId);
+      `UPDATE triagem_saida_imports SET status='COMPLETED', finished_at=datetime('now'), rows_found=?, rows_unlinked=?, issues_count=? WHERE id=?`,
+    ).run(rowsInserted, rowsInserted, tsIssues.length, importId);
 
     confirmStaging(db, stagingId, importId);
   });
@@ -1973,9 +2135,18 @@ export function confirmSh(
       rowsInserted++;
     }
 
+    const shIssues: ImportIssueRaw[] = [];
+    let shNoCodigo = 0;
+    for (let i = 1; i < rawRows.length; i++) {
+      const r2 = rawRows[i] as unknown[];
+      if (!r2 || r2.every((c) => c === null)) continue;
+      if (!cellStr(r2, cCodigo)) shNoCodigo++;
+    }
+    if (shNoCodigo > 0) shIssues.push({ row: null, severity: "WARNING", code: "NO_CODIGO", message: `${shNoCodigo} linha(s) sem CODIGO ignoradas.` });
+    persistIssues(db, "sh", importId, shIssues);
     db.prepare(
-      `UPDATE sh_catalog_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=? WHERE id=?`,
-    ).run(rowsInserted, importId);
+      `UPDATE sh_catalog_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, issues_count=? WHERE id=?`,
+    ).run(rowsInserted, shIssues.length, importId);
 
     confirmStaging(db, stagingId, importId);
   });

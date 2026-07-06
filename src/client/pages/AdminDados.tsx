@@ -296,6 +296,196 @@ function ConfigModal({ def, onClose }: { def: SourceDefinition; onClose: () => v
 }
 
 // ---------------------------------------------------------------------------
+// Pending staging drawer — retomada de previews pendentes
+// ---------------------------------------------------------------------------
+
+interface StagingEntry {
+  id: number;
+  filename: string;
+  fileHash: string;
+  fileSize: number;
+  status: "UPLOADED" | "PREVIEW_READY" | "FAILED";
+  createdAt: string;
+  expiresAt: string;
+  previewJson: string | null;
+}
+
+function PendingDrawer({
+  source,
+  label,
+  onClose,
+  onConfirmed,
+}: {
+  source: SourceKey;
+  label: string;
+  onClose: () => void;
+  onConfirmed: () => void;
+}) {
+  const [entries, setEntries] = useState<StagingEntry[] | null>(null);
+  const [error, setError]     = useState<string | null>(null);
+  const [selected, setSelected] = useState<{ entry: StagingEntry; preview: PreviewResult } | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+
+  function load() {
+    setEntries(null);
+    setError(null);
+    fetch(`/api/import-central/${source}/staged`)
+      .then(r => r.json())
+      .then(d => setEntries((d.staged ?? []) as StagingEntry[]))
+      .catch(() => setError("Falha ao carregar previews pendentes."));
+  }
+
+  useEffect(() => { load(); }, [source]);
+
+  function openPreview(entry: StagingEntry) {
+    if (!entry.previewJson) return;
+    try {
+      const preview = JSON.parse(entry.previewJson) as PreviewResult;
+      setSelected({ entry, preview });
+      setConfirmError(null);
+    } catch { setError("Preview inválido."); }
+  }
+
+  async function handleConfirm() {
+    if (!selected) return;
+    setConfirming(true);
+    setConfirmError(null);
+    try {
+      const r = await fetch(`/api/import-central/${source}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stagingId: selected.entry.id }),
+      });
+      const data = await r.json() as { ok?: boolean; error?: string };
+      if (!r.ok) { setConfirmError(data.error ?? "Falha ao confirmar."); return; }
+      onConfirmed();
+      onClose();
+    } catch { setConfirmError("Erro de rede ao confirmar."); }
+    finally { setConfirming(false); }
+  }
+
+  async function handleCancel(id: number) {
+    await fetch(`/api/import-central/${source}/staged/${id}`, { method: "DELETE" }).catch(() => null);
+    load();
+    if (selected?.entry.id === id) setSelected(null);
+  }
+
+  const now = new Date();
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", justifyContent: "flex-end" }}>
+      <div onClick={onClose} style={{ flex: 1, background: "rgba(0,0,0,0.4)" }} />
+      <div style={{ width: selected ? 640 : 420, background: "var(--color-surface)", boxShadow: "-4px 0 24px rgba(0,0,0,0.4)", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid var(--color-border)" }}>
+          <span style={{ fontWeight: 600 }}>{label} — Previews pendentes</span>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}><X size={14} /></button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", display: "flex" }}>
+          {/* Lista de entradas */}
+          <div style={{ width: 220, borderRight: selected ? "1px solid var(--color-border)" : undefined, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+            {error && <p style={{ color: "var(--color-danger)", fontSize: 12 }}>{error}</p>}
+            {!entries && !error && <div style={{ display: "flex", gap: 6, color: "var(--color-text-muted)", fontSize: 12 }}><Loader2 size={13} className="spin" />Carregando…</div>}
+            {entries && entries.length === 0 && <p style={{ color: "var(--color-text-muted)", fontSize: 12 }}>Nenhum preview pendente.</p>}
+            {entries && entries.map(entry => {
+              const expired  = new Date(entry.expiresAt) < now;
+              const hasPreview = !!entry.previewJson;
+              const isActive = selected?.entry.id === entry.id;
+              return (
+                <div key={entry.id} style={{
+                  padding: 10, borderRadius: 6, border: `1px solid ${isActive ? "var(--color-accent)" : "var(--color-border)"}`,
+                  background: isActive ? "rgba(99,102,241,0.08)" : "var(--color-surface-alt)",
+                  cursor: "pointer", opacity: expired ? 0.5 : 1,
+                }} onClick={() => hasPreview && !expired ? openPreview(entry) : undefined}>
+                  <div style={{ fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={entry.filename}>{entry.filename}</div>
+                  <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginTop: 2 }}>
+                    #{entry.id} · {entry.status}
+                    {expired && <span style={{ color: "var(--color-danger)" }}> · EXPIRADO</span>}
+                    {!hasPreview && !expired && <span style={{ color: "var(--color-warning)" }}> · sem preview</span>}
+                  </div>
+                  <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+                    {hasPreview && !expired && (
+                      <button className="btn btn-ghost btn-sm" style={{ fontSize: 10, padding: "2px 6px" }} onClick={e => { e.stopPropagation(); openPreview(entry); }}>Abrir</button>
+                    )}
+                    <button className="btn btn-ghost btn-sm" style={{ fontSize: 10, padding: "2px 6px", color: "var(--color-danger)" }}
+                      onClick={e => { e.stopPropagation(); handleCancel(entry.id); }}>Cancelar</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Preview selecionado */}
+          {selected && (
+            <div style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {[
+                  { label: "Arquivo", value: selected.preview.filename, mono: false },
+                  { label: "SHA-256", value: selected.preview.fileHash.slice(0, 16) + "…", mono: true },
+                  { label: "Linhas encontradas", value: String(selected.preview.rowsFound), mono: false },
+                  { label: "Linhas válidas", value: String(selected.preview.rowsValid), mono: false },
+                ].map(({ label, value, mono }) => (
+                  <div key={label} style={{ padding: 8, background: "var(--color-surface-alt)", borderRadius: 5 }}>
+                    <div style={{ fontSize: 10, color: "var(--color-text-muted)" }}>{label}</div>
+                    <div style={{ fontWeight: 500, fontSize: 12, fontFamily: mono ? "monospace" : undefined }}>{value}</div>
+                  </div>
+                ))}
+              </div>
+
+              {selected.preview.alreadyImported && (
+                <div className="info-banner" style={{ borderColor: "var(--color-warning)", fontSize: 12 }}>
+                  <AlertTriangle size={13} /> Arquivo já importado anteriormente (#{selected.preview.existingImportId}).
+                </div>
+              )}
+
+              {selected.preview.issues.length > 0 && (
+                <div>
+                  <div style={{ fontWeight: 500, fontSize: 12, marginBottom: 6 }}>Problemas ({selected.preview.issues.length})</div>
+                  <div style={{ maxHeight: 140, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
+                    {selected.preview.issues.slice(0, 20).map((issue, i) => (
+                      <div key={i} style={{
+                        fontSize: 11, padding: "4px 8px", borderRadius: 3,
+                        borderLeft: `3px solid ${issue.severity === "ERROR" ? "var(--color-danger)" : issue.severity === "WARNING" ? "var(--color-warning)" : "var(--color-info)"}`,
+                        background: issue.severity === "ERROR" ? "rgba(239,68,68,0.07)" : issue.severity === "WARNING" ? "rgba(245,158,11,0.07)" : "rgba(99,102,241,0.05)",
+                      }}>
+                        <span style={{ color: "var(--color-text-muted)" }}>{issue.row != null ? `L${issue.row}: ` : ""}{issue.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {selected.preview.extra && (
+                <details>
+                  <summary style={{ fontSize: 11, color: "var(--color-text-muted)", cursor: "pointer" }}>Detalhes técnicos</summary>
+                  <pre style={{ fontSize: 10, background: "var(--color-surface-alt)", padding: 8, borderRadius: 4, overflowX: "auto", marginTop: 4 }}>
+                    {JSON.stringify(selected.preview.extra, null, 2)}
+                  </pre>
+                </details>
+              )}
+
+              {confirmError && <p style={{ color: "var(--color-danger)", fontSize: 12 }}>{confirmError}</p>}
+
+              <div style={{ display: "flex", gap: 8, marginTop: "auto" }}>
+                <button className="btn btn-secondary btn-sm" onClick={() => { handleCancel(selected.entry.id); setSelected(null); }}>Cancelar staging</button>
+                <button
+                  className="btn btn-primary btn-sm"
+                  disabled={confirming || selected.preview.alreadyImported || selected.preview.issues.some(i => i.severity === "ERROR")}
+                  onClick={handleConfirm}
+                >
+                  {confirming ? <><Loader2 size={12} className="spin" />Confirmando…</> : "Confirmar importação"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // History drawer
 // ---------------------------------------------------------------------------
 
@@ -598,12 +788,14 @@ function SourceCard({
   onUpload,
   onHistory,
   onConfig,
+  onPending,
 }: {
   def: SourceDefinition;
   status: SourceStatus;
   onUpload: () => void;
   onHistory: () => void;
   onConfig: () => void;
+  onPending: () => void;
 }) {
   const typeColor = SOURCE_TYPE_COLORS[def.sourceType] ?? "var(--color-text-muted)";
 
@@ -643,8 +835,11 @@ function SourceCard({
           </span>
         </>}
         {status.pendingStaging > 0 && (
-          <span style={{ gridColumn: "1 / -1", color: "var(--color-warning)" }}>
-            {status.pendingStaging} preview(s) pendente(s)
+          <span
+            style={{ gridColumn: "1 / -1", color: "var(--color-warning)", cursor: "pointer", textDecoration: "underline dotted" }}
+            onClick={onPending}
+          >
+            {status.pendingStaging} preview(s) pendente(s) — retomar
           </span>
         )}
       </div>
@@ -698,6 +893,7 @@ export function AdminDados() {
   const [uploadFor, setUploadFor]   = useState<SourceDefinition | null>(null);
   const [historyFor, setHistoryFor] = useState<SourceDefinition | null>(null);
   const [configFor, setConfigFor]   = useState<SourceDefinition | null>(null);
+  const [pendingFor, setPendingFor] = useState<SourceDefinition | null>(null);
   const [error, setError]           = useState<string | null>(null);
 
   function loadStatus() {
@@ -764,6 +960,7 @@ export function AdminDados() {
                 onUpload={() => setUploadFor(def)}
                 onHistory={() => setHistoryFor(def)}
                 onConfig={() => setConfigFor(def)}
+                onPending={() => setPendingFor(def)}
               />
             ))}
           </div>
@@ -797,6 +994,14 @@ export function AdminDados() {
       )}
       {configFor && (
         <ConfigModal def={configFor} onClose={() => setConfigFor(null)} />
+      )}
+      {pendingFor && (
+        <PendingDrawer
+          source={pendingFor.key}
+          label={pendingFor.label}
+          onClose={() => setPendingFor(null)}
+          onConfirmed={() => { setPendingFor(null); loadStatus(); }}
+        />
       )}
     </div>
   );

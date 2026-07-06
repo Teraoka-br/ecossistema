@@ -204,3 +204,70 @@ describe("persistIssues (mock DB)", () => {
     expect(prepCalled).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// validateFileForSource — BIFF2/3/4 (arquivos XLS legados)
+// ---------------------------------------------------------------------------
+
+describe("validateFileForSource — BIFF2/3/4 para .xls", () => {
+  function writeTmp(content: Buffer, name: string): string {
+    const tmpPath = path.join(os.tmpdir(), `test-biff-${Date.now()}-${name}`);
+    fs.writeFileSync(tmpPath, content);
+    return tmpPath;
+  }
+
+  // BIFF2: byte0=0x09 byte1=0x00
+  const BIFF2_HDR = Buffer.from([0x09, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
+  // BIFF3: byte0=0x09 byte1=0x02
+  const BIFF3_HDR = Buffer.from([0x09, 0x02, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00]);
+  // BIFF4: byte0=0x09 byte1=0x04
+  const BIFF4_HDR = Buffer.from([0x09, 0x04, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00]);
+  const OLE2_HDR  = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+  const RANDOM_BIN = Buffer.from([0xAA, 0xBB, 0xCC, 0xDD, 0x00, 0x00, 0x00, 0x00]);
+
+  it("BIFF2 .xls → aceita para 'sh'", () => {
+    const fp = writeTmp(BIFF2_HDR, "biff2.xls");
+    expect(() => validateFileForSource(fp, "sh", "biff2.xls")).not.toThrow();
+    fs.unlinkSync(fp);
+  });
+
+  it("BIFF3 .xls → aceita para 'sh'", () => {
+    const fp = writeTmp(BIFF3_HDR, "biff3.xls");
+    expect(() => validateFileForSource(fp, "sh", "biff3.xls")).not.toThrow();
+    fs.unlinkSync(fp);
+  });
+
+  it("BIFF4 .xls → aceita para 'sh'", () => {
+    const fp = writeTmp(BIFF4_HDR, "biff4.xls");
+    expect(() => validateFileForSource(fp, "sh", "biff4.xls")).not.toThrow();
+    fs.unlinkSync(fp);
+  });
+
+  it("OLE2 .xls → aceita para 'bkp'", () => {
+    const fp = writeTmp(OLE2_HDR, "ole2.xls");
+    expect(() => validateFileForSource(fp, "bkp", "ole2.xls")).not.toThrow();
+    fs.unlinkSync(fp);
+  });
+
+  it("binário aleatório .xls → rejeita com INVALID_FILE_MAGIC", () => {
+    const fp = writeTmp(RANDOM_BIN, "bad.xls");
+    try {
+      validateFileForSource(fp, "sh", "bad.xls");
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(ImportCentralError);
+      expect((e as ImportCentralError).code).toBe("INVALID_FILE_MAGIC");
+    }
+    fs.unlinkSync(fp);
+  });
+
+  it("BIFF2 aceita para qualquer fonte que permita .xls", () => {
+    const sources: Array<"his" | "bkp" | "sh" | "analise-mi" | "pedidos" | "triagem-saida"> =
+      ["his", "bkp", "sh", "analise-mi", "pedidos", "triagem-saida"];
+    for (const src of sources) {
+      const fp = writeTmp(BIFF2_HDR, `biff2-${src}.xls`);
+      expect(() => validateFileForSource(fp, src, `biff2-${src}.xls`), `fonte ${src}`).not.toThrow();
+      fs.unlinkSync(fp);
+    }
+  });
+});
