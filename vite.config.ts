@@ -6,8 +6,8 @@ const clientRoot = fileURLToPath(new URL("./src/client", import.meta.url));
 const outDir = fileURLToPath(new URL("./dist/client", import.meta.url));
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
-const SERVER_PORT = process.env.SERVER_PORT ?? "3001";
-const CLIENT_PORT = Number(process.env.CLIENT_PORT ?? "5173");
+const SERVER_PORT = process.env.SERVER_PORT ?? process.env.API_PORT ?? "3001";
+const CLIENT_PORT = Number(process.env.CLIENT_PORT ?? process.env.PORT ?? "5173");
 
 export default defineConfig({
   root: clientRoot,
@@ -17,7 +17,7 @@ export default defineConfig({
     // Permite importar tipos de src/shared (fora da raiz do client).
     fs: { allow: [projectRoot] },
     proxy: {
-      "/api": {
+      "/api/": {
         target: `http://localhost:${SERVER_PORT}`,
         changeOrigin: true,
       },

@@ -8,7 +8,7 @@ function resolveFromRoot(p: string): string {
 }
 
 export const config = {
-  serverPort: Number(process.env.SERVER_PORT ?? 3001),
+  serverPort: Number(process.env.SERVER_PORT ?? process.env.PORT ?? 3001),
   // Escuta em todas as interfaces por padrão para permitir acesso pela rede local.
   // Sem autenticação — use somente em redes locais confiáveis.
   // Para restringir ao localhost: defina SERVER_HOST=127.0.0.1.

@@ -782,6 +782,11 @@ function UploadDialog({
 // Source card
 // ---------------------------------------------------------------------------
 
+const EMPTY_STATUS: SourceStatus = {
+  lastImportId: null, lastImportAt: null, lastStatus: null,
+  totalImports: 0, lastRowsFound: 0, lastIssuesCount: 0, pendingStaging: 0,
+};
+
 function SourceCard({
   def,
   status,
@@ -791,12 +796,13 @@ function SourceCard({
   onPending,
 }: {
   def: SourceDefinition;
-  status: SourceStatus;
+  status: SourceStatus | null;
   onUpload: () => void;
   onHistory: () => void;
   onConfig: () => void;
   onPending: () => void;
 }) {
+  const s = status ?? EMPTY_STATUS;
   const typeColor = SOURCE_TYPE_COLORS[def.sourceType] ?? "var(--color-text-muted)";
 
   return (
@@ -806,7 +812,7 @@ function SourceCard({
     }}>
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-          <StatusDot status={status.lastStatus} />
+          <StatusDot status={s.lastStatus} />
           <span style={{ fontWeight: 600, fontSize: 14, flex: 1 }}>{def.label}</span>
           <button
             className="btn btn-ghost btn-sm"
@@ -826,21 +832,27 @@ function SourceCard({
       </div>
 
       <div style={{ fontSize: 12, color: "var(--color-text-muted)", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-        <span><Clock size={11} style={{ verticalAlign: "middle", marginRight: 3 }} />{fmtDate(status.lastImportAt)}</span>
-        <span>{status.totalImports} importaç{status.totalImports === 1 ? "ão" : "ões"}</span>
-        {status.lastStatus && <>
-          <span>Linhas: {status.lastRowsFound}</span>
-          <span style={{ color: status.lastIssuesCount > 0 ? "var(--color-warning)" : "var(--color-success)" }}>
-            {status.lastIssuesCount > 0 ? `⚠ ${status.lastIssuesCount} probl.` : "✓ Sem probl."}
-          </span>
-        </>}
-        {status.pendingStaging > 0 && (
-          <span
-            style={{ gridColumn: "1 / -1", color: "var(--color-warning)", cursor: "pointer", textDecoration: "underline dotted" }}
-            onClick={onPending}
-          >
-            {status.pendingStaging} preview(s) pendente(s) — retomar
-          </span>
+        {status === null ? (
+          <span style={{ gridColumn: "1 / -1", fontStyle: "italic" }}>Nunca importado</span>
+        ) : (
+          <>
+            <span><Clock size={11} style={{ verticalAlign: "middle", marginRight: 3 }} />{fmtDate(s.lastImportAt)}</span>
+            <span>{s.totalImports} importaç{s.totalImports === 1 ? "ão" : "ões"}</span>
+            {s.lastStatus && <>
+              <span>Linhas: {s.lastRowsFound}</span>
+              <span style={{ color: s.lastIssuesCount > 0 ? "var(--color-warning)" : "var(--color-success)" }}>
+                {s.lastIssuesCount > 0 ? `⚠ ${s.lastIssuesCount} probl.` : "✓ Sem probl."}
+              </span>
+            </>}
+            {s.pendingStaging > 0 && (
+              <span
+                style={{ gridColumn: "1 / -1", color: "var(--color-warning)", cursor: "pointer", textDecoration: "underline dotted" }}
+                onClick={onPending}
+              >
+                {s.pendingStaging} preview(s) pendente(s) — retomar
+              </span>
+            )}
+          </>
         )}
       </div>
 
@@ -899,13 +911,22 @@ export function AdminDados() {
   function loadStatus() {
     setLoading(true);
     fetch("/api/import-central/status")
-      .then(r => r.json())
+      .then(async r => {
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({})) as { error?: string };
+          throw new Error(body.error ?? `Erro ${r.status}`);
+        }
+        return r.json() as Promise<{ status: AllStatus; legado: LegadoStatus }>;
+      })
       .then(d => {
-        setAllStatus(d.status);
-        setLegado(d.legado);
+        setAllStatus(d.status ?? null);
+        setLegado(d.legado ?? null);
         setError(null);
       })
-      .catch(() => setError("Falha ao carregar status das fontes."))
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : "Erro desconhecido.";
+        setError(`Não foi possível carregar o status das fontes: ${msg}`);
+      })
       .finally(() => setLoading(false));
   }
 
@@ -923,51 +944,59 @@ export function AdminDados() {
         </button>
       </div>
 
+      {/* Banner de erro com botão de retry — sempre visível quando a API falha */}
       {error && (
-        <div className="info-banner" style={{ borderColor: "var(--color-danger)", marginBottom: 16 }}>
-          <XCircle size={14} />{error}
+        <div className="info-banner" style={{ borderColor: "var(--color-danger)", marginBottom: 16, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <XCircle size={14} style={{ flexShrink: 0 }} />
+          <span style={{ flex: 1 }}>{error}</span>
+          <button className="btn btn-secondary btn-sm" onClick={loadStatus} disabled={loading}>
+            {loading ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />}
+            Tentar novamente
+          </button>
         </div>
       )}
 
-      {loading && !allStatus && (
+      {/* Spinner apenas na primeira carga, antes de qualquer dado */}
+      {loading && !allStatus && !error && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--color-text-muted)", padding: "24px 0" }}>
           <Loader2 size={16} className="spin" /> Carregando status…
         </div>
       )}
 
+      {/* Resumo numérico — só quando temos dados */}
       {allStatus && (
-        <>
-          <div style={{ display: "flex", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
-            {[
-              { label: "Fontes importadas", value: Object.values(allStatus).filter(s => s.lastStatus === "COMPLETED").length },
-              { label: "Nunca importadas",  value: Object.values(allStatus).filter(s => !s.lastStatus).length },
-              { label: "Total importações", value: Object.values(allStatus).reduce((a, s) => a + s.totalImports, 0) },
-              { label: "Previews pendentes",value: Object.values(allStatus).reduce((a, s) => a + s.pendingStaging, 0) },
-            ].map(stat => (
-              <div key={stat.label} style={{ padding: "10px 16px", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 6 }}>
-                <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>{stat.label}</div>
-                <div style={{ fontWeight: 600, fontSize: 20 }}>{stat.value}</div>
-              </div>
-            ))}
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
-            {SOURCES.map(def => (
-              <SourceCard
-                key={def.key}
-                def={def}
-                status={allStatus[def.key]}
-                onUpload={() => setUploadFor(def)}
-                onHistory={() => setHistoryFor(def)}
-                onConfig={() => setConfigFor(def)}
-                onPending={() => setPendingFor(def)}
-              />
-            ))}
-          </div>
-
-          <LegadoBanner legado={legado} />
-        </>
+        <div style={{ display: "flex", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
+          {[
+            { label: "Fontes importadas", value: Object.values(allStatus).filter(s => s.lastStatus === "COMPLETED").length },
+            { label: "Nunca importadas",  value: Object.values(allStatus).filter(s => !s.lastStatus).length },
+            { label: "Total importações", value: Object.values(allStatus).reduce((a, s) => a + s.totalImports, 0) },
+            { label: "Previews pendentes",value: Object.values(allStatus).reduce((a, s) => a + s.pendingStaging, 0) },
+          ].map(stat => (
+            <div key={stat.label} style={{ padding: "10px 16px", background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: 6 }}>
+              <div style={{ fontSize: 11, color: "var(--color-text-muted)" }}>{stat.label}</div>
+              <div style={{ fontWeight: 600, fontSize: 20 }}>{stat.value}</div>
+            </div>
+          ))}
+        </div>
       )}
+
+      {/* Os 7 cards — SEMPRE renderizados a partir do array estático SOURCES.
+          status=null quando API falhou ou ainda está carregando. */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 16 }}>
+        {SOURCES.map(def => (
+          <SourceCard
+            key={def.key}
+            def={def}
+            status={allStatus?.[def.key] ?? null}
+            onUpload={() => setUploadFor(def)}
+            onHistory={() => setHistoryFor(def)}
+            onConfig={() => setConfigFor(def)}
+            onPending={() => setPendingFor(def)}
+          />
+        ))}
+      </div>
+
+      <LegadoBanner legado={legado} />
 
       <div style={{ marginTop: 16, display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "var(--color-text-muted)" }}>
         {(["Snapshot", "Eventos", "Catálogo"] as const).map(t => (
