@@ -104,7 +104,7 @@ const SOURCES: SourceDefinition[] = [
     sourceType: "Snapshot",
     accept: ".xls,.xlsx",
     config: {
-      arquivo: "PEDIDOS.xlsx (ou qualquer .xlsx com a aba)",
+      arquivo: "CONTROLE DE ENTRADA TRADE-IN.xlsx",
       aba: "His Estoque",
       chave: "IMEI (col B = Serial)",
       camposPrincipais: ["Serial → IMEI", "Dias em Estoque (col R)", "Custo estoque (col S)", "Data Relatorio (col U)"],
@@ -124,7 +124,7 @@ const SOURCES: SourceDefinition[] = [
       chave: "Serial",
       camposPrincipais: ["Serial", "Produto", "Descrição", "Depósito Atual", "Filial Atual", "Disponível", "Dias em Estoque"],
       destino: "rel_seriais_rows",
-      observacoes: "Arquivo grande (~18 MB, ~97k linhas). Lido em streaming. Não exige IMEI válido.",
+      observacoes: "Lido em streaming linha a linha. Não exige IMEI válido.",
     },
   },
   {
