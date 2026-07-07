@@ -27,9 +27,8 @@ interface PrefillResult {
 interface PartDraft {
   key: string;
   pecaNome: string;
-  modelo: string;       // herdado do aparelho mas editável
   incluirCor: boolean;
-  corUsada: string;     // herdado de form.color mas editável
+  // cor é sempre a do aparelho — não editável por peça
 }
 
 interface SavedCase {
@@ -77,8 +76,8 @@ function computeBlockers(form: FormState, parts: PartDraft[]): Blockers {
   if (!form.cost || Number(form.cost) <= 0) b.cost = "Custo deve ser maior que zero.";
   if (!form.estimatedSale || Number(form.estimatedSale) <= 0) b.estimatedSale = "Venda estimada deve ser maior que zero.";
   if (parts.length === 0) b.parts = "Ao menos uma peça obrigatória.";
-  const missingCor = parts.find((p) => p.incluirCor && !p.corUsada.trim());
-  if (missingCor) b.partCor = `Cor obrigatória para "${missingCor.pecaNome || "peça sem nome"}".`;
+  const missingCor = parts.find((p) => p.incluirCor && !form.color.trim());
+  if (missingCor) b.partCor = `Cor do aparelho obrigatória para "${missingCor.pecaNome || "peça sem nome"}" (checkbox marcada).`;
   return b;
 }
 
@@ -236,13 +235,7 @@ export function Analise() {
   // ---------------------------------------------------------------------------
 
   function addPart() {
-    setParts((p) => [...p, {
-      key: String(Date.now()),
-      pecaNome: "",
-      modelo: form.model,
-      incluirCor: false,
-      corUsada: form.color,
-    }]);
+    setParts((p) => [...p, { key: String(Date.now()), pecaNome: "", incluirCor: false }]);
   }
 
   function removePart(key: string) {
@@ -279,12 +272,12 @@ export function Analise() {
     setSaveError(null);
 
     try {
+      // modelo sempre vem dos dados do aparelho — nunca da peça individualmente
       const partsPayload = parts.map((p) => ({
         pecaNome: p.pecaNome,
-        modelo: p.modelo || form.model,
         incluirCor: p.incluirCor,
-        corUsada: p.corUsada || (p.incluirCor ? form.color : ""),
-        chavePeca: buildChavePeca(p.pecaNome, p.modelo || form.model, p.incluirCor, p.corUsada || form.color),
+        corUsada: p.incluirCor ? form.color : "",
+        chavePeca: buildChavePeca(p.pecaNome, form.model, p.incluirCor, form.color),
       }));
 
       if (finalize) {
@@ -382,9 +375,7 @@ export function Analise() {
     setSaveError(null);
   }
 
-  const margin = form.cost && form.estimatedSale
-    ? (Number(form.estimatedSale) - Number(form.cost)).toFixed(2) : null;
-
+  // margem calculada internamente (não exibida — usada pelo motor)
   const blockers = computeBlockers(form, parts);
   const hasBlockers = Object.keys(blockers).length > 0;
 
@@ -494,11 +485,6 @@ export function Analise() {
                 {blockers.estimatedSale && <span style={{ color: "var(--color-danger)", fontSize: 11 }}>{blockers.estimatedSale}</span>}
               </div>
             </div>
-            {margin && (
-              <div className="text-sm" style={{ color: Number(margin) >= 0 ? "var(--color-success)" : "var(--color-danger)", marginTop: 4 }}>
-                Margem calculada: R$ {margin}
-              </div>
-            )}
             {form.problema && (
               <div className="form-group" style={{ marginTop: "0.75rem" }}>
                 <label>Problema (SH) <SourceBadge src={fieldOrigins["problema"]} /></label>
@@ -533,10 +519,10 @@ export function Analise() {
               <p className="muted text-sm">Nenhuma peça adicionada. Adicione ao menos uma para finalizar a análise.</p>
             )}
             {parts.map((part) => {
-              const preview = buildChavePeca(part.pecaNome, part.modelo || form.model, part.incluirCor, part.corUsada || form.color);
+              const preview = buildChavePeca(part.pecaNome, form.model, part.incluirCor, form.color);
               return (
                 <div key={part.key} style={{ borderBottom: "1px solid var(--color-border)", paddingBottom: "0.75rem", marginBottom: "0.75rem" }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr auto", gap: "0.5rem", alignItems: "end" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "0.5rem", alignItems: "end" }}>
                     <div className="form-group" style={{ margin: 0, position: "relative" }}>
                       <label>Nome da peça</label>
                       <input
@@ -567,14 +553,6 @@ export function Analise() {
                         </div>
                       )}
                     </div>
-                    <div className="form-group" style={{ margin: 0 }}>
-                      <label>Modelo (CHAVEPECA)</label>
-                      <input
-                        value={part.modelo}
-                        onChange={(e) => setPart(part.key, "modelo", e.target.value)}
-                        placeholder={form.model}
-                      />
-                    </div>
                     <button className="btn btn-ghost btn-sm" style={{ alignSelf: "end" }} onClick={() => removePart(part.key)} title="Remover">
                       <X size={13} />
                     </button>
@@ -588,17 +566,10 @@ export function Analise() {
                       />
                       Incluir cor do aparelho
                     </label>
-                    {part.incluirCor && (
-                      <div className="form-group" style={{ margin: 0, flex: "0 0 140px" }}>
-                        <label style={{ fontSize: 11 }}>Cor usada</label>
-                        <input
-                          value={part.corUsada}
-                          onChange={(e) => setPart(part.key, "corUsada", e.target.value)}
-                          placeholder={form.color || "PRETO"}
-                          style={{ padding: "2px 6px", fontSize: 12 }}
-                        />
-                        {!part.corUsada.trim() && <span style={{ color: "var(--color-danger)", fontSize: 10 }}>Obrigatória</span>}
-                      </div>
+                    {part.incluirCor && !form.color.trim() && (
+                      <span style={{ color: "var(--color-danger)", fontSize: 11 }}>
+                        Preencha a cor do aparelho acima
+                      </span>
                     )}
                     <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)", fontFamily: "monospace" }}>
                       → {preview || "(preencha o nome)"}

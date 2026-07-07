@@ -36,7 +36,6 @@ analiseRouter.get("/prefill", requireAuth, (req, res, next) => {
 
 interface PartInput {
   pecaNome: string;
-  modelo: string;
   incluirCor: boolean;
   corUsada: string;
   chavePeca: string;
@@ -137,7 +136,8 @@ analiseRouter.post("/complete", requireAuth, async (req, res, next) => {
       );
 
       for (const p of parts) {
-        const chavePeca = p.chavePeca || buildChavePeca(p.pecaNome, p.modelo, p.incluirCor, p.corUsada);
+        // modelo sempre vem do aparelho — nunca da peça individualmente
+        const chavePeca = p.chavePeca || buildChavePeca(p.pecaNome, model!, p.incluirCor, p.corUsada);
         const chavePecaNorm = normalizeKey(chavePeca);
         insertPart.run(
           caseId,
@@ -198,22 +198,17 @@ analiseRouter.get("/part-suggestions", requireAuth, (req, res, next) => {
     const db = getDb();
     const pattern = `%${q.toUpperCase()}%`;
 
-    // From existing part_requests.peca_nome
+    // Apenas peca_nome (nome base da peça) — nunca CHAVEPECAs completas
     const fromParts = db.prepare(
       `SELECT DISTINCT peca_nome AS name FROM part_requests
-       WHERE peca_nome IS NOT NULL AND upper(peca_nome) LIKE ? LIMIT 10`,
-    ).all(pattern) as { name: string }[];
-
-    // From analise_mi_rows.concat_peca (CHAVEPECA prefix)
-    const fromMi = db.prepare(
-      `SELECT DISTINCT concat_peca AS name FROM analise_mi_rows
-       WHERE concat_peca IS NOT NULL AND upper(concat_peca) LIKE ? LIMIT 10`,
+       WHERE peca_nome IS NOT NULL AND upper(peca_nome) LIKE ? LIMIT 15`,
     ).all(pattern) as { name: string }[];
 
     const seen = new Set<string>();
     const suggestions: string[] = [];
-    for (const { name } of [...fromParts, ...fromMi]) {
-      if (!seen.has(name)) { seen.add(name); suggestions.push(name); }
+    for (const { name } of fromParts) {
+      const trimmed = name.trim();
+      if (trimmed && !seen.has(trimmed)) { seen.add(trimmed); suggestions.push(trimmed); }
       if (suggestions.length >= 15) break;
     }
     res.json({ suggestions });

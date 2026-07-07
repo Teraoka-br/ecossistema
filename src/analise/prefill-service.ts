@@ -134,9 +134,10 @@ export function getPrefill(db: Db, query: string): PrefillResult {
           const row = rows[0];
           serImei        = (row["serial"]           as string | null) ?? null;
           serMarca       = (row["fabricante"]        as string | null) ?? null;
-          serModelo      = (row["produto"]           as string | null) ?? (row["descricao"] as string | null) ?? null;
+          // produto = referência interna (ex: 'APSN01004) — nunca usar como modelo
+          serModelo      = (row["descricao"]         as string | null) ?? null;
           serCodComercial= (row["codigo_comercial"]  as string | null) ?? null;
-          serDeposito    = (row["deposito_atual"]     as string | null) ?? null;
+          serDeposito    = (row["deposito_atual"]    as string | null) ?? null;
         }
       }
     }

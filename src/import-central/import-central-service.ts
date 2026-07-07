@@ -2022,18 +2022,14 @@ function readShOsRows(filePath: string): {
     headers.push(...(rawRows[0] as unknown[]).map((c) => (c === null || c === undefined ? "" : String(c))));
   }
 
-  // Fixed columns (0-based): B=1, O=14, P=15, Q=16, R=17
-  // But also try by column name
-  const cOs    = colIdx(headers, "OS", "OS SH", "NUMERO OS", "N OS") >= 0
-    ? colIdx(headers, "OS", "OS SH", "NUMERO OS", "N OS") : 1;      // col B fallback
-  const cMarca = colIdx(headers, "MARCA") >= 0
-    ? colIdx(headers, "MARCA") : 14; // col O fallback
-  const cModelo = colIdx(headers, "MODELO", "MODEL") >= 0
-    ? colIdx(headers, "MODELO", "MODEL") : 15; // col P fallback
-  const cCor   = colIdx(headers, "COR", "COLOR") >= 0
-    ? colIdx(headers, "COR", "COLOR") : 16; // col Q fallback
-  const cImei  = colIdx(headers, "IMEI", "SERIE", "SERIAL", "IMEI 1") >= 0
-    ? colIdx(headers, "IMEI", "SERIE", "SERIAL", "IMEI 1") : 17; // col R fallback
+  // Posições fixas obrigatórias (0-based) — nunca usar cabeçalho para estas colunas:
+  // B=1: OS, O=14: marca, P=15: modelo, Q=16: cor, R=17: IMEI
+  const cOs    = 1;
+  const cMarca = 14;
+  const cModelo = 15;
+  const cCor   = 16;
+  const cImei  = 17;
+  // DEFEITO e OBS_SERVICO ainda localizados pelo cabeçalho
   const cDefeito    = colIdx(headers, "DEFEITO", "PROBLEMA", "DEFECT");
   const cObsServico = colIdx(headers, "OBS_SERVICO", "OBS SERVICO", "OBSERVACAO SERVICO", "OBSERVAÇÃO SERVIÇO", "COMPLEMENTO");
 
