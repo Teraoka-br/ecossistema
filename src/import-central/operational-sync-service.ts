@@ -69,12 +69,10 @@ const ADVANCED_PART_STATUSES = new Set([
 // 1. HIS → repair_cases (age_days, cost)
 // ---------------------------------------------------------------------------
 
-export function applyHisToRepairCases(db: Db, importId: number): HisSyncResult {
+export function applyHisToRepairCases(db: Db, _importId?: number): HisSyncResult {
   const rows = db.prepare(
-    `SELECT h.id, h.imei_norm, h.age_days, h.audited_cost, h.repair_case_id
-     FROM his_import_rows h
-     WHERE h.his_import_id = ?`,
-  ).all(importId) as { id: number; imei_norm: string | null; age_days: number | null; audited_cost: number | null; repair_case_id: number | null }[];
+    `SELECT imei_norm, age_days, audited_cost FROM his_current`,
+  ).all() as { imei_norm: string | null; age_days: number | null; audited_cost: number | null }[];
 
   const result: HisSyncResult = {
     aparelhosEncontrados: 0,
@@ -84,34 +82,28 @@ export function applyHisToRepairCases(db: Db, importId: number): HisSyncResult {
     casosNaoAlterados: 0,
   };
 
-  const findCase = db.prepare(`SELECT id, age_days, cost FROM repair_cases WHERE imei_norm = ? LIMIT 1`);
+  const findCase = db.prepare(`SELECT id FROM repair_cases WHERE imei_norm = ? LIMIT 1`);
   const updateCase = db.prepare(
     `UPDATE repair_cases SET age_days = COALESCE(?, age_days), cost = COALESCE(?, cost),
        updated_at = datetime('now') WHERE id = ?`,
   );
-  const linkRow = db.prepare(`UPDATE his_import_rows SET repair_case_id = ?, link_method = 'IMEI' WHERE id = ?`);
 
   db.prepare("BEGIN").run();
   try {
     for (const row of rows) {
       if (!row.imei_norm) { result.imeisSemVinculo++; continue; }
 
-      let caseId = row.repair_case_id;
-      if (!caseId) {
-        const found = findCase.get(row.imei_norm) as { id: number; age_days: number | null; cost: number | null } | undefined;
-        if (!found) { result.imeisSemVinculo++; continue; }
-        caseId = found.id;
-        linkRow.run(caseId, row.id);
-      }
+      const found = findCase.get(row.imei_norm) as { id: number } | undefined;
+      if (!found) { result.imeisSemVinculo++; continue; }
 
       result.aparelhosEncontrados++;
 
-      const newAge = row.age_days;      // null = não atualiza
-      const newCost = row.audited_cost; // null = não atualiza
+      const newAge = row.age_days;
+      const newCost = row.audited_cost;
 
       if (newAge === null && newCost === null) { result.casosNaoAlterados++; continue; }
 
-      updateCase.run(newAge, newCost, caseId);
+      updateCase.run(newAge, newCost, found.id);
       if (newAge !== null) result.idadeAtualizada++;
       if (newCost !== null) result.custoAtualizado++;
     }
@@ -128,17 +120,16 @@ export function applyHisToRepairCases(db: Db, importId: number): HisSyncResult {
 // 2. Rel Seriais → repair_cases (deposito, filial, disponivel, last_seen)
 // ---------------------------------------------------------------------------
 
-export function applyRelSeriaisToRepairCases(db: Db, importId: number): RelSeriaisSyncResult {
+export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSeriaisSyncResult {
   const rows = db.prepare(
-    `SELECT imei_norm, deposito_atual, filial_atual, disponivel, fabricante, produto, descricao
-     FROM rel_seriais_rows WHERE rel_seriais_import_id = ?`,
-  ).all(importId) as {
+    `SELECT imei_norm, deposito_atual, filial_atual, disponivel, fabricante, descricao
+     FROM rel_seriais_current`,
+  ).all() as {
     imei_norm: string | null;
     deposito_atual: string | null;
     filial_atual: string | null;
     disponivel: string | null;
     fabricante: string | null;
-    produto: string | null;
     descricao: string | null;
   }[];
 
@@ -168,7 +159,7 @@ export function applyRelSeriaisToRepairCases(db: Db, importId: number): RelSeria
 
       // Enriquecer marca/modelo somente quando vazio no cadastro interno
       const sourceBrand = row.fabricante ?? null;
-      const sourceModel = row.produto ?? row.descricao ?? null;
+      const sourceModel = row.descricao ?? null;
       if ((sourceBrand && !rc.brand) || (sourceModel && !rc.model)) {
         enrichBrandModel.run(sourceBrand, sourceModel, rc.id);
         result.marcaModeloEnriquecidos++;

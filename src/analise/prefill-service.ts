@@ -56,7 +56,6 @@ export function getPrefill(db: Db, query: string): PrefillResult {
   const sources: Partial<Record<string, FieldSource>> = {};
 
   // ── SH OS ──────────────────────────────────────────────────────────────────
-  // Buscar na importação mais recente do SH OS
   let shOs: string | null = null;
   let shImei: string | null = null;
   let shMarca: string | null = null;
@@ -66,37 +65,31 @@ export function getPrefill(db: Db, query: string): PrefillResult {
   let shObsServico: string | null = null;
 
   try {
-    const latestShImport = db
-      .prepare("SELECT id FROM sh_os_imports WHERE status='COMPLETED' ORDER BY id DESC LIMIT 1")
-      .get() as { id: number } | undefined;
-
-    if (latestShImport) {
-      let shRow: Record<string, unknown> | undefined;
-      if (imeiNorm) {
-        shRow = db
-          .prepare(
-            `SELECT os_raw, imei_raw, marca, modelo, cor, defeito, obs_servico
-             FROM sh_os_rows WHERE sh_os_import_id=? AND imei_norm=? ORDER BY id DESC LIMIT 1`,
-          )
-          .get(latestShImport.id, imeiNorm) as Record<string, unknown> | undefined;
-      }
-      if (!shRow && osNorm) {
-        shRow = db
-          .prepare(
-            `SELECT os_raw, imei_raw, marca, modelo, cor, defeito, obs_servico
-             FROM sh_os_rows WHERE sh_os_import_id=? AND os_norm=? ORDER BY id DESC LIMIT 1`,
-          )
-          .get(latestShImport.id, osNorm) as Record<string, unknown> | undefined;
-      }
-      if (shRow) {
-        shOs          = (shRow["os_raw"]       as string | null) ?? null;
-        shImei        = (shRow["imei_raw"]      as string | null) ?? null;
-        shMarca       = (shRow["marca"]         as string | null) ?? null;
-        shModelo      = (shRow["modelo"]        as string | null) ?? null;
-        shCor         = (shRow["cor"]           as string | null) ?? null;
-        shDefeito     = (shRow["defeito"]       as string | null) ?? null;
-        shObsServico  = (shRow["obs_servico"]   as string | null) ?? null;
-      }
+    let shRow: Record<string, unknown> | undefined;
+    if (imeiNorm) {
+      shRow = db
+        .prepare(
+          `SELECT os_raw, imei_raw, marca, modelo, cor, defeito, obs_servico
+           FROM sh_os_current WHERE imei_norm = ? ORDER BY id DESC LIMIT 1`,
+        )
+        .get(imeiNorm) as Record<string, unknown> | undefined;
+    }
+    if (!shRow && osNorm) {
+      shRow = db
+        .prepare(
+          `SELECT os_raw, imei_raw, marca, modelo, cor, defeito, obs_servico
+           FROM sh_os_current WHERE os_norm = ? LIMIT 1`,
+        )
+        .get(osNorm) as Record<string, unknown> | undefined;
+    }
+    if (shRow) {
+      shOs         = (shRow["os_raw"]      as string | null) ?? null;
+      shImei       = (shRow["imei_raw"]    as string | null) ?? null;
+      shMarca      = (shRow["marca"]       as string | null) ?? null;
+      shModelo     = (shRow["modelo"]      as string | null) ?? null;
+      shCor        = (shRow["cor"]         as string | null) ?? null;
+      shDefeito    = (shRow["defeito"]     as string | null) ?? null;
+      shObsServico = (shRow["obs_servico"] as string | null) ?? null;
     }
   } catch { /* tabela pode não existir ainda */ }
 
@@ -111,34 +104,24 @@ export function getPrefill(db: Db, query: string): PrefillResult {
 
   try {
     if (lookupImeiNorm) {
-      const latestRelImport = db
-        .prepare("SELECT id FROM rel_seriais_imports WHERE status='COMPLETED' ORDER BY id DESC LIMIT 1")
-        .get() as { id: number } | undefined;
+      const rows = db
+        .prepare(
+          `SELECT serial, descricao, codigo_comercial, fabricante, disponivel, deposito_atual
+           FROM rel_seriais_current WHERE imei_norm = ?`,
+        )
+        .all(lookupImeiNorm) as Record<string, unknown>[];
 
-      if (latestRelImport) {
-        // Preferir Disponivel = SIM
-        const rows = db
-          .prepare(
-            `SELECT serial, produto, descricao, codigo_comercial, fabricante, disponivel, deposito_atual
-             FROM rel_seriais_rows WHERE rel_seriais_import_id=? AND imei_norm=?
-             ORDER BY (CASE WHEN upper(disponivel)='SIM' THEN 0 ELSE 1 END), id DESC`,
-          )
-          .all(latestRelImport.id, lookupImeiNorm) as Record<string, unknown>[];
+      if (rows.length > 1) {
+        warnings.push(`REL_SERIAIS_MULTIPLE: IMEI ${lookupImeiNorm} tem ${rows.length} linhas em rel_seriais_current (esperado: 1).`);
+      }
 
-        if (rows.length > 1) {
-          const simCount = rows.filter((r) => String(r["disponivel"] ?? "").toUpperCase() === "SIM").length;
-          if (simCount > 1) warnings.push(`REL_SERIAIS_MULTIPLE_SIM: IMEI ${lookupImeiNorm} tem ${simCount} linhas com Disponivel=SIM.`);
-        }
-
-        if (rows.length > 0) {
-          const row = rows[0];
-          serImei        = (row["serial"]           as string | null) ?? null;
-          serMarca       = (row["fabricante"]        as string | null) ?? null;
-          // produto = referência interna (ex: 'APSN01004) — nunca usar como modelo
-          serModelo      = (row["descricao"]         as string | null) ?? null;
-          serCodComercial= (row["codigo_comercial"]  as string | null) ?? null;
-          serDeposito    = (row["deposito_atual"]    as string | null) ?? null;
-        }
+      if (rows.length > 0) {
+        const row = rows[0];
+        serImei         = (row["serial"]          as string | null) ?? null;
+        serMarca        = (row["fabricante"]       as string | null) ?? null;
+        serModelo       = (row["descricao"]        as string | null) ?? null;
+        serCodComercial = (row["codigo_comercial"] as string | null) ?? null;
+        serDeposito     = (row["deposito_atual"]   as string | null) ?? null;
       }
     }
   } catch { /* tabela pode não existir */ }
@@ -150,27 +133,18 @@ export function getPrefill(db: Db, query: string): PrefillResult {
   try {
     const hisImeiNorm = lookupImeiNorm;
     if (hisImeiNorm) {
-      const latestHisImport = db
-        .prepare("SELECT id FROM his_imports WHERE status='COMPLETED' ORDER BY id DESC LIMIT 1")
-        .get() as { id: number } | undefined;
+      const hisRow = db
+        .prepare(
+          `SELECT age_days, audited_cost FROM his_current WHERE imei_norm = ?`,
+        )
+        .get(hisImeiNorm) as { age_days: number | null; audited_cost: number | null } | undefined;
 
-      if (latestHisImport) {
-        const hisRow = db
-          .prepare(
-            `SELECT age_days, audited_cost FROM his_import_rows
-             WHERE his_import_id=? AND imei_norm=? ORDER BY source_line DESC LIMIT 1`,
-          )
-          .get(latestHisImport.id, hisImeiNorm) as { age_days: number | null; audited_cost: number | null } | undefined;
-
-        if (hisRow) {
-          hisIdade = hisRow.age_days;
-          hisCusto = hisRow.audited_cost;
-          if (hisCusto === null) warnings.push("HIS_NO_COST: custo não encontrado no His Estoque.");
-        } else {
-          warnings.push("HIS_NOT_FOUND: IMEI não encontrado no His Estoque.");
-        }
+      if (hisRow) {
+        hisIdade = hisRow.age_days;
+        hisCusto = hisRow.audited_cost;
+        if (hisCusto === null) warnings.push("HIS_NO_COST: custo não encontrado no His Estoque.");
       } else {
-        warnings.push("HIS_NO_IMPORT: nenhuma importação de His Estoque encontrada.");
+        warnings.push("HIS_NOT_FOUND: IMEI não encontrado no His Estoque.");
       }
     }
   } catch { /* tabela pode não existir */ }

@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import type { Db } from "../db/database.js";
 import { normalizeKey, normalizeHeader } from "../domain/text.js";
 import { streamHisEstoque } from "./his-stream.js";
+import { syncCurrentTable, rowHash, type SyncRow } from "./sync-helper.js";
 
 const _require = createRequire(import.meta.url);
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -668,7 +669,7 @@ export async function confirmHis(
   db: Db,
   stagingId: number,
   userId: number | null,
-): Promise<{ rowsInserted: number; rowsLinked: number }> {
+): Promise<{ rowsInserted: number; rowsUpdated: number; rowsUnchanged: number; rowsLinked: number }> {
   const staged = getStagedFile(db, stagingId);
   if (!staged)                     throw new ImportCentralError("NOT_FOUND",       "Staging não encontrado.");
   if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY", "Preview não pronto.");
@@ -687,10 +688,9 @@ export async function confirmHis(
   const preview = staged.previewJson ? (JSON.parse(staged.previewJson) as StagedPreview) : null;
   const rowsFound = preview?.rowsFound ?? totalDataLines;
 
-  let rowsInserted = 0;
-  let rowsLinked = 0;
+  let syncResult = { inserted: 0, updated: 0, unchanged: 0 };
 
-  const importId = withTx(db, () => {
+  withTx(db, () => {
     const importRow = db
       .prepare(
         `INSERT INTO his_imports (filename, file_hash, status, rows_found, rows_linked, issues_count, created_by_user_id)
@@ -699,35 +699,44 @@ export async function confirmHis(
       .run(staged.filename, staged.fileHash, rowsFound, userId);
     const id = Number(importRow.lastInsertRowid);
 
-    const insertRow = db.prepare(
-      `INSERT INTO his_import_rows
-         (his_import_id, imei, imei_norm, audited_cost, age_days, report_date, source_line, raw_data_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-    const findCase = db.prepare(`SELECT id FROM repair_cases WHERE imei_norm=? LIMIT 1`);
-    const linkCase = db.prepare(`UPDATE his_import_rows SET repair_case_id=?, link_method='IMEI' WHERE id=?`);
+    const syncRows: SyncRow[] = consolidated.map((r) => ({
+      key:  r.imeiNorm,
+      hash: rowHash(r.imeiNorm, r.cost, r.ageDays, r.reportDate),
+      cols: {
+        his_import_id: id,
+        imei_raw:      r.imeiRaw ?? null,
+        audited_cost:  r.cost    ?? null,
+        age_days:      r.ageDays ?? null,
+        report_date:   r.reportDate ?? null,
+        source_line:   r.sourceLine ?? null,
+      },
+    }));
 
-    for (const r of consolidated) {
-      const result = insertRow.run(id, r.imeiRaw, r.imeiNorm, r.cost, r.ageDays, r.reportDate, r.sourceLine, null);
-      rowsInserted++;
-      const caseRow = findCase.get(r.imeiNorm) as { id: number } | undefined;
-      if (caseRow) { linkCase.run(caseRow.id, Number(result.lastInsertRowid)); rowsLinked++; }
-    }
+    syncResult = syncCurrentTable(db, {
+      table:       "his_current",
+      keyCol:      "imei_norm",
+      importIdCol: "his_import_id",
+      rows:        syncRows,
+    });
 
     persistIssues(db, "his", id, warnings);
 
     db.prepare(
       `UPDATE his_imports SET status='COMPLETED', finished_at=datetime('now'),
-         rows_found=?, rows_linked=?, issues_count=? WHERE id=?`,
-    ).run(rowsFound, rowsLinked, warnings.length, id);
+         rows_found=?, rows_linked=0, issues_count=?,
+         rows_inserted=?, rows_updated=?, rows_unchanged=? WHERE id=?`,
+    ).run(rowsFound, warnings.length, syncResult.inserted, syncResult.updated, syncResult.unchanged, id);
 
     confirmStaging(db, stagingId, id);
-    return id;
   });
 
   try { fs.unlinkSync(staged.stagedPath); } catch { /* ignore */ }
-  void importId;
-  return { rowsInserted, rowsLinked };
+  return {
+    rowsInserted:  syncResult.inserted,
+    rowsUpdated:   syncResult.updated,
+    rowsUnchanged: syncResult.unchanged,
+    rowsLinked:    0,
+  };
 }
 
 // ===========================================================================
@@ -863,7 +872,7 @@ export async function confirmRelSeriais(
   db: Db,
   stagingId: number,
   userId: number | null,
-): Promise<{ rowsInserted: number }> {
+): Promise<{ rowsInserted: number; rowsUpdated: number; rowsUnchanged: number; reportScope: string }> {
   const staged = getStagedFile(db, stagingId);
   if (!staged)                     throw new ImportCentralError("NOT_FOUND",       "Staging não encontrado.");
   if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY", "Preview não pronto.");
@@ -873,95 +882,136 @@ export async function confirmRelSeriais(
   const existingId = checkDuplicateHash(db, "rel_seriais_imports", staged.fileHash);
   if (existingId) throw new ImportCentralError("ALREADY_IMPORTED", "Arquivo já importado.");
 
-  // Stream full CSV
   const csv = await readCsvFull(staged.stagedPath, 0);
   const { headers, totalLines } = csv;
 
-  const colSerial      = colIdx(headers, "Serial");
+  const colSerial       = colIdx(headers, "Serial");
   if (colSerial < 0) throw new ImportCentralError("MISSING_SERIAL_COL", 'Coluna "Serial" não encontrada.');
-  const colProduto     = colIdx(headers, "Produto");
-  const colDescricao   = colIdx(headers, "Descricao", "Descrição");
-  const colCodComercial= colIdx(headers, "Codigo Comercial", "Código Comercial");
-  const colFabricante  = colIdx(headers, "Fabricante");
-  const colDisponivel  = colIdx(headers, "Disponivel", "Disponível");
-  const colDeposito    = colIdx(headers, "Deposito Atual", "Depósito Atual");
-  const colFilialAtual = colIdx(headers, "Filial Atual");
-  const colFilialEntrada = colIdx(headers, "Filial Entrada");
-  const colRfid        = colIdx(headers, "RFID");
-  const colEan         = colIdx(headers, "EAN");
-  const colDias        = colIdx(headers, "Dias em Estoque");
+  const colDescricao    = colIdx(headers, "Descricao", "Descrição");
+  const colCodComercial = colIdx(headers, "Codigo Comercial", "Código Comercial");
+  const colFabricante   = colIdx(headers, "Fabricante");
+  const colDisponivel   = colIdx(headers, "Disponivel", "Disponível");
+  const colDeposito     = colIdx(headers, "Deposito Atual", "Depósito Atual");
+  const colFilialAtual  = colIdx(headers, "Filial Atual");
 
-  let rowsInserted = 0;
+  // Consolidar por imei_norm (SIM preferencial), detectar report_scope
+  type RsRow = {
+    imeiNorm: string;
+    serial: string;
+    descricao: string | null;
+    codComercial: string | null;
+    fabricante: string | null;
+    disponivel: string | null;
+    deposito: string | null;
+    filial: string | null;
+  };
+
+  const byImei = new Map<string, RsRow>();
+  let hasSim = false;
+  let hasNonSim = false;
+  let validLines = 0;
+
+  await new Promise<void>((res, rej) => {
+    const rl = readline.createInterface({
+      input: fs.createReadStream(staged.stagedPath, { encoding: "latin1" }),
+      crlfDelay: Infinity,
+    });
+    let first = true;
+    const sep = ";";
+    rl.on("line", (line) => {
+      if (!line.trim()) return;
+      if (first) { first = false; return; }
+      const row = line.split(sep).map((p) => p.trim());
+      const serial = row[colSerial] ?? "";
+      const imeiNorm = normalizeImei(serial);
+      if (!imeiNorm) return;
+      validLines++;
+      const disp = colDisponivel >= 0 ? (row[colDisponivel] ?? null) : null;
+      const isSim = disp != null && disp.toUpperCase() === "SIM";
+      if (isSim) hasSim = true; else hasNonSim = true;
+      const candidate: RsRow = {
+        imeiNorm,
+        serial: String(serial).replace(/'/g, ""),
+        descricao:    colDescricao    >= 0 ? row[colDescricao]    ?? null : null,
+        codComercial: colCodComercial >= 0 ? row[colCodComercial] ?? null : null,
+        fabricante:   colFabricante   >= 0 ? row[colFabricante]   ?? null : null,
+        disponivel:   disp,
+        deposito:     colDeposito     >= 0 ? row[colDeposito]     ?? null : null,
+        filial:       colFilialAtual  >= 0 ? row[colFilialAtual]  ?? null : null,
+      };
+      const existing = byImei.get(imeiNorm);
+      if (!existing || (!isSim && existing.disponivel?.toUpperCase() !== "SIM")) {
+        // Substituir: preferir SIM; entre iguais, última linha vence
+        if (!existing || isSim || !existing.disponivel || existing.disponivel.toUpperCase() !== "SIM") {
+          byImei.set(imeiNorm, candidate);
+        }
+      }
+    });
+    rl.on("close", res);
+    rl.on("error", rej);
+  });
+
+  const reportScope =
+    colDisponivel < 0 ? "UNKNOWN" :
+    hasSim && hasNonSim ? "ALL" :
+    hasSim ? "IN_STOCK" : "UNKNOWN";
+
+  const invalidCount = totalLines - validLines;
+  let syncResult = { inserted: 0, updated: 0, unchanged: 0 };
 
   await withTxAsync(db, async () => {
     const importRow = db
       .prepare(
-        `INSERT INTO rel_seriais_imports (filename, file_hash, status, rows_found, rows_valid, issues_count, created_by_user_id)
-         VALUES (?, ?, 'PENDING', ?, 0, 0, ?)`,
+        `INSERT INTO rel_seriais_imports (filename, file_hash, status, rows_found, rows_valid, issues_count, report_scope, created_by_user_id)
+         VALUES (?, ?, 'PENDING', ?, 0, 0, ?, ?)`,
       )
-      .run(staged.filename, staged.fileHash, totalLines, userId);
+      .run(staged.filename, staged.fileHash, totalLines, reportScope, userId);
     const importId = Number(importRow.lastInsertRowid);
 
-    const insertRow = db.prepare(
-      `INSERT INTO rel_seriais_rows
-         (rel_seriais_import_id, imei_norm, serial, produto, descricao, codigo_comercial,
-          fabricante, disponivel, deposito_atual, filial_atual, filial_entrada, rfid, ean, dias_estoque, raw_data_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
+    const syncRows: SyncRow[] = Array.from(byImei.values()).map((r) => ({
+      key:  r.imeiNorm,
+      hash: rowHash(r.imeiNorm, r.descricao, r.disponivel, r.deposito),
+      cols: {
+        rel_seriais_import_id: importId,
+        serial:           r.serial,
+        descricao:        r.descricao,
+        codigo_comercial: r.codComercial,
+        fabricante:       r.fabricante,
+        disponivel:       r.disponivel,
+        deposito_atual:   r.deposito,
+        filial_atual:     r.filial,
+      },
+    }));
 
-    // Re-stream for inserts
-    await new Promise<void>((res, rej) => {
-      const rl2 = readline.createInterface({
-        input: fs.createReadStream(staged.stagedPath, { encoding: "latin1" }),
-        crlfDelay: Infinity,
-      });
-      let first = true;
-      const sep = ";";
-      rl2.on("line", (line) => {
-        if (!line.trim()) return;
-        if (first) { first = false; return; } // skip header
-        const row = line.split(sep).map((p) => p.trim());
-        const serial = row[colSerial];
-        const imeiNorm = normalizeImei(serial);
-        if (!imeiNorm) return;
-        const dias = colDias >= 0 ? parseInt(row[colDias] ?? "", 10) : NaN;
-        insertRow.run(
-          importId, imeiNorm,
-          String(serial).replace(/'/g, ""),
-          colProduto     >= 0 ? row[colProduto]      : null,
-          colDescricao   >= 0 ? row[colDescricao]    : null,
-          colCodComercial>= 0 ? row[colCodComercial] : null,
-          colFabricante  >= 0 ? row[colFabricante]   : null,
-          colDisponivel  >= 0 ? row[colDisponivel]   : null,
-          colDeposito    >= 0 ? row[colDeposito]      : null,
-          colFilialAtual >= 0 ? row[colFilialAtual]  : null,
-          colFilialEntrada >= 0 ? row[colFilialEntrada] : null,
-          colRfid        >= 0 ? row[colRfid]          : null,
-          colEan         >= 0 ? row[colEan]           : null,
-          isNaN(dias) ? null : dias,
-          null,
-        );
-        rowsInserted++;
-      });
-      rl2.on("close", res);
-      rl2.on("error", rej);
+    syncResult = syncCurrentTable(db, {
+      table:       "rel_seriais_current",
+      keyCol:      "imei_norm",
+      importIdCol: "rel_seriais_import_id",
+      rows:        syncRows,
     });
 
-    const invalidCount = totalLines - rowsInserted;
     const relIssues: ImportIssueRaw[] = [];
     if (invalidCount > 0) {
       relIssues.push({ row: null, severity: "WARNING", code: "INVALID_SERIAL", message: `${invalidCount} linha(s) com Serial inválido ignoradas.` });
     }
     persistIssues(db, "rel-seriais", importId, relIssues);
     db.prepare(
-      `UPDATE rel_seriais_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, issues_count=? WHERE id=?`,
-    ).run(rowsInserted, relIssues.length, importId);
+      `UPDATE rel_seriais_imports SET status='COMPLETED', finished_at=datetime('now'),
+         rows_valid=?, issues_count=?,
+         rows_inserted=?, rows_updated=?, rows_unchanged=? WHERE id=?`,
+    ).run(syncResult.inserted + syncResult.updated + syncResult.unchanged, relIssues.length,
+          syncResult.inserted, syncResult.updated, syncResult.unchanged, importId);
 
     confirmStaging(db, stagingId, importId);
   });
 
   try { fs.unlinkSync(staged.stagedPath); } catch { /* ignore */ }
-  return { rowsInserted };
+  return {
+    rowsInserted:  syncResult.inserted,
+    rowsUpdated:   syncResult.updated,
+    rowsUnchanged: syncResult.unchanged,
+    reportScope,
+  };
 }
 
 // ===========================================================================
@@ -2102,7 +2152,7 @@ export function confirmSh(
   db: Db,
   stagingId: number,
   userId: number | null,
-): { rowsInserted: number } {
+): { rowsInserted: number; rowsUpdated: number; rowsUnchanged: number } {
   const staged = getStagedFile(db, stagingId);
   if (!staged)                          throw new ImportCentralError("NOT_FOUND",       "Staging não encontrado.");
   if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY",      "Preview não pronto.");
@@ -2113,7 +2163,7 @@ export function confirmSh(
   if (existingId) throw new ImportCentralError("ALREADY_IMPORTED", "Arquivo já importado.");
 
   const { rows, totalDataLines } = readShOsRows(staged.stagedPath);
-  let rowsInserted = 0;
+  let syncResult = { inserted: 0, updated: 0, unchanged: 0 };
 
   withTx(db, () => {
     const importRow = db
@@ -2124,31 +2174,55 @@ export function confirmSh(
       .run(staged.filename, staged.fileHash, totalDataLines, userId);
     const importId = Number(importRow.lastInsertRowid);
 
-    const insertRow = db.prepare(
-      `INSERT INTO sh_os_rows
-         (sh_os_import_id, os_norm, imei_norm, os_raw, imei_raw, marca, modelo, cor, defeito, obs_servico)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-
+    let skipped = 0;
+    const syncRows: SyncRow[] = [];
     for (const r of rows) {
-      if (!r.osNorm && !r.imeiNorm) continue;
-      insertRow.run(importId, r.osNorm, r.imeiNorm, r.osRaw, r.imeiRaw, r.marca, r.modelo, r.cor, r.defeito, r.obsServico);
-      rowsInserted++;
+      if (!r.osNorm && !r.imeiNorm) { skipped++; continue; }
+      const lookupKey = r.osNorm ?? `I:${r.imeiNorm}`;
+      syncRows.push({
+        key:  lookupKey,
+        hash: rowHash(r.osNorm, r.imeiNorm, r.marca, r.modelo, r.cor, r.defeito, r.obsServico),
+        cols: {
+          sh_os_import_id: importId,
+          os_norm:     r.osNorm    ?? null,
+          imei_norm:   r.imeiNorm  ?? null,
+          os_raw:      r.osRaw     ?? null,
+          imei_raw:    r.imeiRaw   ?? null,
+          marca:       r.marca     ?? null,
+          modelo:      r.modelo    ?? null,
+          cor:         r.cor       ?? null,
+          defeito:     r.defeito   ?? null,
+          obs_servico: r.obsServico ?? null,
+        },
+      });
     }
 
+    syncResult = syncCurrentTable(db, {
+      table:       "sh_os_current",
+      keyCol:      "lookup_key",
+      importIdCol: "sh_os_import_id",
+      rows:        syncRows,
+    });
+
     const issues: ImportIssueRaw[] = [];
-    const skipped = rows.length - rowsInserted;
     if (skipped > 0) issues.push({ row: null, severity: "WARNING", code: "NO_OS_OR_IMEI", message: `${skipped} linha(s) sem OS nem IMEI ignoradas.` });
     persistIssues(db, "sh", importId, issues);
     db.prepare(
-      `UPDATE sh_os_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, issues_count=? WHERE id=?`,
-    ).run(rowsInserted, issues.length, importId);
+      `UPDATE sh_os_imports SET status='COMPLETED', finished_at=datetime('now'),
+         rows_valid=?, issues_count=?,
+         rows_inserted=?, rows_updated=?, rows_unchanged=? WHERE id=?`,
+    ).run(syncResult.inserted + syncResult.updated + syncResult.unchanged, issues.length,
+          syncResult.inserted, syncResult.updated, syncResult.unchanged, importId);
 
     confirmStaging(db, stagingId, importId);
   });
 
   try { fs.unlinkSync(staged.stagedPath); } catch { /* ignore */ }
-  return { rowsInserted };
+  return {
+    rowsInserted:  syncResult.inserted,
+    rowsUpdated:   syncResult.updated,
+    rowsUnchanged: syncResult.unchanged,
+  };
 }
 
 // ===========================================================================
@@ -2174,6 +2248,7 @@ export async function previewPeacs(
     const wbMeta = XLSX.readFile(filePath, { bookSheets: true });
     const allSheets: string[] = wbMeta.SheetNames ?? [];
     const targetSheet =
+      allSheets.find((n) => normalizeHeader(n) === "TABELA DE AVALIACAO (PEACS)") ??
       allSheets.find((n) => normalizeHeader(n).includes("PEACS")) ??
       allSheets.find((n) => normalizeHeader(n).includes("AVALIA")) ??
       allSheets[0];
@@ -2246,7 +2321,7 @@ export function confirmPeacs(
   db: Db,
   stagingId: number,
   userId: number | null,
-): { rowsUpserted: number } {
+): { rowsInserted: number; rowsUpdated: number; rowsUnchanged: number; rowsDeactivated: number } {
   const staged = getStagedFile(db, stagingId);
   if (!staged)                          throw new ImportCentralError("NOT_FOUND",       "Staging não encontrado.");
   if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY",      "Preview não pronto.");
@@ -2259,6 +2334,7 @@ export function confirmPeacs(
   const wbMeta = XLSX.readFile(staged.stagedPath, { bookSheets: true });
   const allSheets: string[] = wbMeta.SheetNames ?? [];
   const targetSheet =
+    allSheets.find((n) => normalizeHeader(n) === "TABELA DE AVALIACAO (PEACS)") ??
     allSheets.find((n) => normalizeHeader(n).includes("PEACS")) ??
     allSheets.find((n) => normalizeHeader(n).includes("AVALIA")) ??
     allSheets[0];
@@ -2287,7 +2363,10 @@ export function confirmPeacs(
   const colMM = cMarcaModelo >= 0 ? cMarcaModelo : 0;
   const colPr = cPreco       >= 0 ? cPreco       : 4;
 
-  let rowsUpserted = 0;
+  let rowsInserted = 0;
+  let rowsUpdated  = 0;
+  let rowsUnchanged = 0;
+  let rowsDeactivated = 0;
   let updatedDate: string | null = null;
 
   withTx(db, () => {
@@ -2299,21 +2378,30 @@ export function confirmPeacs(
       .run(staged.filename, staged.fileHash, rawRows.length - 1 - headerRowIdx, userId);
     const importId = Number(importRow.lastInsertRowid);
 
-    // Atomic swap — deactivate existing
-    db.prepare("UPDATE peacs_catalog SET active=0 WHERE active=1").run();
+    // Carregar estado ativo atual: norm → { id, hash }
+    const activeCatalog = new Map<string, { id: number; hash: string | null }>();
+    const activeRows = db
+      .prepare("SELECT id, marca_modelo_norm, row_hash FROM peacs_catalog WHERE active=1")
+      .all() as { id: number; marca_modelo_norm: string; row_hash: string | null }[];
+    for (const r of activeRows) activeCatalog.set(r.marca_modelo_norm, { id: r.id, hash: r.row_hash });
 
-    const upsert = db.prepare(
+    const seenNorms = new Set<string>();
+    const now = new Date().toISOString().replace("T", " ").slice(0, 19);
+
+    const insertStmt = db.prepare(
       `INSERT INTO peacs_catalog
-         (marca_modelo, marca_modelo_norm, familia, memoria_src, estimated_sale, active, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, datetime('now'))
-       ON CONFLICT(marca_modelo_norm) WHERE active=1
-       DO UPDATE SET
-         marca_modelo=excluded.marca_modelo,
-         familia=excluded.familia,
-         memoria_src=excluded.memoria_src,
-         estimated_sale=excluded.estimated_sale,
-         active=1,
-         updated_at=datetime('now')`,
+         (peacs_import_id, marca_modelo, marca_modelo_norm, familia, memoria_src, estimated_sale,
+          active, row_hash, last_seen_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'))`,
+    );
+    const updateStmt = db.prepare(
+      `UPDATE peacs_catalog SET
+         peacs_import_id=?, marca_modelo=?, familia=?, memoria_src=?, estimated_sale=?,
+         active=1, row_hash=?, last_seen_at=?, updated_at=datetime('now')
+       WHERE id=?`,
+    );
+    const unchangedStmt = db.prepare(
+      `UPDATE peacs_catalog SET peacs_import_id=?, last_seen_at=datetime('now') WHERE id=?`,
     );
 
     for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
@@ -2322,27 +2410,49 @@ export function confirmPeacs(
       const mm = cellStr(r, colMM);
       if (!mm) continue;
       const mmNorm = normalizeKey(mm);
-      const preco = parseCostBR(r[colPr]);
+      const preco = parseCostBR(r[colPr]) ?? null;
       const familia = cFamilia >= 0 ? cellStr(r, cFamilia) : null;
       const memoria = cMemoria >= 0 ? cellStr(r, cMemoria) : null;
-      if (!updatedDate && cDataAtual >= 0) {
-        updatedDate = xlsxDateToISO(r[cDataAtual]);
+      if (!updatedDate && cDataAtual >= 0) updatedDate = xlsxDateToISO(r[cDataAtual]);
+
+      const h = rowHash(mmNorm, preco, familia, memoria);
+      seenNorms.add(mmNorm);
+
+      const ex = activeCatalog.get(mmNorm);
+      if (!ex) {
+        insertStmt.run(importId, mm, mmNorm, familia, memoria, preco, h, now);
+        rowsInserted++;
+      } else if ((ex.hash ?? "") !== h) {
+        updateStmt.run(importId, mm, familia, memoria, preco, h, now, ex.id);
+        rowsUpdated++;
+      } else {
+        unchangedStmt.run(importId, ex.id);
+        rowsUnchanged++;
       }
-      upsert.run(mm, mmNorm, familia, memoria, preco ?? null);
-      rowsUpserted++;
+    }
+
+    // Desativar chaves ausentes neste import
+    for (const [norm, ex] of activeCatalog) {
+      if (!seenNorms.has(norm)) {
+        db.prepare("UPDATE peacs_catalog SET active=0, updated_at=datetime('now') WHERE id=?").run(ex.id);
+        rowsDeactivated++;
+      }
     }
 
     const issues: ImportIssueRaw[] = [];
     persistIssues(db, "peacs", importId, issues);
     db.prepare(
-      `UPDATE peacs_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, updated_date=?, issues_count=0 WHERE id=?`,
-    ).run(rowsUpserted, updatedDate, importId);
+      `UPDATE peacs_imports SET status='COMPLETED', finished_at=datetime('now'),
+         rows_valid=?, updated_date=?, issues_count=0,
+         rows_inserted=?, rows_updated=?, rows_unchanged=?, rows_deactivated=? WHERE id=?`,
+    ).run(rowsInserted + rowsUpdated + rowsUnchanged, updatedDate,
+          rowsInserted, rowsUpdated, rowsUnchanged, rowsDeactivated, importId);
 
     confirmStaging(db, stagingId, importId);
   });
 
   try { fs.unlinkSync(staged.stagedPath); } catch { /* ignore */ }
-  return { rowsUpserted };
+  return { rowsInserted, rowsUpdated, rowsUnchanged, rowsDeactivated };
 }
 
 // ===========================================================================
@@ -2433,7 +2543,7 @@ export function confirmDemonstrativo(
   db: Db,
   stagingId: number,
   userId: number | null,
-): { rowsInserted: number } {
+): { rowsInserted: number; rowsUpdated: number; rowsUnchanged: number } {
   const staged = getStagedFile(db, stagingId);
   if (!staged)                          throw new ImportCentralError("NOT_FOUND",       "Staging não encontrado.");
   if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY",      "Preview não pronto.");
@@ -2474,7 +2584,7 @@ export function confirmDemonstrativo(
   const cFamilia  = colIdx(hdrs, "FAMILIA", "FAMÍLIA");
   const cSaldo    = colIdx(hdrs, "SALDO", "SALDO ATUAL", "SALDO INFORMADO", "QTD");
 
-  let rowsInserted = 0;
+  let syncResult = { inserted: 0, updated: 0, unchanged: 0 };
 
   withTx(db, () => {
     const importRow = db
@@ -2485,40 +2595,54 @@ export function confirmDemonstrativo(
       .run(staged.filename, staged.fileHash, rawRows.length - 1 - headerRowIdx, userId);
     const importId = Number(importRow.lastInsertRowid);
 
-    const insertRow = db.prepare(
-      `INSERT INTO demonstrativo_rows
-         (demonstrativo_import_id, referencia, referencia_norm, descricao, codigo_comercial,
-          fabricante, grupo, subgrupo, familia, saldo)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
-
+    const syncRows: SyncRow[] = [];
     for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
       const r = rawRows[i] as unknown[];
       if (!r || r.every((c) => c === null)) continue;
       const ref = cRef >= 0 ? cellStr(r, cRef) : null;
       if (cRef >= 0 && !ref) continue;
       const refNorm = ref ? normalizeKey(ref) : null;
-      insertRow.run(
-        importId,
-        ref, refNorm,
-        cDesc    >= 0 ? cellStr(r, cDesc)    : null,
-        cCodCom  >= 0 ? cellStr(r, cCodCom)  : null,
-        cFab     >= 0 ? cellStr(r, cFab)     : null,
-        cGrupo   >= 0 ? cellStr(r, cGrupo)   : null,
-        cSubgrupo>= 0 ? cellStr(r, cSubgrupo): null,
-        cFamilia >= 0 ? cellStr(r, cFamilia) : null,
-        cSaldo   >= 0 ? parseCostBR(r[cSaldo]) : null,
-      );
-      rowsInserted++;
+      if (!refNorm) continue;
+      const desc  = cDesc    >= 0 ? cellStr(r, cDesc)    : null;
+      const saldo = cSaldo   >= 0 ? parseCostBR(r[cSaldo]) ?? null : null;
+      syncRows.push({
+        key:  refNorm,
+        hash: rowHash(refNorm, desc, saldo),
+        cols: {
+          demonstrativo_import_id: importId,
+          referencia:       ref,
+          descricao:        desc,
+          codigo_comercial: cCodCom  >= 0 ? cellStr(r, cCodCom)   : null,
+          fabricante:       cFab     >= 0 ? cellStr(r, cFab)       : null,
+          grupo:            cGrupo   >= 0 ? cellStr(r, cGrupo)     : null,
+          subgrupo:         cSubgrupo>= 0 ? cellStr(r, cSubgrupo)  : null,
+          familia:          cFamilia >= 0 ? cellStr(r, cFamilia)   : null,
+          saldo,
+        },
+      });
     }
 
+    syncResult = syncCurrentTable(db, {
+      table:       "demonstrativo_current",
+      keyCol:      "referencia_norm",
+      importIdCol: "demonstrativo_import_id",
+      rows:        syncRows,
+    });
+
     db.prepare(
-      `UPDATE demonstrativo_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, issues_count=0 WHERE id=?`,
-    ).run(rowsInserted, importId);
+      `UPDATE demonstrativo_imports SET status='COMPLETED', finished_at=datetime('now'),
+         rows_valid=?, issues_count=0,
+         rows_inserted=?, rows_updated=?, rows_unchanged=? WHERE id=?`,
+    ).run(syncResult.inserted + syncResult.updated + syncResult.unchanged,
+          syncResult.inserted, syncResult.updated, syncResult.unchanged, importId);
 
     confirmStaging(db, stagingId, importId);
   });
 
   try { fs.unlinkSync(staged.stagedPath); } catch { /* ignore */ }
-  return { rowsInserted };
+  return {
+    rowsInserted:  syncResult.inserted,
+    rowsUpdated:   syncResult.updated,
+    rowsUnchanged: syncResult.unchanged,
+  };
 }

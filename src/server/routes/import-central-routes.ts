@@ -251,10 +251,14 @@ importCentralRouter.post("/:source/confirm", requireAuth, requireAdmin, async (r
 
     if (importId) {
       if (source === "his") {
-        try { sync.his = applyHisToRepairCases(db, importId); shouldTriggerMatch = true; }
+        try {
+          sync.his = applyHisToRepairCases(db);
+          const hisResult = result as { rowsInserted?: number; rowsUpdated?: number };
+          if ((hisResult.rowsInserted ?? 0) + (hisResult.rowsUpdated ?? 0) > 0) shouldTriggerMatch = true;
+        }
         catch (e) { operationalErrors.push(`HIS sync: ${(e as Error).message}`); }
       } else if (source === "rel-seriais") {
-        try { sync.relSeriais = applyRelSeriaisToRepairCases(db, importId); }
+        try { sync.relSeriais = applyRelSeriaisToRepairCases(db); }
         catch (e) { operationalErrors.push(`Rel. Seriais sync: ${(e as Error).message}`); }
       } else if (source === "analise-mi") {
         try { sync.analiseMi = applyAnaliseMiToRepairCases(db, importId); shouldTriggerMatch = true; }
