@@ -215,17 +215,24 @@ export function applyAnaliseMiToRepairCases(db: Db, importId: number): AnaliseMi
     ignoradas: 0, conflitos: 0,
   };
 
+  const ADVANCED_WORKFLOW_STATUSES = new Set([
+    "AGUARDANDO_RECEBIMENTO", "MATCH", "MATCH_PARCIAL", "EM_SEPARACAO", "APTO_REPARO",
+    "DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO",
+    "CONCLUIDO", "VENDA_ESTADO", "CANCELADO",
+  ]);
+
   const findPartByLegacyId = db.prepare(
     `SELECT pr.id, pr.repair_case_id, pr.status, pr.chave_peca, pr.legacy_status
      FROM part_requests pr WHERE pr.legacy_id_pedido = ? LIMIT 1`,
   );
   const findCaseByImei = db.prepare(
-    `SELECT id FROM repair_cases WHERE imei_norm = ? LIMIT 1`,
+    `SELECT id, workflow_status, analysis_status FROM repair_cases WHERE imei_norm = ? LIMIT 1`,
   );
+  // workflow_status e analysis_status são parametrizados (? ?)
   const createCase = db.prepare(
     `INSERT INTO repair_cases (imei, imei_norm, os, brand, model, color,
        repair_date, repair_date_source, workflow_status, analysis_status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'ANALISE_MI', 'PEDIR_PECA', 'PENDING', datetime('now'), datetime('now'))`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'ANALISE_MI', ?, 'COMPLETED', datetime('now'), datetime('now'))`,
   );
   const updateCaseMeta = db.prepare(
     `UPDATE repair_cases SET brand = COALESCE(brand, ?), model = COALESCE(model, ?),
@@ -234,14 +241,20 @@ export function applyAnaliseMiToRepairCases(db: Db, importId: number): AnaliseMi
   const createPart = db.prepare(
     `INSERT INTO part_requests
        (repair_case_id, legacy_id_pedido, chave_peca, chave_peca_norm, description,
-        status, legacy_status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+        status, legacy_status, analysis_complete_at_creation, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`,
   );
   const updatePartLegacy = db.prepare(
     `UPDATE part_requests SET legacy_status = ?, updated_at = datetime('now') WHERE id = ?`,
   );
-  const updateCaseWorkflow = db.prepare(
-    `UPDATE repair_cases SET workflow_status = ?, updated_at = datetime('now') WHERE id = ? AND workflow_status = 'EM_ANALISE'`,
+  // Só avança se o workflow atual não for um estado avançado
+  const updateCaseWorkflowIfNotAdvanced = db.prepare(
+    `UPDATE repair_cases SET workflow_status = ?, analysis_status = 'COMPLETED', updated_at = datetime('now')
+     WHERE id = ? AND workflow_status NOT IN (
+       'AGUARDANDO_RECEBIMENTO','MATCH','MATCH_PARCIAL','EM_SEPARACAO','APTO_REPARO',
+       'DIRECIONADO_TECNICO','EM_REPARO','REPARO_EXECUTADO','TRIAGEM_FINAL','RETORNO_TECNICO',
+       'CONCLUIDO','VENDA_ESTADO','CANCELADO'
+     )`,
   );
 
   db.prepare("BEGIN").run();
@@ -292,29 +305,34 @@ export function applyAnaliseMiToRepairCases(db: Db, importId: number): AnaliseMi
       if (!row.imei_norm) { result.ignoradas++; continue; }
 
       let caseId: number;
-      const existingCase = findCaseByImei.get(row.imei_norm) as { id: number } | undefined;
+      const existingCase = findCaseByImei.get(row.imei_norm) as {
+        id: number; workflow_status: string; analysis_status: string;
+      } | undefined;
 
       if (existingCase) {
         caseId = existingCase.id;
         updateCaseMeta.run(row.brand, row.model, row.color, caseId);
         result.aparelhosAtualizados++;
       } else {
+        // Novo caso: criar já com analysis_status=COMPLETED e workflow baseado na chave
+        const newWorkflow = hasValidChave ? "PEDIR_PECA" : "VERIFICAR";
         const cr = createCase.run(
           row.imei, row.imei_norm, row.os,
           row.brand, row.model, row.color,
           row.data_pedido,
+          newWorkflow,
         );
         caseId = Number(cr.lastInsertRowid);
         result.aparelhosCriados++;
       }
 
-      // 3. Criar part_request
+      // 3. Criar part_request com analysis_complete_at_creation=1
       createPart.run(caseId, row.id_pedido, rawChave, chaveNorm, row.peca_solicitada, partStatus, legacySrc);
       result.solicitacoesCriadas++;
 
-      // 4. Atualizar workflow_status se estava EM_ANALISE
-      if (partStatus !== "VERIFICAR") {
-        updateCaseWorkflow.run("PEDIR_PECA", caseId);
+      // 4. Para casos existentes em estado não avançado, atualizar workflow se necessário
+      if (existingCase && !ADVANCED_WORKFLOW_STATUSES.has(existingCase.workflow_status)) {
+        updateCaseWorkflowIfNotAdvanced.run(partStatus, caseId);
       }
     }
     db.prepare("COMMIT").run();

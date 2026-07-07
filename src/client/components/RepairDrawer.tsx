@@ -407,25 +407,36 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                 <div className="modal-overlay" onClick={() => setShowDirectModal(false)}>
                   <div className="modal" onClick={e => e.stopPropagation()}>
                     <h3>Direcionar ao técnico</h3>
-                    <div className="tech-list">
-                      {technicians.map(t => (
-                        <label key={t.id} className={`tech-option ${selectedTechId === t.id ? "selected" : ""}`}>
-                          <input type="radio" name="technician" onChange={() => setSelectedTechId(t.id)} />
-                          <Users size={14} />
-                          {t.name}
-                        </label>
-                      ))}
-                    </div>
+                    {technicians.length === 0 ? (
+                      <div style={{ padding: "1rem 0", textAlign: "center" }}>
+                        <p style={{ color: "var(--muted)", marginBottom: "0.75rem" }}>Nenhum técnico ativo cadastrado.</p>
+                        <a href="/admin/pessoas?tab=tecnicos" className="btn-primary" style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", textDecoration: "none" }}>
+                          <Users size={14} /> Cadastrar técnico
+                        </a>
+                      </div>
+                    ) : (
+                      <div className="tech-list">
+                        {technicians.map(t => (
+                          <label key={t.id} className={`tech-option ${selectedTechId === t.id ? "selected" : ""}`}>
+                            <input type="radio" name="technician" onChange={() => setSelectedTechId(t.id)} />
+                            <Users size={14} />
+                            {t.name}
+                          </label>
+                        ))}
+                      </div>
+                    )}
                     <div className="modal-actions">
                       <button className="btn-ghost" onClick={() => setShowDirectModal(false)}>Cancelar</button>
-                      <button
-                        className="btn-primary"
-                        onClick={handleDirectToTechnician}
-                        disabled={!selectedTechId || working}
-                      >
-                        {working ? <Loader2 size={14} className="spin" /> : <UserCheck size={14} />}
-                        Confirmar direcionamento
-                      </button>
+                      {technicians.length > 0 && (
+                        <button
+                          className="btn-primary"
+                          onClick={handleDirectToTechnician}
+                          disabled={!selectedTechId || working}
+                        >
+                          {working ? <Loader2 size={14} className="spin" /> : <UserCheck size={14} />}
+                          Confirmar direcionamento
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>

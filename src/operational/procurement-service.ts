@@ -146,22 +146,43 @@ export function createPurchaseOrder(db: Db, input: CreateOrderInput): PurchaseOr
       .run(orderNumber, input.supplier?.trim() || null, input.notes?.trim() || null, createdBy);
     const orderId = Number(orderRes.lastInsertRowid);
 
+    const PRESERVED_CASE_STATUSES = new Set([
+      "RESERVADA", "SEPARADA", "CONSUMIDA", "APTO_REPARO",
+      "DIRECIONADO_TECNICO", "CONCLUIDO",
+    ]);
+
     const itemStmt = db.prepare(
       `INSERT INTO purchase_order_items
         (purchase_order_id, purchase_request_id, referencia, referencia_norm, chave_peca, chave_peca_norm, quantity_ordered)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
+
+    const affectedCaseIds = new Set<number>();
+
     for (const it of input.items) {
       let chavePeca = it.chavePeca?.trim() || null;
       const requestId = it.purchaseRequestId ?? null;
       if (requestId !== null) {
         const req = db
-          .prepare("SELECT * FROM purchase_requests WHERE id = ?")
-          .get(requestId) as unknown as PurchaseRequestRow | undefined;
+          .prepare("SELECT id, chave_peca, part_request_id, status FROM purchase_requests WHERE id = ?")
+          .get(requestId) as { id: number; chave_peca: string | null; part_request_id: number | null; status: string } | undefined;
         if (!req) throw new ProcurementError(404, `Solicitação de compra ${requestId} não encontrada.`);
         if (req.status === "CANCELLED") throw new ProcurementError(422, `Solicitação ${requestId} está cancelada.`);
         if (!chavePeca) chavePeca = req.chave_peca;
+
         db.prepare("UPDATE purchase_requests SET status = 'ORDERED', updated_at = datetime('now') WHERE id = ?").run(requestId);
+
+        // Atualizar part_request vinculada
+        if (req.part_request_id !== null) {
+          const pr = db.prepare("SELECT id, repair_case_id, status FROM part_requests WHERE id = ?")
+            .get(req.part_request_id) as { id: number; repair_case_id: number; status: string } | undefined;
+          if (pr && pr.status === "PEDIR_PECA") {
+            db.prepare(
+              "UPDATE part_requests SET status = 'AGUARDANDO_RECEBIMENTO', updated_at = datetime('now') WHERE id = ?",
+            ).run(pr.id);
+            affectedCaseIds.add(pr.repair_case_id);
+          }
+        }
       }
       const referencia = it.referencia.trim();
       itemStmt.run(
@@ -173,6 +194,29 @@ export function createPurchaseOrder(db: Db, input: CreateOrderInput): PurchaseOr
         chavePeca ? normalizeKey(chavePeca) : null,
         it.quantity,
       );
+    }
+
+    // Atualizar repair_cases com partes aguardando recebimento (se não em estado preservado)
+    for (const caseId of affectedCaseIds) {
+      const rc = db.prepare("SELECT workflow_status FROM repair_cases WHERE id = ?")
+        .get(caseId) as { workflow_status: string } | undefined;
+      if (!rc || PRESERVED_CASE_STATUSES.has(rc.workflow_status)) continue;
+
+      // Verificar se há reserva ativa
+      const hasReservation = (db.prepare(
+        "SELECT COUNT(*) AS c FROM operational_reservations WHERE repair_case_id = ? AND status = 'ACTIVE'",
+      ).get(caseId) as { c: number }).c > 0;
+      if (hasReservation) continue;
+
+      // Verificar se há ao menos uma part_request aguardando recebimento
+      const hasWaiting = (db.prepare(
+        "SELECT COUNT(*) AS c FROM part_requests WHERE repair_case_id = ? AND status = 'AGUARDANDO_RECEBIMENTO' AND cancelled_at IS NULL",
+      ).get(caseId) as { c: number }).c > 0;
+      if (!hasWaiting) continue;
+
+      db.prepare(
+        "UPDATE repair_cases SET workflow_status = 'AGUARDANDO_RECEBIMENTO', updated_at = datetime('now') WHERE id = ?",
+      ).run(caseId);
     }
 
     db.exec("COMMIT");

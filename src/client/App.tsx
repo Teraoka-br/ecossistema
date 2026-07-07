@@ -20,6 +20,7 @@ import { Movimentacoes } from "./pages/Movimentacoes.js";
 import { Match } from "./pages/Match.js";
 import { AdminUsuarios } from "./pages/AdminUsuarios.js";
 import { AdminTecnicos } from "./pages/AdminTecnicos.js";
+import { AdminPessoas } from "./pages/AdminPessoas.js";
 import { AdminDatasys } from "./pages/AdminDatasys.js";
 import { FilaReparos } from "./pages/FilaReparos.js";
 import { AdminMatchRules } from "./pages/AdminMatchRules.js";
@@ -135,8 +136,7 @@ function AuthenticatedShell() {
             <Route path="/separacao" element={<Navigate to="/fila-reparos" replace />} />
             <Route path="/admin/usuarios" element={<AdminUsuarios />} />
             <Route path="/admin/tecnicos" element={<AdminTecnicos />} />
-            {/* /admin/pessoas: redireciona para usuários como ponto único */}
-            <Route path="/admin/pessoas" element={<AdminUsuarios />} />
+            <Route path="/admin/pessoas" element={<AdminPessoas />} />
             <Route path="/admin/datasys" element={<AdminDatasys />} />
             <Route path="/admin/dados" element={<AdminDados />} />
             <Route path="/admin/regras-match" element={<AdminMatchRules />} />

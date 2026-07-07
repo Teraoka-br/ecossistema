@@ -158,16 +158,27 @@ procurementRouter.post("/purchase-orders/:id/receipts/confirm", async (req, res,
 
     // Disparar recompute do motor após o COMMIT — falha não desfaz o recebimento
     let matchTriggered = false;
+    let matchExecuted = false;
     let matchError: string | null = null;
+    let matchStats: Record<string, unknown> = {};
     try {
-      const { requestMatchRecompute } = await import("../../match/engine-orchestrator.js");
+      const { requestMatchRecompute, processPendingRecompute } = await import("../../match/engine-orchestrator.js");
       requestMatchRecompute(db, `RECEIPT_${id}`, "goods_receipt", result.receiptId);
       matchTriggered = true;
+      const matchResult = await processPendingRecompute(db);
+      if (matchResult) {
+        matchExecuted = true;
+        matchStats = {
+          fullKitsFound: matchResult.fullKitsFound,
+          partialKitsFound: matchResult.partialKitsFound,
+          casesChanged: matchResult.casesChanged,
+        };
+      }
     } catch (e) {
       matchError = (e as Error).message;
     }
 
-    res.json({ ...result, matchTriggered, matchError });
+    res.json({ ...result, matchTriggered, matchExecuted, matchStats, matchError });
   } catch (err) {
     if (err instanceof ProcurementError || err instanceof StockError) {
       return res.status(err.statusCode).json({ error: err.message, details: err.details });

@@ -70,10 +70,18 @@ repairQueueRouter.get("/fila-reparos", requireAuth, (req, res) => {
     conditions.push(
       `(rc.imei LIKE ? OR rc.os LIKE ? OR rc.brand LIKE ? OR rc.model LIKE ?
         OR rc.deposito_atual LIKE ?
-        OR EXISTS (SELECT 1 FROM part_requests pr WHERE pr.repair_case_id = rc.id AND pr.cancelled_at IS NULL
-                   AND (pr.chave_peca LIKE ? OR pr.description LIKE ?)))`,
+        OR EXISTS (
+          SELECT 1 FROM part_requests pr
+          WHERE pr.repair_case_id = rc.id AND pr.cancelled_at IS NULL
+            AND (pr.chave_peca LIKE ? OR pr.description LIKE ?
+                 OR pr.allocated_reference LIKE ?
+                 OR EXISTS (
+                   SELECT 1 FROM purchase_requests pur
+                   WHERE pur.part_request_id = pr.id AND pur.referencia LIKE ?
+                 ))
+        ))`,
     );
-    params.push(like, like, like, like, like, like, like);
+    params.push(like, like, like, like, like, like, like, like, like);
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";

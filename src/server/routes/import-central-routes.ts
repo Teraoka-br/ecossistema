@@ -264,18 +264,29 @@ importCentralRouter.post("/:source/confirm", requireAuth, requireAdmin, async (r
 
     // Disparar recompute do motor após imports relevantes — falha não desfaz a importação
     let matchTriggered = false;
+    let matchExecuted = false;
     let matchError: string | null = null;
+    let matchStats: Record<string, unknown> = {};
     if (shouldTriggerMatch) {
       try {
-        const { requestMatchRecompute } = await import("../../match/engine-orchestrator.js");
+        const { requestMatchRecompute, processPendingRecompute } = await import("../../match/engine-orchestrator.js");
         requestMatchRecompute(db, `IMPORT_${source}_${importId}`, "import_central", importId ?? 0);
         matchTriggered = true;
+        const matchResult = await processPendingRecompute(db);
+        if (matchResult) {
+          matchExecuted = true;
+          matchStats = {
+            fullKitsFound: matchResult.fullKitsFound,
+            partialKitsFound: matchResult.partialKitsFound,
+            casesChanged: matchResult.casesChanged,
+          };
+        }
       } catch (e) {
         matchError = (e as Error).message;
       }
     }
 
-    res.json({ ok: true, ...(result as object), sync, matchTriggered, matchError });
+    res.json({ ok: true, ...(result as object), sync, matchTriggered, matchExecuted, matchStats, matchError });
   } catch (err) {
     if (err instanceof ImportCentralError) {
       const status =

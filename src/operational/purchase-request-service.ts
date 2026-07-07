@@ -34,14 +34,17 @@ export function ensurePurchaseRequestForPart(
   createdByUserId: number | null = null,
 ): EnsureResult {
   const part = db.prepare(
-    `SELECT pr.id, pr.chave_peca, pr.chave_peca_norm, pr.description, pr.status,
-            pr.repair_case_id
+    `SELECT pr.id, pr.chave_peca, pr.chave_peca_norm,
+            pr.allocated_reference, pr.allocated_reference_norm,
+            pr.legacy_id_pedido, pr.status, pr.repair_case_id
      FROM part_requests pr WHERE pr.id = ?`,
   ).get(partRequestId) as {
     id: number;
     chave_peca: string | null;
     chave_peca_norm: string | null;
-    description: string | null;
+    allocated_reference: string | null;
+    allocated_reference_norm: string | null;
+    legacy_id_pedido: string | null;
     status: string;
     repair_case_id: number;
   } | undefined;
@@ -51,7 +54,7 @@ export function ensurePurchaseRequestForPart(
 
   // Verificar se já existe purchase_request ativa para esta part_request
   const existing = db.prepare(
-    `SELECT id, status FROM purchase_requests WHERE part_request_id = ? AND status NOT IN ('CANCELADO','CANCELADA') LIMIT 1`,
+    `SELECT id, status FROM purchase_requests WHERE part_request_id = ? AND status != 'CANCELLED' LIMIT 1`,
   ).get(partRequestId) as { id: number; status: string } | undefined;
 
   if (existing) {
@@ -59,15 +62,26 @@ export function ensurePurchaseRequestForPart(
   }
 
   // Determinar referência e chave
-  const referencia = part.chave_peca ?? `PART-${partRequestId}`;
-  const chavePeca = part.chave_peca_norm ? normalizeKey(part.chave_peca_norm) : null;
+  const referencia = part.allocated_reference ?? part.chave_peca ?? `PART-${partRequestId}`;
+  const referenciaRaw = referencia;
+  const referenciaRawNorm = normalizeKey(referenciaRaw);
+  const chavePecaRaw = part.chave_peca ?? null;
+  const chavePecaNorm = part.chave_peca_norm ?? (chavePecaRaw ? normalizeKey(chavePecaRaw) : null);
 
-  // Criar nova purchase_request
+  // Criar nova purchase_request usando apenas colunas reais da tabela
   const insertRow = db.prepare(
     `INSERT INTO purchase_requests
-       (source, referencia, chave_peca, descricao, status, part_request_id, created_at, updated_at)
-     VALUES ('PART_REQUEST', ?, ?, ?, 'APROVADO', ?, datetime('now'), datetime('now'))`,
-  ).run(referencia, chavePeca, part.description, partRequestId);
+       (id_pedido, chave_peca, chave_peca_norm, referencia, referencia_norm,
+        quantidade, origin_status, status, part_request_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 1, 'PART_REQUEST', 'APPROVED', ?, datetime('now'), datetime('now'))`,
+  ).run(
+    part.legacy_id_pedido ?? null,
+    chavePecaRaw,
+    chavePecaNorm,
+    referenciaRaw,
+    referenciaRawNorm,
+    partRequestId,
+  );
 
   const purchaseRequestId = Number(insertRow.lastInsertRowid);
   void createdByUserId;
