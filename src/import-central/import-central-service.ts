@@ -577,7 +577,7 @@ export function getLegadoStatus(db: Db): {
 } {
   const row = db
     .prepare(
-      `SELECT id, created_at, orders_found, inventory_found
+      `SELECT id, started_at AS created_at, orders_found, inventory_found
        FROM import_batches WHERE status IN ('COMPLETED','COMPLETED_WITH_WARNINGS')
        ORDER BY id DESC LIMIT 1`,
     )
@@ -970,7 +970,7 @@ export async function confirmRelSeriais(
 
     const syncRows: SyncRow[] = Array.from(byImei.values()).map((r) => ({
       key:  r.imeiNorm,
-      hash: rowHash(r.imeiNorm, r.descricao, r.disponivel, r.deposito),
+      hash: rowHash(r.descricao, r.codComercial, r.fabricante, r.disponivel, r.deposito, r.filial),
       cols: {
         rel_seriais_import_id: importId,
         serial:           r.serial,
@@ -2355,6 +2355,7 @@ export function confirmPeacs(
     hdrs.push(...(rawRows[0] as unknown[]).map((c) => (c === null || c === undefined ? "" : String(c))));
   }
 
+  const cMarca       = colIdx(hdrs, "MARCA");           // col B separada (sem MODELO)
   const cMarcaModelo = colIdx(hdrs, "MARCA-MODELO", "MARCAMODELO", "MARCA MODELO", "MARCA/MODELO");
   const cPreco       = colIdx(hdrs, "TABELA SEMINOVO PRAZO", "TABELASEMINOVOPRAZO", "PRECO", "PREÇO", "VENDA");
   const cFamilia     = colIdx(hdrs, "FAMILIA", "FAMÍLIA");
@@ -2390,13 +2391,15 @@ export function confirmPeacs(
 
     const insertStmt = db.prepare(
       `INSERT INTO peacs_catalog
-         (peacs_import_id, marca_modelo, marca_modelo_norm, familia, memoria_src, estimated_sale,
+         (peacs_import_id, brand, brand_norm, model, model_norm,
+          marca_modelo, marca_modelo_norm, familia, memoria_src, estimated_sale,
           active, row_hash, last_seen_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'))`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, datetime('now'))`,
     );
     const updateStmt = db.prepare(
       `UPDATE peacs_catalog SET
-         peacs_import_id=?, marca_modelo=?, familia=?, memoria_src=?, estimated_sale=?,
+         peacs_import_id=?, brand=?, brand_norm=?, model=?, model_norm=?,
+         marca_modelo=?, familia=?, memoria_src=?, estimated_sale=?,
          active=1, row_hash=?, last_seen_at=?, updated_at=datetime('now')
        WHERE id=?`,
     );
@@ -2415,15 +2418,23 @@ export function confirmPeacs(
       const memoria = cMemoria >= 0 ? cellStr(r, cMemoria) : null;
       if (!updatedDate && cDataAtual >= 0) updatedDate = xlsxDateToISO(r[cDataAtual]);
 
+      // brand/model: col B (MARCA) quando disponível; caso contrário usar mm inteiro
+      const marcaRaw = cMarca >= 0 ? cellStr(r, cMarca) : null;
+      const brand     = marcaRaw ?? mm;
+      const brandNorm = normalizeKey(brand);
+      // model: mm completo quando não há col separada; ao ter MARCA separada, mm é o modelo
+      const model     = mm;
+      const modelNorm = mmNorm;
+
       const h = rowHash(mmNorm, preco, familia, memoria);
       seenNorms.add(mmNorm);
 
       const ex = activeCatalog.get(mmNorm);
       if (!ex) {
-        insertStmt.run(importId, mm, mmNorm, familia, memoria, preco, h, now);
+        insertStmt.run(importId, brand, brandNorm, model, modelNorm, mm, mmNorm, familia, memoria, preco, h, now);
         rowsInserted++;
       } else if ((ex.hash ?? "") !== h) {
-        updateStmt.run(importId, mm, familia, memoria, preco, h, now, ex.id);
+        updateStmt.run(importId, brand, brandNorm, model, modelNorm, mm, familia, memoria, preco, h, now, ex.id);
         rowsUpdated++;
       } else {
         unchangedStmt.run(importId, ex.id);
@@ -2595,7 +2606,8 @@ export function confirmDemonstrativo(
       .run(staged.filename, staged.fileHash, rawRows.length - 1 - headerRowIdx, userId);
     const importId = Number(importRow.lastInsertRowid);
 
-    const syncRows: SyncRow[] = [];
+    // Consolidar por referencia_norm (última ocorrência física vence, saldo não soma)
+    const byRef = new Map<string, SyncRow>();
     for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
       const r = rawRows[i] as unknown[];
       if (!r || r.every((c) => c === null)) continue;
@@ -2603,24 +2615,30 @@ export function confirmDemonstrativo(
       if (cRef >= 0 && !ref) continue;
       const refNorm = ref ? normalizeKey(ref) : null;
       if (!refNorm) continue;
-      const desc  = cDesc    >= 0 ? cellStr(r, cDesc)    : null;
-      const saldo = cSaldo   >= 0 ? parseCostBR(r[cSaldo]) ?? null : null;
-      syncRows.push({
+      const desc       = cDesc     >= 0 ? cellStr(r, cDesc)     : null;
+      const codCom     = cCodCom   >= 0 ? cellStr(r, cCodCom)   : null;
+      const fab        = cFab      >= 0 ? cellStr(r, cFab)       : null;
+      const grupo      = cGrupo    >= 0 ? cellStr(r, cGrupo)     : null;
+      const subgrupo   = cSubgrupo >= 0 ? cellStr(r, cSubgrupo)  : null;
+      const familia    = cFamilia  >= 0 ? cellStr(r, cFamilia)   : null;
+      const saldo      = cSaldo    >= 0 ? parseCostBR(r[cSaldo]) ?? null : null;
+      byRef.set(refNorm, {
         key:  refNorm,
-        hash: rowHash(refNorm, desc, saldo),
+        hash: rowHash(desc, codCom, fab, grupo, subgrupo, familia, saldo),
         cols: {
           demonstrativo_import_id: importId,
-          referencia:       ref,
+          referencia: ref,
           descricao:        desc,
-          codigo_comercial: cCodCom  >= 0 ? cellStr(r, cCodCom)   : null,
-          fabricante:       cFab     >= 0 ? cellStr(r, cFab)       : null,
-          grupo:            cGrupo   >= 0 ? cellStr(r, cGrupo)     : null,
-          subgrupo:         cSubgrupo>= 0 ? cellStr(r, cSubgrupo)  : null,
-          familia:          cFamilia >= 0 ? cellStr(r, cFamilia)   : null,
+          codigo_comercial: codCom,
+          fabricante:       fab,
+          grupo,
+          subgrupo,
+          familia,
           saldo,
         },
       });
     }
+    const syncRows: SyncRow[] = Array.from(byRef.values());
 
     syncResult = syncCurrentTable(db, {
       table:       "demonstrativo_current",

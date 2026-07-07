@@ -230,8 +230,28 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
   const modelStr = data ? [data.model, data.capacity].filter(Boolean).join(" ") : "";
 
   return (
-    <div className="drawer-overlay" onClick={() => onClose(didChange)}>
-      <div className="drawer" onClick={e => e.stopPropagation()}>
+    <div
+      className="drawer-overlay"
+      onClick={() => onClose(didChange)}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(0,0,0,0.55)", backdropFilter: "blur(2px)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: "1rem",
+      }}
+    >
+      <div
+        className="drawer"
+        onClick={e => e.stopPropagation()}
+        style={{
+          position: "relative", inset: "auto",
+          width: "min(680px, 100%)", maxHeight: "92vh",
+          borderRadius: "var(--r-md, 8px)",
+          display: "flex", flexDirection: "column",
+          overflow: "hidden",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.4)",
+        }}
+      >
         <div className="drawer-header">
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
@@ -286,7 +306,7 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
           </button>
         </div>
 
-        <div className="drawer-body">
+        <div className="drawer-body" style={{ overflowY: "auto", flex: 1 }}>
           {loading && <div className="loading-state"><Loader2 size={18} className="spin" /></div>}
           {error && <div className="error-banner">{error}</div>}
 

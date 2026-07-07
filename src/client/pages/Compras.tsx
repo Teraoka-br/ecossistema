@@ -336,66 +336,89 @@ function ReceberModal({
   const anyOver = preview?.some((l) => l.over) ?? false;
 
   return (
-    <div className="modal-overlay">
-      <div className="modal">
-        <h3>Receber pedido {order.order_number}</h3>
-        {error && <ErrorBanner message={error} />}
-        {confirmed ? (
-          <div style={{
-            background: "var(--ok-dim)", border: "1px solid rgba(16,185,129,0.3)",
-            borderRadius: "var(--r-md)", padding: "1rem", color: "var(--ok-text)",
-          }}>
-            <CheckCircle2 size={16} style={{ display: "inline", marginRight: 6 }} />
-            Recebimento confirmado. <strong>{confirmed.unitsReceived}</strong> unidade{confirmed.unitsReceived !== 1 ? "s" : ""} adicionada{confirmed.unitsReceived !== 1 ? "s" : ""} ao estoque.
-            <div style={{ marginTop: "0.75rem" }}>
-              <button className="btn btn-secondary btn-sm" onClick={onDone}>Fechar</button>
+    <div
+      className="modal-overlay"
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(0,0,0,0.55)", display: "flex",
+        alignItems: "center", justifyContent: "center", padding: "1rem",
+      }}
+    >
+      <div
+        className="modal"
+        style={{
+          width: "min(680px, 100%)", maxHeight: "92vh",
+          display: "flex", flexDirection: "column", overflow: "hidden",
+        }}
+      >
+        <div style={{ padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+          <h3 style={{ margin: 0 }}>Receber pedido {order.order_number}</h3>
+        </div>
+
+        {/* Área scrollável */}
+        <div style={{ overflowY: "auto", flex: 1, padding: "1rem 1.25rem" }}>
+          {error && <ErrorBanner message={error} />}
+          {confirmed ? (
+            <div style={{
+              background: "var(--ok-dim)", border: "1px solid rgba(16,185,129,0.3)",
+              borderRadius: "var(--r-md)", padding: "1rem", color: "var(--ok-text)",
+            }}>
+              <CheckCircle2 size={16} style={{ display: "inline", marginRight: 6 }} />
+              Recebimento confirmado. <strong>{confirmed.unitsReceived}</strong> unidade{confirmed.unitsReceived !== 1 ? "s" : ""} adicionada{confirmed.unitsReceived !== 1 ? "s" : ""} ao estoque.
             </div>
-          </div>
-        ) : (
-          <>
-            <div className="table-wrap" style={{ marginBottom: "0.75rem" }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Referência</th><th>Chave</th>
-                    <th className="num">Pedido</th><th className="num">Recebido</th>
-                    <th className="num">Saldo</th><th className="num">Agora</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {order.items.map((it) => (
-                    <tr key={it.id}>
-                      <td className="mono">{it.referencia}</td>
-                      <td className="small">{it.chave_peca ?? "—"}</td>
-                      <td className="num">{it.quantity_ordered}</td>
-                      <td className="num">{it.quantity_received}</td>
-                      <td className="num">{it.quantity_ordered - it.quantity_received}</td>
-                      <td className="num">
-                        <input type="number" min={0} style={{ width: "5rem" }}
-                          value={quantities[it.id] ?? 0}
-                          onChange={(e) => setQuantities((prev) => ({ ...prev, [it.id]: Number(e.target.value) }))}
-                        />
-                      </td>
+          ) : (
+            <>
+              <div className="table-wrap" style={{ marginBottom: "0.75rem" }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Referência</th><th>Chave</th>
+                      <th className="num">Pedido</th><th className="num">Recebido</th>
+                      <th className="num">Saldo</th><th className="num">Agora</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            {anyOver && preview && (
-              <div style={{ background: "var(--warn-dim)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: "var(--r-md)", padding: "0.75rem 1rem", marginBottom: "0.75rem", fontSize: "0.82rem", color: "var(--warn-text)" }}>
-                Recebimento acima do saldo detectado.
-                <div style={{ marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-                  <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.82rem" }}>
-                    <input type="checkbox" checked={allowOverReceipt} onChange={(e) => setAllowOverReceipt(e.target.checked)} />
-                    Permitir recebimento acima do pedido
-                  </label>
-                  <input value={justification} onChange={(e) => setJustification(e.target.value)} placeholder="Justificativa (mín. 10 caracteres)" />
-                </div>
+                  </thead>
+                  <tbody>
+                    {order.items.map((it) => (
+                      <tr key={it.id}>
+                        <td className="mono">{it.referencia}</td>
+                        <td className="small">{it.chave_peca ?? "—"}</td>
+                        <td className="num">{it.quantity_ordered}</td>
+                        <td className="num">{it.quantity_received}</td>
+                        <td className="num">{it.quantity_ordered - it.quantity_received}</td>
+                        <td className="num">
+                          <input type="number" min={0} style={{ width: "5rem" }}
+                            value={quantities[it.id] ?? 0}
+                            onChange={(e) => setQuantities((prev) => ({ ...prev, [it.id]: Number(e.target.value) }))}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            )}
 
-            <div className="modal-actions">
+              {anyOver && preview && (
+                <div style={{ background: "var(--warn-dim)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: "var(--r-md)", padding: "0.75rem 1rem", marginBottom: "0.75rem", fontSize: "0.82rem", color: "var(--warn-text)" }}>
+                  Recebimento acima do saldo detectado.
+                  <div style={{ marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.82rem" }}>
+                      <input type="checkbox" checked={allowOverReceipt} onChange={(e) => setAllowOverReceipt(e.target.checked)} />
+                      Permitir recebimento acima do pedido
+                    </label>
+                    <input value={justification} onChange={(e) => setJustification(e.target.value)} placeholder="Justificativa (mín. 10 caracteres)" />
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Rodapé fixo sempre visível */}
+        <div className="modal-actions" style={{ borderTop: "1px solid var(--border)", padding: "0.75rem 1.25rem", flexShrink: 0 }}>
+          {confirmed ? (
+            <button className="btn btn-secondary btn-sm" onClick={onDone}>Fechar</button>
+          ) : (
+            <>
               <button className="btn btn-secondary btn-sm" onClick={doPreview} disabled={busy}>
                 Pré-visualizar
               </button>
@@ -403,9 +426,9 @@ function ReceberModal({
               <button className="btn btn-primary btn-sm" onClick={doConfirm} disabled={busy || items.length === 0}>
                 {busy ? <><Loader2 size={12} className="spin" /> Confirmando…</> : "Confirmar recebimento"}
               </button>
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -80,14 +80,22 @@ export function activeScanCountsByReference(db: Db, sessionId: number): Referenc
     .all(sessionId) as unknown as ReferenceTotalRow[];
 }
 
-/** A CHAVEPECA normalizada existe no catálogo importado do lote? Usado para validar resolução manual. */
+/** A CHAVEPECA normalizada existe no catálogo do lote ou em part_requests ativos? */
 export function catalogHasKey(db: Db, importBatchId: number, chavePecaNorm: string): boolean {
-  const row = db
+  // Catálogo legado (source_inventory_items)
+  const inLegacy = db
     .prepare(
       "SELECT 1 FROM source_inventory_items WHERE import_batch_id = ? AND chave_peca_norm = ? LIMIT 1",
     )
     .get(importBatchId, chavePecaNorm);
-  return row !== undefined;
+  if (inLegacy !== undefined) return true;
+  // Fallback: part_requests ativos (novo sistema — chave pode não existir no legado)
+  const inParts = db
+    .prepare(
+      "SELECT 1 FROM part_requests WHERE chave_peca_norm = ? AND status != 'CANCELADO' LIMIT 1",
+    )
+    .get(chavePecaNorm);
+  return inParts !== undefined;
 }
 
 export function getActiveMapping(db: Db, referenceNorm: string): ManualMapping | null {
@@ -124,25 +132,47 @@ export function catalogLookup(db: Db, importBatchId: number, referenceNorm: stri
   return { foundInCatalog: existsRow !== undefined, distinctKeys };
 }
 
-/** Chaves distintas do catálogo de um lote (para busca no frontend). */
+/** Chaves distintas do catálogo: legado (source_inventory_items) + part_requests ativos. */
 export function distinctCatalogKeys(db: Db, importBatchId: number, search?: string): { chavePeca: string; referencia: string }[] {
-  const where: string[] = ["import_batch_id = ?", "chave_peca_norm IS NOT NULL", "chave_peca_norm != ''"];
-  const params: (string | number)[] = [importBatchId];
-  if (search && search.trim() !== "") {
-    where.push("chave_peca LIKE ?");
-    params.push(`%${search.trim()}%`);
-  }
-  const rows = db
+  const likeClause = search && search.trim() !== "" ? "AND chave_peca LIKE ?" : "";
+  const likeParam  = search && search.trim() !== "" ? [`%${search.trim()}%`] : [];
+
+  const legacyRows = db
     .prepare(
       `SELECT chave_peca, MIN(referencia) AS referencia
        FROM source_inventory_items
-       WHERE ${where.join(" AND ")}
+       WHERE import_batch_id = ? AND chave_peca_norm IS NOT NULL AND chave_peca_norm != ''
+         ${likeClause}
        GROUP BY chave_peca_norm
        ORDER BY chave_peca
        LIMIT 200`,
     )
-    .all(...params) as { chave_peca: string; referencia: string }[];
-  return rows.map((r) => ({ chavePeca: r.chave_peca, referencia: r.referencia }));
+    .all(importBatchId, ...likeParam) as { chave_peca: string; referencia: string }[];
+
+  // Complementar com part_requests ativos (novo sistema)
+  const partRows = db
+    .prepare(
+      `SELECT chave_peca, '' AS referencia
+       FROM part_requests
+       WHERE chave_peca_norm IS NOT NULL AND chave_peca_norm != ''
+         AND status != 'CANCELADO' ${likeClause}
+       GROUP BY chave_peca_norm
+       ORDER BY chave_peca
+       LIMIT 200`,
+    )
+    .all(...likeParam) as { chave_peca: string; referencia: string }[];
+
+  // Unir sem duplicar (por chave)
+  const seen = new Set(legacyRows.map((r) => r.chave_peca?.toLowerCase()));
+  const merged = [...legacyRows];
+  for (const r of partRows) {
+    if (!seen.has(r.chave_peca?.toLowerCase())) {
+      merged.push(r);
+      seen.add(r.chave_peca?.toLowerCase());
+    }
+  }
+  merged.sort((a, b) => (a.chave_peca ?? "").localeCompare(b.chave_peca ?? ""));
+  return merged.slice(0, 200).map((r) => ({ chavePeca: r.chave_peca, referencia: r.referencia }));
 }
 
 export interface PendingRow {
