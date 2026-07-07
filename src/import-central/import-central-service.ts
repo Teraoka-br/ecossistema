@@ -421,17 +421,20 @@ export function cancelStaging(db: Db, stagingId: number): { stagedPath: string |
   if (row.status === "CONFIRMED")
     throw new ImportCentralError("ALREADY_CONFIRMED", "Não é possível cancelar: importação já confirmada.");
   db.prepare(`UPDATE import_staged_files SET status='CANCELLED' WHERE id=?`).run(stagingId);
+  db.prepare(`DELETE FROM his_staged_rows WHERE staging_id=?`).run(stagingId);
   return { stagedPath: row.staged_path };
 }
 
 export function expireOldStagings(db: Db): string[] {
   const expired = db
     .prepare(
-      `SELECT staged_path FROM import_staged_files
+      `SELECT id, staged_path FROM import_staged_files
        WHERE status IN ('UPLOADED','PREVIEW_READY') AND expires_at < datetime('now')`,
     )
-    .all() as { staged_path: string }[];
+    .all() as { id: number; staged_path: string }[];
   if (expired.length > 0) {
+    const delStmt = db.prepare(`DELETE FROM his_staged_rows WHERE staging_id=?`);
+    for (const r of expired) delStmt.run(r.id);
     db.prepare(
       `UPDATE import_staged_files SET status='EXPIRED'
        WHERE status IN ('UPLOADED','PREVIEW_READY') AND expires_at < datetime('now')`,
@@ -655,10 +658,27 @@ export async function previewHis(
       },
     };
 
-    setStagingPreviewReady(db, stagingId, JSON.stringify(preview));
+    // Persist consolidated rows so confirmHis doesn't re-parse the file
+    withTx(db, () => {
+      db.prepare(`DELETE FROM his_staged_rows WHERE staging_id=?`).run(stagingId);
+      const ins = db.prepare(
+        `INSERT INTO his_staged_rows (staging_id, imei_norm, imei_raw, audited_cost, age_days, report_date, source_line, row_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const r of consolidated) {
+        ins.run(
+          stagingId, r.imeiNorm, r.imeiRaw ?? null,
+          r.cost ?? null, r.ageDays ?? null, r.reportDate ?? null,
+          r.sourceLine ?? null,
+          rowHash(r.imeiNorm, r.cost, r.ageDays, r.reportDate),
+        );
+      }
+      setStagingPreviewReady(db, stagingId, JSON.stringify(preview));
+    });
     return preview;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    db.prepare(`DELETE FROM his_staged_rows WHERE staging_id=?`).run(stagingId);
     setStagingFailed(db, stagingId, msg);
     if (err instanceof ImportCentralError) throw err;
     throw new ImportCentralError("PARSE_ERROR", msg);
@@ -683,10 +703,21 @@ export async function confirmHis(
   if (actualHash !== staged.fileHash)
     throw new ImportCentralError("HASH_MISMATCH", "Hash do arquivo mudou. Faça upload novamente.");
 
-  const { lastByImei, totalDataLines, warnings } = await streamHisEstoque(staged.stagedPath);
-  const consolidated = Array.from(lastByImei.values());
+  // Read from staging — file was already parsed during preview
+  const stagedRows = db.prepare(
+    `SELECT imei_norm, imei_raw, audited_cost, age_days, report_date, source_line, row_hash
+     FROM his_staged_rows WHERE staging_id=?`,
+  ).all(stagingId) as {
+    imei_norm: string; imei_raw: string | null; audited_cost: number | null;
+    age_days: number | null; report_date: string | null; source_line: number | null;
+    row_hash: string;
+  }[];
+
+  if (stagedRows.length === 0)
+    throw new ImportCentralError("STAGING_EMPTY", "Dados de staging não encontrados. Faça upload novamente.");
+
   const preview = staged.previewJson ? (JSON.parse(staged.previewJson) as StagedPreview) : null;
-  const rowsFound = preview?.rowsFound ?? totalDataLines;
+  const rowsFound = preview?.rowsFound ?? stagedRows.length;
 
   let syncResult = { inserted: 0, updated: 0, unchanged: 0 };
 
@@ -699,16 +730,16 @@ export async function confirmHis(
       .run(staged.filename, staged.fileHash, rowsFound, userId);
     const id = Number(importRow.lastInsertRowid);
 
-    const syncRows: SyncRow[] = consolidated.map((r) => ({
-      key:  r.imeiNorm,
-      hash: rowHash(r.imeiNorm, r.cost, r.ageDays, r.reportDate),
+    const syncRows: SyncRow[] = stagedRows.map((r) => ({
+      key:  r.imei_norm,
+      hash: r.row_hash,
       cols: {
         his_import_id: id,
-        imei_raw:      r.imeiRaw ?? null,
-        audited_cost:  r.cost    ?? null,
-        age_days:      r.ageDays ?? null,
-        report_date:   r.reportDate ?? null,
-        source_line:   r.sourceLine ?? null,
+        imei_raw:      r.imei_raw      ?? null,
+        audited_cost:  r.audited_cost  ?? null,
+        age_days:      r.age_days      ?? null,
+        report_date:   r.report_date   ?? null,
+        source_line:   r.source_line   ?? null,
       },
     }));
 
@@ -719,15 +750,14 @@ export async function confirmHis(
       rows:        syncRows,
     });
 
-    persistIssues(db, "his", id, warnings);
-
     db.prepare(
       `UPDATE his_imports SET status='COMPLETED', finished_at=datetime('now'),
-         rows_found=?, rows_linked=0, issues_count=?,
+         rows_found=?, rows_linked=0, issues_count=0,
          rows_inserted=?, rows_updated=?, rows_unchanged=? WHERE id=?`,
-    ).run(rowsFound, warnings.length, syncResult.inserted, syncResult.updated, syncResult.unchanged, id);
+    ).run(rowsFound, syncResult.inserted, syncResult.updated, syncResult.unchanged, id);
 
     confirmStaging(db, stagingId, id);
+    db.prepare(`DELETE FROM his_staged_rows WHERE staging_id=?`).run(stagingId);
   });
 
   try { fs.unlinkSync(staged.stagedPath); } catch { /* ignore */ }

@@ -24,7 +24,8 @@
     "cleanup:invalid-reservations": "tsx scripts/cleanup-invalid-reservations.ts",
     "beta:init": "tsx scripts/beta-init.ts",
     "beta:start": "tsx scripts/beta-start.ts",
-    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.scripts.json --noEmit"
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
+    "beta:start:prod": "tsx scripts/beta-start-prod.ts"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",

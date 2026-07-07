@@ -5,8 +5,8 @@
  * U (Data Relatorio) without materialising every cell in memory.
  *
  * Approach: manual ZIP directory → zlib.inflateRaw stream → row-accumulator →
- * per-row regex extraction.  Shared strings are loaded once (~1 MB) into an
- * in-memory array.
+ * targeted column extraction via indexOf (no full-row regex).
+ * Shared strings are loaded once into memory via indexOf-based parser (O(n)).
  */
 
 import fs from "node:fs";
@@ -21,6 +21,9 @@ const COL_IMEI = 1;   // B
 const COL_AGE  = 17;  // R
 const COL_COST = 18;  // S
 const COL_DATE = 20;  // U
+
+// Only parse cells in these column letters
+const TARGET_COLS = new Set(["B", "R", "S", "U"]);
 
 /** Last-occurrence row collected per IMEI */
 export interface HisRowData {
@@ -47,13 +50,12 @@ export interface HisStreamResult {
 interface ZipEntry {
   method: number;
   compressedSize: number;
-  dataOffset: number;  // offset in file buffer of compressed bytes
+  dataOffset: number;
 }
 
 function parseZipDirectory(buf: Buffer): Map<string, ZipEntry> {
   const entries = new Map<string, ZipEntry>();
 
-  // Find End of Central Directory record (signature 0x06054b50)
   let eocd = -1;
   const searchFrom = Math.max(0, buf.length - 65558);
   for (let i = buf.length - 22; i >= searchFrom; i--) {
@@ -75,7 +77,6 @@ function parseZipDirectory(buf: Buffer): Map<string, ZipEntry> {
     const localOffset = buf.readUInt32LE(pos + 42);
     const name        = buf.subarray(pos + 46, pos + 46 + fnLen).toString("utf8");
 
-    // Local file header: fixed 30 bytes + fnLen + extraLen
     const lhFnLen    = buf.readUInt16LE(localOffset + 26);
     const lhExtraLen = buf.readUInt16LE(localOffset + 28);
     const dataOffset = localOffset + 30 + lhFnLen + lhExtraLen;
@@ -107,31 +108,43 @@ function streamEntry(buf: Buffer, entry: ZipEntry): NodeJS.ReadableStream {
 }
 
 // ---------------------------------------------------------------------------
-// Shared strings (xl/sharedStrings.xml) — loaded fully into memory
+// Shared strings (xl/sharedStrings.xml) — O(n) indexOf-based parser
 // ---------------------------------------------------------------------------
 
 function parseSharedStrings(xmlBuf: Buffer): string[] {
   const xml = xmlBuf.toString("utf8");
   const result: string[] = [];
-  // Each <si> contains <t>TEXT</t> or <r><t>TEXT</t>... (rich text)
-  // We only need the text content
-  const siRe = /<si>([\s\S]*?)<\/si>/g;
-  let m: RegExpExecArray | null;
-  while ((m = siRe.exec(xml)) !== null) {
-    // Extract all <t> elements and concatenate
-    const siContent = m[1];
-    const tRe = /<t(?:\s[^>]*)?>([^<]*)<\/t>/g;
+  let i = 0;
+  const len = xml.length;
+
+  while (i < len) {
+    const siStart = xml.indexOf("<si>", i);
+    if (siStart < 0) break;
+    const siEnd = xml.indexOf("</si>", siStart + 4);
+    if (siEnd < 0) break;
+    const siContent = xml.slice(siStart + 4, siEnd);
+
+    // Concatenate all <t>...</t> segments (handles rich text)
     let text = "";
-    let t: RegExpExecArray | null;
-    while ((t = tRe.exec(siContent)) !== null) {
-      text += unescapeXml(t[1]);
+    let j = 0;
+    while (j < siContent.length) {
+      const tStart = siContent.indexOf("<t", j);
+      if (tStart < 0) break;
+      const tClose = siContent.indexOf(">", tStart);
+      if (tClose < 0) break;
+      const tEnd = siContent.indexOf("</t>", tClose + 1);
+      if (tEnd < 0) break;
+      text += unescapeXml(siContent.slice(tClose + 1, tEnd));
+      j = tEnd + 4;
     }
     result.push(text);
+    i = siEnd + 5;
   }
   return result;
 }
 
 function unescapeXml(s: string): string {
+  if (s.indexOf("&") < 0) return s;
   return s
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
@@ -141,11 +154,10 @@ function unescapeXml(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Workbook → find sheet XML path for a given sheet name
+// Workbook → find sheet XML path
 // ---------------------------------------------------------------------------
 
 function findSheetPath(buf: Buffer, entries: Map<string, ZipEntry>, sheetName: string): string {
-  // Parse xl/workbook.xml to get rId
   const wbEntry = entries.get("xl/workbook.xml");
   if (!wbEntry) throw new Error("xl/workbook.xml não encontrado no XLSX");
   const wbXml = inflateEntry(buf, wbEntry).toString("utf8");
@@ -157,7 +169,6 @@ function findSheetPath(buf: Buffer, entries: Map<string, ZipEntry>, sheetName: s
     if (m[1] === sheetName) { rId = m[2]; break; }
   }
   if (!rId) {
-    // List available sheets for error message
     const allSheets: string[] = [];
     const listRe = /<sheet\s[^>]*name="([^"]*)"/g;
     let n: RegExpExecArray | null;
@@ -165,7 +176,6 @@ function findSheetPath(buf: Buffer, entries: Map<string, ZipEntry>, sheetName: s
     throw new Error(`Aba "${sheetName}" não encontrada. Abas: ${allSheets.join(", ")}`);
   }
 
-  // Parse xl/_rels/workbook.xml.rels to get file path
   const relsEntry =
     entries.get("xl/_rels/workbook.xml.rels") ??
     entries.get("xl/workbook.xml.rels");
@@ -174,12 +184,11 @@ function findSheetPath(buf: Buffer, entries: Map<string, ZipEntry>, sheetName: s
   const relRe = new RegExp(`<Relationship[^>]*Id="${rId}"[^>]*Target="([^"]*)"`, "i");
   const relMatch = relRe.exec(relsXml);
   if (!relMatch) throw new Error(`Relacionamento rId="${rId}" não encontrado em rels`);
-  // Target is relative to xl/, e.g. "worksheets/sheet1.xml"
   return "xl/" + relMatch[1];
 }
 
 // ---------------------------------------------------------------------------
-// Cell parsing utilities
+// Cell parsing — targeted extraction (only B, R, S, U columns)
 // ---------------------------------------------------------------------------
 
 /** Convert column letters (A, B, ..., Z, AA, ...) to 0-based index */
@@ -191,34 +200,56 @@ function colLettersToIndex(letters: string): number {
   return n - 1;
 }
 
-/** Regex to extract cells from a <row> string (non-greedy per cell) */
-const CELL_RE = /<c\s+r="([A-Z]+)\d+"([^>]*)>(?:(?:(?!<c\s).)*?<v>([^<]*)<\/v>)?/gs;
-const ATTR_T_RE = /\bt="([^"]*)"/;
-
-interface ParsedRow {
-  /** Extracted cell values by 0-based column index */
-  cells: Map<number, { rawValue: string; isSharedStr: boolean }>;
-}
-
-function parseRowXml(rowXml: string): ParsedRow {
+/**
+ * Extract only target-column cells from a <row>...</row> XML string.
+ * Uses indexOf instead of regex to avoid O(n²) behavior on wide rows.
+ */
+function extractTargetCells(rowXml: string): Map<number, { rawValue: string; isSharedStr: boolean }> {
   const cells = new Map<number, { rawValue: string; isSharedStr: boolean }>();
-  CELL_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = CELL_RE.exec(rowXml)) !== null) {
-    const col = colLettersToIndex(m[1]);
-    const attrs = m[2] ?? "";
-    const rawValue = m[3] ?? "";
-    const tMatch = ATTR_T_RE.exec(attrs);
-    const cellType = tMatch ? tMatch[1] : "n";
-    cells.set(col, { rawValue, isSharedStr: cellType === "s" });
+  let pos = 0;
+  const len = rowXml.length;
+
+  while (pos < len) {
+    const cs = rowXml.indexOf("<c ", pos);
+    if (cs < 0) break;
+
+    // Find end of the opening tag (<c ... >)
+    const tagEnd = rowXml.indexOf(">", cs);
+    if (tagEnd < 0) break;
+
+    const tag = rowXml.slice(cs, tagEnd + 1);
+
+    // Extract column letters from r="COLrow" attribute
+    const rAttr = tag.indexOf(' r="');
+    if (rAttr < 0) { pos = cs + 3; continue; }
+    let colEnd = rAttr + 4;
+    while (colEnd < tag.length) {
+      const ch = tag.charCodeAt(colEnd);
+      if (ch < 65 || ch > 90) break; // A-Z only
+      colEnd++;
+    }
+    const colLetter = tag.slice(rAttr + 4, colEnd);
+
+    // Find next <c to bound this cell's extent
+    const nextC = rowXml.indexOf("<c ", cs + 3);
+    const cellEnd = nextC > 0 ? nextC : len;
+
+    if (TARGET_COLS.has(colLetter)) {
+      const colIdx = colLettersToIndex(colLetter);
+      const isSharedStr = tag.includes(' t="s"');
+      const vStart = rowXml.indexOf("<v>", cs);
+      const vEnd = (vStart >= 0 && vStart < cellEnd) ? rowXml.indexOf("</v>", vStart) : -1;
+      const rawValue = (vEnd >= 0 && vEnd < cellEnd) ? rowXml.slice(vStart + 3, vEnd) : "";
+      cells.set(colIdx, { rawValue, isSharedStr });
+    }
+
+    pos = cellEnd;
   }
-  return { cells };
+  return cells;
 }
 
 /** Excel serial date → ISO date string */
 function excelSerialToISO(serial: number): string {
-  // Excel serial: days since 1900-01-00 (with leap-year bug: 1900-02-29 is counted)
-  // Adjust: subtract 1 for the 1900-02-29 phantom day, and use 1899-12-30 epoch
   const epoch = new Date(Date.UTC(1899, 11, 30));
   const date = new Date(epoch.getTime() + serial * 86400000);
   const y = date.getUTCFullYear();
@@ -241,8 +272,8 @@ function parseCostLocal(raw: string): number | null {
   let normalized: string;
   if (hasDot && hasComma) {
     normalized = s.lastIndexOf(",") > s.lastIndexOf(".")
-      ? s.replace(/\./g, "").replace(",", ".") // BR: 1.400,00
-      : s.replace(/,/g, "");                   // US: 1,400.00
+      ? s.replace(/\./g, "").replace(",", ".")
+      : s.replace(/,/g, "");
   } else if (hasComma && !hasDot) {
     normalized = s.replace(",", ".");
   } else {
@@ -260,23 +291,20 @@ export async function streamHisEstoque(
   filePath: string,
   sheetName = "His Estoque",
 ): Promise<HisStreamResult> {
-  const buf = fs.readFileSync(filePath); // ~60 MB — intentional full read
+  const buf = fs.readFileSync(filePath);
   const entries = parseZipDirectory(buf);
 
-  // Load shared strings (usually < 1 MB)
   let sharedStrings: string[] = [];
   const ssEntry = entries.get("xl/sharedStrings.xml");
   if (ssEntry) {
     sharedStrings = parseSharedStrings(inflateEntry(buf, ssEntry));
   }
 
-  // Find the correct sheet XML path
   const sheetPath = findSheetPath(buf, entries, sheetName);
   const sheetEntry = entries.get(sheetPath);
   if (!sheetEntry)
     throw new Error(`Arquivo de planilha "${sheetPath}" não encontrado no ZIP`);
 
-  // Stream and parse
   const lastByImei = new Map<string, HisRowData>();
   const warnings: ImportIssueRaw[] = [];
   const sampleRows: HisRowData[] = [];
@@ -284,39 +312,33 @@ export async function streamHisEstoque(
   let headerLine = 0;
   let isHeaderFound = false;
 
-  // We stream the decompressed XML and accumulate row buffers
   const xmlStream = streamEntry(buf, sheetEntry);
 
   let rowBuf = "";
-  let dataRowIdx = 0;    // physical row number in sheet (1-based includes header)
-  let xmlRowNum = 0;     // from <row r="N"> attribute
+  let xmlRowNum = 0;
 
   const rowProcessor = (rowXml: string, rNum: number) => {
-    // Try to detect header row: contains "Serial" or "IMEI" in column B (shared string or inline)
-    const { cells } = parseRowXml(rowXml);
+    const cells = extractTargetCells(rowXml);
     const bCell = cells.get(COL_IMEI);
     if (!isHeaderFound) {
-      // Check if this looks like a header
       if (bCell) {
         const bVal = bCell.isSharedStr
           ? (sharedStrings[parseInt(bCell.rawValue, 10)] ?? "")
           : bCell.rawValue;
-        const normalised = bVal.toUpperCase().replace(/\s+/g, "");
-        if (normalised === "SERIAL" || normalised === "IMEI") {
+        const norm = bVal.toUpperCase().replace(/\s+/g, "");
+        if (norm === "SERIAL" || norm === "IMEI") {
           isHeaderFound = true;
           headerLine = rNum;
           return;
         }
       }
-      // If we reach line 3 without finding header, assume line 1 was header
       if (rNum >= 3) { isHeaderFound = true; headerLine = 1; }
-      else return; // skip this row until header found
+      else return;
     }
 
     totalDataLines++;
-    dataRowIdx++;
 
-    if (!bCell) return; // no IMEI cell — skip
+    if (!bCell) return;
 
     const imeiRaw = bCell.isSharedStr
       ? (sharedStrings[parseInt(bCell.rawValue, 10)] ?? "")
@@ -324,7 +346,6 @@ export async function streamHisEstoque(
     const imeiNorm = normalizeImeiLocal(imeiRaw);
     if (!imeiNorm) return;
 
-    // Age
     const ageCell = cells.get(COL_AGE);
     let ageDays: number | null = null;
     if (ageCell && ageCell.rawValue !== "") {
@@ -332,7 +353,6 @@ export async function streamHisEstoque(
       ageDays = isNaN(n) ? null : Math.round(n);
     }
 
-    // Cost
     const costCell = cells.get(COL_COST);
     let cost: number | null = null;
     if (costCell && costCell.rawValue !== "") {
@@ -344,7 +364,6 @@ export async function streamHisEstoque(
       }
     }
 
-    // Date
     const dateCell = cells.get(COL_DATE);
     let reportDate: string | null = null;
     if (dateCell && dateCell.rawValue !== "") {
@@ -362,7 +381,7 @@ export async function streamHisEstoque(
 
     const prev = lastByImei.get(imeiNorm);
     if (prev && prev.reportDate && reportDate && reportDate < prev.reportDate) {
-      if (warnings.length < 50) { // cap warnings to avoid memory bloat
+      if (warnings.length < 50) {
         warnings.push({
           row: rNum,
           severity: "WARNING",
@@ -383,7 +402,6 @@ export async function streamHisEstoque(
     xmlStream.on("data", (chunk: Buffer | string) => {
       rowBuf += typeof chunk === "string" ? chunk : chunk.toString("utf8");
 
-      // Process all complete <row ...>...</row> blocks
       let start = 0;
       while (true) {
         const rowStart = rowBuf.indexOf("<row ", start);
@@ -397,19 +415,14 @@ export async function streamHisEstoque(
           break;
         }
         const rowXml = rowBuf.slice(rowStart, rowEnd + 6);
-
-        // Extract row number from r="N" attribute
         const rAttr = /\br="(\d+)"/.exec(rowXml);
         const rNum = rAttr ? parseInt(rAttr[1], 10) : (xmlRowNum + 1);
         xmlRowNum = rNum;
-
         try { rowProcessor(rowXml, rNum); } catch { /* skip malformed row */ }
-
         start = rowEnd + 6;
       }
     });
     xmlStream.on("end", () => {
-      // Process any remaining complete rows in the buffer
       let start = 0;
       while (true) {
         const rowStart = rowBuf.indexOf("<row ", start);
