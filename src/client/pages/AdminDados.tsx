@@ -18,7 +18,7 @@ interface SourceStatus {
   pendingStaging: number;
 }
 
-type SourceKey = "his" | "rel-seriais" | "analise-mi" | "pedidos" | "bkp" | "triagem-saida" | "sh";
+type SourceKey = "his" | "rel-seriais" | "analise-mi" | "pedidos" | "bkp" | "triagem-saida" | "sh" | "peacs" | "demonstrativo";
 
 interface AllStatus {
   his: SourceStatus;
@@ -28,6 +28,8 @@ interface AllStatus {
   bkp: SourceStatus;
   "triagem-saida": SourceStatus;
   sh: SourceStatus;
+  peacs: SourceStatus;
+  demonstrativo: SourceStatus;
 }
 
 interface LegadoStatus {
@@ -189,17 +191,47 @@ const SOURCES: SourceDefinition[] = [
   },
   {
     key: "sh",
-    label: "SH — Catálogo",
-    description: "Catálogo de peças do sistema SH: código, nome, grupo, estoque e preços.",
-    sourceType: "Catálogo",
+    label: "SH Ordens de Serviço",
+    description: "Ordens de serviço do SH: OS, IMEI, marca, modelo, cor, defeito e observação.",
+    sourceType: "Enriquecimento",
     accept: ".xls,.xlsx",
     config: {
-      arquivo: "sH.xlsx",
-      aba: "sH (ou primeira aba)",
-      chave: "CODIGO",
-      camposPrincipais: ["CODIGO", "NOME", "GRUPO", "SUBGRUPO", "FABRICANTE", "ESTOQUE_DISP", "CUSTO", "VENDA"],
-      destino: "sh_catalog_rows",
-      observacoes: "Se o arquivo tiver DEFEITO/SERIE (ordens de serviço) em vez de NOME/GRUPO, gera aviso FORMAT_OS.",
+      arquivo: "sH (...).xls",
+      aba: "primeira aba com cabeçalho OS/IMEI",
+      chave: "OS (col B) + IMEI/SERIE (col R)",
+      camposPrincipais: ["OS (col B)", "Marca (col O)", "Modelo (col P)", "Cor (col Q)", "IMEI/SERIE (col R)", "DEFEITO", "OBS_SERVICO"],
+      destino: "sh_os_rows",
+      observacoes: "Auto-detecção da linha de cabeçalho (busca por OS/IMEI/SERIE). Indexado por IMEI e OS para prefill.",
+    },
+  },
+  {
+    key: "peacs",
+    label: "PEACS (standalone)",
+    description: "Tabela de preços seminovo (PEACS) independente — substitui a aba PEACS do PEDIDOS.xlsx.",
+    sourceType: "Catálogo",
+    accept: ".xlsx,.xls",
+    config: {
+      arquivo: "PEACS (...).xlsx",
+      aba: "aba cujo nome contém 'PEACS'",
+      chave: "MARCA-MODELO (col A)",
+      camposPrincipais: ["MARCA-MODELO (col A)", "TABELA SEMINOVO PRAZO (col E)"],
+      destino: "peacs_catalog (active=1)",
+      observacoes: "Substitui atomicamente o catálogo ativo (active=0 em todos, depois INSERT novos). Match exato normalizado (sem acentos, maiúsculas).",
+    },
+  },
+  {
+    key: "demonstrativo",
+    label: "Demonstrativo de Saldos",
+    description: "Saldos do Datasys por referência, descrição, código comercial, fabricante e grupo.",
+    sourceType: "Snapshot",
+    accept: ".xlsx,.xls",
+    config: {
+      arquivo: "RelDemonstrativoSaldos (...).xls",
+      aba: "primeira aba com cabeçalho REFERENCIA/SALDO",
+      chave: "REFERENCIA",
+      camposPrincipais: ["REFERENCIA", "DESCRIÇÃO", "COD. COMERCIAL", "FABRICANTE", "GRUPO", "SUBGRUPO", "FAMÍLIA", "SALDO"],
+      destino: "demonstrativo_rows",
+      observacoes: "Auto-detecção do cabeçalho. Persiste todas as linhas para consulta futura de saldos.",
     },
   },
 ];

@@ -22,6 +22,8 @@ import {
   previewBkp, confirmBkp,
   previewTriagemSaida, confirmTriagemSaida,
   previewSh, confirmSh,
+  previewPeacs, confirmPeacs,
+  previewDemonstrativo, confirmDemonstrativo,
 } from "../../import-central/import-central-service.js";
 import {
   applyHisToRepairCases,
@@ -36,6 +38,7 @@ export const importCentralRouter = Router();
 
 const VALID_SOURCES: SourceKey[] = [
   "his", "rel-seriais", "analise-mi", "pedidos", "bkp", "triagem-saida", "sh",
+  "peacs", "demonstrativo",
 ];
 
 const upload = multer({
@@ -152,6 +155,8 @@ const previewFns: Record<SourceKey, PreviewFn> = {
   bkp:             (db, fp, fn, uid) => previewBkp(db, fp, fn, uid),
   "triagem-saida": (db, fp, fn, uid) => previewTriagemSaida(db, fp, fn, uid),
   sh:              (db, fp, fn, uid) => previewSh(db, fp, fn, uid),
+  peacs:           (db, fp, fn, uid) => previewPeacs(db, fp, fn, uid),
+  demonstrativo:   (db, fp, fn, uid) => previewDemonstrativo(db, fp, fn, uid),
 };
 
 importCentralRouter.post(
@@ -216,6 +221,8 @@ const confirmFns: Record<SourceKey, ConfirmFn> = {
   bkp:             async (db, sid, uid) => confirmBkp(db, sid, uid),
   "triagem-saida": async (db, sid, uid) => confirmTriagemSaida(db, sid, uid),
   sh:              async (db, sid, uid) => confirmSh(db, sid, uid),
+  peacs:           async (db, sid, uid) => confirmPeacs(db, sid, uid),
+  demonstrativo:   async (db, sid, uid) => confirmDemonstrativo(db, sid, uid),
 };
 
 importCentralRouter.post("/:source/confirm", requireAuth, requireAdmin, async (req, res, next) => {

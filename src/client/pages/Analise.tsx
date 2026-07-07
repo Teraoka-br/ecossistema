@@ -1,246 +1,368 @@
-import { useState } from "react";
-import { Search, Plus, Save, CheckCircle, X, AlertTriangle } from "lucide-react";
+import { useState, useCallback } from "react";
+import { Search, Plus, Save, CheckCircle, X, AlertTriangle, Info } from "lucide-react";
 
-interface DatasysRecord {
-  id: number;
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type FieldSource = "SH" | "SERIAIS" | "HIS" | "PEACS" | "MANUAL";
+
+interface PrefillResult {
   imei: string | null;
   os: string | null;
-  brand: string | null;
-  model: string | null;
-  ageDays: number | null;
-  cost: number | null;
-  entryDate: string | null;
-}
-
-interface RepairCase {
-  id: number;
-  imei: string | null;
-  os: string | null;
-  brand: string | null;
-  model: string | null;
-  ageDays: number | null;
-  cost: number | null;
-  estimatedSale: number | null;
-  margin: number | null;
-  entryDate: string | null;
-  notes: string | null;
-  analysisStatus: string;
-  workflowStatus: string;
+  marca: string | null;
+  modelo: string | null;
+  cor: string | null;
+  problema: string | null;
+  observacaoServico: string | null;
+  codigoComercial: string | null;
+  deposito: string | null;
+  idade: number | null;
+  custo: number;
+  vendaEstimada: number;
+  sources: Partial<Record<string, FieldSource>>;
+  warnings: string[];
 }
 
 interface PartDraft {
   key: string;
-  description: string;
-  chavePeca: string;
-  status: string;
+  pecaNome: string;
+  modelo: string;       // herdado do aparelho mas editável
+  incluirCor: boolean;
+  corUsada: string;     // herdado de form.color mas editável
 }
 
-const STATUS_OPTIONS = [
-  "PEDIR_PECA", "AGUARDANDO_RECEBIMENTO", "INDICADA", "VERIFICAR",
-];
+interface SavedCase {
+  id: number;
+  analysisStatus: string;
+  workflowStatus: string;
+}
 
-const STATUS_LABEL: Record<string, string> = {
-  DRAFT: "EM ANÁLISE",
-  COMPLETED: "ANÁLISE FINALIZADA",
-  EM_ANALISE: "EM ANÁLISE",
-  PEDIR_PECA: "PEDIR PEÇA",
-  MATCH: "MATCH",
-  MATCH_PARCIAL: "MATCH PARCIAL",
-  CONCLUIDO: "CONCLUÍDO",
-  CANCELADO: "CANCELADO",
-  VERIFICAR: "VERIFICAR",
+const SOURCE_COLOR: Record<FieldSource, string> = {
+  SH:      "var(--color-info)",
+  SERIAIS: "var(--color-accent, #6366f1)",
+  HIS:     "var(--color-warning)",
+  PEACS:   "var(--color-success)",
+  MANUAL:  "var(--color-text-muted)",
 };
 
-type DataSource = "DATASYS" | "MANUAL" | "LEGADO";
+function SourceBadge({ src }: { src: FieldSource | undefined }) {
+  if (!src) return null;
+  return (
+    <span style={{
+      fontSize: "0.68rem", padding: "1px 5px", borderRadius: 4,
+      background: SOURCE_COLOR[src] + "22",
+      color: SOURCE_COLOR[src], marginLeft: 4, verticalAlign: "middle",
+    }}>{src}</span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Blockers
+// ---------------------------------------------------------------------------
+
+interface Blockers {
+  imei?: string;
+  model?: string;
+  cost?: string;
+  estimatedSale?: string;
+  parts?: string;
+  partCor?: string;
+}
+
+function computeBlockers(form: FormState, parts: PartDraft[]): Blockers {
+  const b: Blockers = {};
+  if (!form.imei) b.imei = "IMEI obrigatório.";
+  if (!form.model) b.model = "Modelo obrigatório.";
+  if (!form.cost || Number(form.cost) <= 0) b.cost = "Custo deve ser maior que zero.";
+  if (!form.estimatedSale || Number(form.estimatedSale) <= 0) b.estimatedSale = "Venda estimada deve ser maior que zero.";
+  if (parts.length === 0) b.parts = "Ao menos uma peça obrigatória.";
+  const missingCor = parts.find((p) => p.incluirCor && !p.corUsada.trim());
+  if (missingCor) b.partCor = `Cor obrigatória para "${missingCor.pecaNome || "peça sem nome"}".`;
+  return b;
+}
+
+// ---------------------------------------------------------------------------
+// CHAVEPECA preview
+// ---------------------------------------------------------------------------
+
+function buildChavePeca(pecaNome: string, modelo: string, incluirCor: boolean, corUsada: string): string {
+  const parts = [pecaNome.trim(), modelo.trim()];
+  if (incluirCor && corUsada.trim()) parts.push(corUsada.trim());
+  return parts.filter(Boolean).join(" ").toUpperCase();
+}
+
+// ---------------------------------------------------------------------------
+// Form state
+// ---------------------------------------------------------------------------
+
+interface FormState {
+  imei: string;
+  os: string;
+  brand: string;
+  model: string;
+  color: string;
+  ageDays: string;
+  cost: string;
+  estimatedSale: string;
+  problema: string;
+  notes: string;
+}
+
+const EMPTY_FORM: FormState = {
+  imei: "", os: "", brand: "", model: "", color: "",
+  ageDays: "", cost: "", estimatedSale: "", problema: "", notes: "",
+};
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export function Analise() {
   const [step, setStep] = useState<"search" | "form">("search");
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
-  const [existingCase, setExistingCase] = useState<RepairCase | null>(null);
-  const [datasysRecords, setDatasysRecords] = useState<DatasysRecord[]>([]);
-  const [source, setSource] = useState<DataSource>("MANUAL");
+  const [prefill, setPrefill] = useState<PrefillResult | null>(null);
+  const [existingCaseId, setExistingCaseId] = useState<number | null>(null);
+  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [fieldOrigins, setFieldOrigins] = useState<Partial<Record<string, FieldSource>>>({});
 
-  // Formulário
-  const [form, setForm] = useState({
-    imei: "", os: "", brand: "", model: "",
-    ageDays: "", cost: "", estimatedSale: "",
-    entryDate: "", notes: "",
-  });
   const [parts, setParts] = useState<PartDraft[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [savedCase, setSavedCase] = useState<RepairCase | null>(null);
+  const [savedCase, setSavedCase] = useState<SavedCase | null>(null);
 
-  function setF(k: keyof typeof form, v: string) {
-    setForm((f) => ({ ...f, [k]: v }));
-  }
+  // Part suggestions
+  const [partSuggestions, setPartSuggestions] = useState<string[]>([]);
+  const [activeSuggestKey, setActiveSuggestKey] = useState<string | null>(null);
+
+  // ---------------------------------------------------------------------------
+  // Search → prefill
+  // ---------------------------------------------------------------------------
 
   async function handleSearch(e: React.FormEvent) {
     e.preventDefault();
     if (!query.trim()) return;
     setSearching(true);
-    setExistingCase(null);
-    setDatasysRecords([]);
+    setSearchError(null);
+    setPrefill(null);
     setSavedCase(null);
     setSaveError(null);
 
-    const q = encodeURIComponent(query.trim());
-    const isImei = /^\d{10,}/.test(query.trim());
+    try {
+      // Check for existing repair_case first
+      const isImei = /^\d{10,}/.test(query.trim());
+      const q = encodeURIComponent(query.trim());
+      const caseRes = await fetch(`/api/repair-cases?limit=20`);
+      let existId: number | null = null;
+      if (caseRes.ok) {
+        const d = await caseRes.json();
+        const q2 = query.trim().toLowerCase();
+        const found = (d.cases as Array<{ id: number; imei: string | null; os: string | null }>)
+          .find((c) => (c.imei ?? "").toLowerCase() === q2 || (c.os ?? "").toLowerCase() === q2);
+        if (found) existId = found.id;
+      }
+      setExistingCaseId(existId);
 
-    const [repRes, dsRes] = await Promise.allSettled([
-      fetch(`/api/repair-cases?limit=5`),
-      fetch(`/api/datasys/search?${isImei ? `imei=${q}` : `os=${q}`}`),
-    ]);
+      // Fetch prefill
+      const pRes = await fetch(`/api/analise/prefill?q=${q}`);
+      if (!pRes.ok) {
+        const err = await pRes.json().catch(() => ({}));
+        throw new Error((err as { error?: string }).error ?? `Erro ${pRes.status}`);
+      }
+      const p = await pRes.json() as PrefillResult;
+      setPrefill(p);
 
-    // Busca case ativo por imei/os (filtragem local simplificada)
-    let existCase: RepairCase | null = null;
-    if (repRes.status === "fulfilled" && repRes.value.ok) {
-      const d = await repRes.value.json();
-      const q2 = query.trim().toLowerCase();
-      existCase = (d.cases as RepairCase[]).find(
-        (c) => (c.imei ?? "").toLowerCase() === q2 || (c.os ?? "").toLowerCase() === q2,
-      ) ?? null;
+      // Populate form from prefill (or existing case if found)
+      if (existId) {
+        const cRes = await fetch(`/api/repair-cases/${existId}`);
+        if (cRes.ok) {
+          const cd = await cRes.json();
+          const rc = cd.repairCase as Record<string, unknown>;
+          setForm({
+            imei: String(rc["imei"] ?? ""),
+            os: String(rc["os"] ?? ""),
+            brand: String(rc["brand"] ?? ""),
+            model: String(rc["model"] ?? ""),
+            color: String(rc["color"] ?? ""),
+            ageDays: rc["ageDays"] != null ? String(rc["ageDays"]) : "",
+            cost: rc["cost"] != null ? String(rc["cost"]) : "",
+            estimatedSale: rc["estimatedSale"] != null ? String(rc["estimatedSale"]) : "",
+            problema: String(rc["problema"] ?? ""),
+            notes: String(rc["notes"] ?? ""),
+          });
+          setFieldOrigins({});
+        }
+      } else {
+        applyPrefillToForm(p, isImei ? query.trim() : null, !isImei ? query.trim() : null);
+      }
+    } catch (err) {
+      setSearchError((err as Error).message);
+    } finally {
+      setSearching(false);
+      setStep("form");
     }
-
-    let ds: DatasysRecord[] = [];
-    if (dsRes.status === "fulfilled" && dsRes.value.ok) {
-      const d = await dsRes.value.json();
-      ds = d.records ?? [];
-    }
-
-    setExistingCase(existCase);
-    setDatasysRecords(ds);
-
-    // Pré-preenche formulário
-    if (existCase) {
-      setForm({
-        imei: existCase.imei ?? "",
-        os: existCase.os ?? "",
-        brand: existCase.brand ?? "",
-        model: existCase.model ?? "",
-        ageDays: existCase.ageDays != null ? String(existCase.ageDays) : "",
-        cost: existCase.cost != null ? String(existCase.cost) : "",
-        estimatedSale: existCase.estimatedSale != null ? String(existCase.estimatedSale) : "",
-        entryDate: existCase.entryDate ?? "",
-        notes: existCase.notes ?? "",
-      });
-      setSource("LEGADO");
-    } else if (ds.length > 0) {
-      const rec = ds[0];
-      setForm({
-        imei: rec.imei ?? "",
-        os: rec.os ?? "",
-        brand: rec.brand ?? "",
-        model: rec.model ?? "",
-        ageDays: rec.ageDays != null ? String(rec.ageDays) : "",
-        cost: rec.cost != null ? String(rec.cost) : "",
-        estimatedSale: "",
-        entryDate: rec.entryDate ?? "",
-        notes: "",
-      });
-      setSource("DATASYS");
-    } else {
-      setForm((f) => ({
-        ...f,
-        imei: isImei ? query.trim() : "",
-        os: !isImei ? query.trim() : "",
-      }));
-      setSource("MANUAL");
-    }
-
-    setSearching(false);
-    setStep("form");
   }
 
-  function applyDatasys(rec: DatasysRecord) {
-    setForm((f) => ({
-      ...f,
-      imei: rec.imei ?? f.imei,
-      os: rec.os ?? f.os,
-      brand: rec.brand ?? f.brand,
-      model: rec.model ?? f.model,
-      ageDays: rec.ageDays != null ? String(rec.ageDays) : f.ageDays,
-      cost: rec.cost != null ? String(rec.cost) : f.cost,
-      entryDate: rec.entryDate ?? f.entryDate,
-    }));
-    setSource("DATASYS");
+  function applyPrefillToForm(p: PrefillResult, queryImei: string | null, queryOs: string | null) {
+    setForm({
+      imei: p.imei ?? queryImei ?? "",
+      os: p.os ?? queryOs ?? "",
+      brand: p.marca ?? "",
+      model: p.modelo ?? "",
+      color: p.cor ?? "",
+      ageDays: p.idade != null ? String(p.idade) : "",
+      cost: p.custo != null && p.custo > 0 ? String(p.custo) : "",
+      estimatedSale: p.vendaEstimada > 0 ? String(p.vendaEstimada) : "",
+      problema: p.problema ?? "",
+      notes: p.observacaoServico ?? "",
+    });
+    setFieldOrigins(p.sources as Partial<Record<string, FieldSource>>);
   }
+
+  // ---------------------------------------------------------------------------
+  // Form helpers
+  // ---------------------------------------------------------------------------
+
+  function setF(k: keyof FormState, v: string) {
+    setForm((f) => ({ ...f, [k]: v }));
+    setFieldOrigins((o) => ({ ...o, [k]: "MANUAL" }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Parts helpers
+  // ---------------------------------------------------------------------------
 
   function addPart() {
-    setParts((p) => [...p, { key: String(Date.now()), description: "", chavePeca: "", status: "PEDIR_PECA" }]);
+    setParts((p) => [...p, {
+      key: String(Date.now()),
+      pecaNome: "",
+      modelo: form.model,
+      incluirCor: false,
+      corUsada: form.color,
+    }]);
   }
 
   function removePart(key: string) {
     setParts((p) => p.filter((x) => x.key !== key));
   }
 
-  function setPart(key: string, field: keyof PartDraft, value: string) {
+  function setPart<K extends keyof PartDraft>(key: string, field: K, value: PartDraft[K]) {
     setParts((p) => p.map((x) => (x.key === key ? { ...x, [field]: value } : x)));
   }
 
+  const fetchSuggestions = useCallback(async (pecaNome: string, partKey: string) => {
+    if (pecaNome.length < 2) { setPartSuggestions([]); setActiveSuggestKey(null); return; }
+    const r = await fetch(`/api/analise/part-suggestions?q=${encodeURIComponent(pecaNome)}`).catch(() => null);
+    if (!r?.ok) return;
+    const d = await r.json() as { suggestions: string[] };
+    setPartSuggestions(d.suggestions);
+    setActiveSuggestKey(partKey);
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Save
+  // ---------------------------------------------------------------------------
+
   async function handleSave(finalize: boolean) {
+    if (finalize) {
+      const blockers = computeBlockers(form, parts);
+      if (Object.keys(blockers).length > 0) {
+        setSaveError("Pendências: " + Object.values(blockers).join(" | "));
+        return;
+      }
+    }
+
     setSaving(true);
     setSaveError(null);
+
     try {
-      const body = {
-        imei: form.imei || null,
-        os: form.os || null,
-        brand: form.brand || null,
-        model: form.model || null,
-        ageDays: form.ageDays ? Number(form.ageDays) : null,
-        cost: form.cost ? Number(form.cost) : null,
-        estimatedSale: form.estimatedSale ? Number(form.estimatedSale) : null,
-        entryDate: form.entryDate || null,
-        notes: form.notes || null,
-      };
+      const partsPayload = parts.map((p) => ({
+        pecaNome: p.pecaNome,
+        modelo: p.modelo || form.model,
+        incluirCor: p.incluirCor,
+        corUsada: p.corUsada || (p.incluirCor ? form.color : ""),
+        chavePeca: buildChavePeca(p.pecaNome, p.modelo || form.model, p.incluirCor, p.corUsada || form.color),
+      }));
 
-      let caseId: number;
-
-      if (existingCase) {
-        const r = await fetch(`/api/repair-cases/${existingCase.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!r.ok) { const d = await r.json(); throw new Error(d.error ?? "Erro ao atualizar."); }
-        const d = await r.json();
-        caseId = d.repairCase.id;
-      } else {
-        const r = await fetch("/api/repair-cases", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!r.ok) { const d = await r.json(); throw new Error(d.error ?? "Erro ao criar."); }
-        const d = await r.json();
-        caseId = d.repairCase.id;
-      }
-
-      // Adiciona peças
-      for (const part of parts) {
-        await fetch(`/api/repair-cases/${caseId}/parts`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ description: part.description || null, chavePeca: part.chavePeca || null, status: part.status }),
-        });
-      }
-
-      // Finaliza análise se pedido
       if (finalize) {
-        const r = await fetch(`/api/repair-cases/${caseId}/complete-analysis`, { method: "POST" });
-        if (!r.ok) {
+        // Full atomic save via new endpoint
+        const r = await fetch("/api/analise/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            existingCaseId,
+            imei: form.imei || null,
+            os: form.os || null,
+            brand: form.brand || null,
+            model: form.model || null,
+            color: form.color || null,
+            ageDays: form.ageDays ? Number(form.ageDays) : null,
+            cost: form.cost ? Number(form.cost) : null,
+            estimatedSale: form.estimatedSale ? Number(form.estimatedSale) : null,
+            problema: form.problema || null,
+            notes: form.notes || null,
+            fieldOrigins,
+            parts: partsPayload,
+          }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error((d as { error?: string }).error ?? "Erro ao finalizar.");
+        const rc = (d as { repairCase: Record<string, unknown> }).repairCase;
+        setSavedCase({
+          id: rc["id"] as number,
+          analysisStatus: rc["analysisStatus"] as string,
+          workflowStatus: rc["workflowStatus"] as string,
+        });
+        setParts([]);
+      } else {
+        // Draft save: just the case (no motor)
+        const body = {
+          imei: form.imei || null,
+          os: form.os || null,
+          brand: form.brand || null,
+          model: form.model || null,
+          color: form.color || null,
+          ageDays: form.ageDays ? Number(form.ageDays) : null,
+          cost: form.cost ? Number(form.cost) : null,
+          estimatedSale: form.estimatedSale ? Number(form.estimatedSale) : null,
+          problema: form.problema || null,
+          notes: form.notes || null,
+        };
+        let caseId: number;
+        if (existingCaseId) {
+          const r = await fetch(`/api/repair-cases/${existingCaseId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
           const d = await r.json();
-          throw new Error(d.error ?? "Erro ao finalizar análise.");
+          if (!r.ok) throw new Error((d as { error?: string }).error ?? "Erro ao atualizar.");
+          caseId = (d as { repairCase: { id: number } }).repairCase.id;
+        } else {
+          const r = await fetch("/api/repair-cases", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const d = await r.json();
+          if (!r.ok) throw new Error((d as { error?: string }).error ?? "Erro ao criar.");
+          caseId = (d as { repairCase: { id: number } }).repairCase.id;
+          setExistingCaseId(caseId);
         }
+        // Add parts without finalizing
+        for (const p of partsPayload) {
+          await fetch(`/api/repair-cases/${caseId}/parts`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ description: p.pecaNome || p.chavePeca, chavePeca: p.chavePeca }),
+          });
+        }
+        setParts([]);
+        setSavedCase({ id: caseId, analysisStatus: "DRAFT", workflowStatus: "EM_ANALISE" });
       }
-
-      // Recarrega caso
-      const r2 = await fetch(`/api/repair-cases/${caseId}`);
-      const d2 = await r2.json();
-      setSavedCase(d2.repairCase);
-      setParts([]);
     } catch (err) {
       setSaveError((err as Error).message);
     } finally {
@@ -251,22 +373,29 @@ export function Analise() {
   function resetForm() {
     setStep("search");
     setQuery("");
-    setExistingCase(null);
-    setDatasysRecords([]);
+    setPrefill(null);
+    setExistingCaseId(null);
+    setForm(EMPTY_FORM);
+    setFieldOrigins({});
+    setParts([]);
     setSavedCase(null);
     setSaveError(null);
-    setParts([]);
   }
 
-  const margin =
-    form.cost && form.estimatedSale
-      ? (Number(form.estimatedSale) - Number(form.cost)).toFixed(2)
-      : null;
+  const margin = form.cost && form.estimatedSale
+    ? (Number(form.estimatedSale) - Number(form.cost)).toFixed(2) : null;
+
+  const blockers = computeBlockers(form, parts);
+  const hasBlockers = Object.keys(blockers).length > 0;
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
 
   return (
     <div>
       <div className="page-header">
-        <h1>Analisar aparelho</h1>
+        <h1 className="page-title">Analisar aparelho</h1>
         {step === "form" && (
           <button className="btn btn-ghost btn-sm" onClick={resetForm}>
             <X size={13} /> Nova busca
@@ -274,7 +403,7 @@ export function Analise() {
         )}
       </div>
 
-      {/* Etapa 1: Busca */}
+      {/* ── Busca ── */}
       {step === "search" && (
         <div className="card" style={{ maxWidth: 480 }}>
           <form onSubmit={handleSearch}>
@@ -287,6 +416,7 @@ export function Analise() {
                 autoFocus
               />
             </div>
+            {searchError && <div className="alert alert-err" style={{ marginBottom: 8 }}>{searchError}</div>}
             <button type="submit" className="btn btn-primary" disabled={searching || !query.trim()}>
               <Search size={14} />
               {searching ? "Buscando…" : "Buscar"}
@@ -295,143 +425,212 @@ export function Analise() {
         </div>
       )}
 
-      {/* Etapa 2: Formulário */}
+      {/* ── Formulário ── */}
       {step === "form" && (
         <div>
           {savedCase && (
-            <div className="alert alert-ok">
-              <CheckCircle size={14} /> Caso {savedCase.id} salvo — status: {STATUS_LABEL[savedCase.analysisStatus] ?? savedCase.analysisStatus}
+            <div className="alert alert-ok" style={{ marginBottom: "1rem" }}>
+              <CheckCircle size={14} />
+              {" "}Caso #{savedCase.id} salvo —{" "}
+              {savedCase.analysisStatus === "COMPLETED" ? "análise finalizada, na fila" : "em análise"}
             </div>
           )}
-          {saveError && <div className="alert alert-err">{saveError}</div>}
+          {saveError && <div className="alert alert-err" style={{ marginBottom: "1rem" }}>{saveError}</div>}
 
-          {existingCase && (
+          {existingCaseId && (
             <div className="alert alert-info" style={{ marginBottom: "1rem" }}>
-              Caso existente #{existingCase.id} encontrado — status: <strong>{STATUS_LABEL[existingCase.workflowStatus]}</strong>. Editando.
+              Editando caso existente #{existingCaseId}.
             </div>
           )}
 
-          {datasysRecords.length > 0 && !existingCase && (
-            <div className="card" style={{ marginBottom: "1rem" }}>
-              <div className="gap-row" style={{ marginBottom: "0.5rem" }}>
-                <span className="badge badge-info">DATASYS</span>
-                <span className="muted text-sm">{datasysRecords.length} registro(s) encontrado(s)</span>
+          {/* Avisos do prefill */}
+          {prefill?.warnings && prefill.warnings.length > 0 && (
+            <div style={{ background: "var(--color-surface-alt)", border: "1px solid var(--color-border)", borderRadius: 6, padding: "8px 12px", marginBottom: "1rem", fontSize: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, color: "var(--color-warning)" }}>
+                <AlertTriangle size={13} /> <strong>Avisos do pré-preenchimento</strong>
               </div>
-              {datasysRecords.slice(0, 3).map((rec) => (
-                <div key={rec.id} style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
-                  <span className="text-sm">{rec.brand} {rec.model} — {rec.ageDays}d — IMEI: {rec.imei} — OS: {rec.os}</span>
-                  <button className="btn btn-ghost btn-sm" onClick={() => applyDatasys(rec)}>Aplicar</button>
-                </div>
-              ))}
+              {prefill.warnings.map((w, i) => <div key={i} style={{ color: "var(--color-text-muted)", marginLeft: 19 }}>{w}</div>)}
             </div>
           )}
-
-          {/* Origem */}
-          <div className="gap-row" style={{ marginBottom: "1rem" }}>
-            <span className="text-sm muted">Origem dos dados:</span>
-            <span className={`badge badge-${source === "DATASYS" ? "info" : source === "LEGADO" ? "muted" : "accent"}`}>{source}</span>
-            {datasysRecords.length > 0 && source !== "DATASYS" && (
-              <span className="text-xs muted" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <AlertTriangle size={12} /> Divergência com Datasys — use "Aplicar" para substituir.
-              </span>
-            )}
-          </div>
 
           {/* Dados do aparelho */}
           <div className="card">
             <h2>Dados do aparelho</h2>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
               <div className="form-group">
-                <label>IMEI *</label>
+                <label>IMEI * <SourceBadge src={fieldOrigins["imei"]} /></label>
                 <input value={form.imei} onChange={(e) => setF("imei", e.target.value)} />
+                {blockers.imei && <span style={{ color: "var(--color-danger)", fontSize: 11 }}>{blockers.imei}</span>}
               </div>
               <div className="form-group">
-                <label>OS *</label>
+                <label>OS <SourceBadge src={fieldOrigins["os"]} /></label>
                 <input value={form.os} onChange={(e) => setF("os", e.target.value)} />
               </div>
               <div className="form-group">
-                <label>Marca</label>
+                <label>Marca <SourceBadge src={fieldOrigins["marca"]} /></label>
                 <input value={form.brand} onChange={(e) => setF("brand", e.target.value)} />
               </div>
               <div className="form-group">
-                <label>Modelo *</label>
+                <label>Modelo * <SourceBadge src={fieldOrigins["modelo"]} /></label>
                 <input value={form.model} onChange={(e) => setF("model", e.target.value)} />
+                {blockers.model && <span style={{ color: "var(--color-danger)", fontSize: 11 }}>{blockers.model}</span>}
               </div>
               <div className="form-group">
-                <label>Idade (dias) *</label>
-                <input type="number" value={form.ageDays} onChange={(e) => setF("ageDays", e.target.value)} />
+                <label>Cor <SourceBadge src={fieldOrigins["cor"]} /></label>
+                <input value={form.color} onChange={(e) => setF("color", e.target.value)} placeholder="Ex.: PRETO" />
               </div>
               <div className="form-group">
-                <label>Data de entrada</label>
-                <input type="date" value={form.entryDate} onChange={(e) => setF("entryDate", e.target.value)} />
+                <label>Idade (dias) <SourceBadge src={fieldOrigins["ageDays"] ?? fieldOrigins["idade"]} /></label>
+                <input type="number" value={form.ageDays} onChange={(e) => setF("ageDays", e.target.value)} placeholder="0 é válido" />
               </div>
               <div className="form-group">
-                <label>Custo (R$) *</label>
+                <label>Custo (R$) * <SourceBadge src={fieldOrigins["custo"] ?? fieldOrigins["cost"]} /></label>
                 <input type="number" step="0.01" value={form.cost} onChange={(e) => setF("cost", e.target.value)} />
+                {blockers.cost && <span style={{ color: "var(--color-danger)", fontSize: 11 }}>{blockers.cost}</span>}
               </div>
               <div className="form-group">
-                <label>Venda estimada (R$) *</label>
+                <label>Venda estimada (R$) * <SourceBadge src={fieldOrigins["vendaEstimada"]} /></label>
                 <input type="number" step="0.01" value={form.estimatedSale} onChange={(e) => setF("estimatedSale", e.target.value)} />
+                {blockers.estimatedSale && <span style={{ color: "var(--color-danger)", fontSize: 11 }}>{blockers.estimatedSale}</span>}
               </div>
             </div>
             {margin && (
-              <div className="text-sm" style={{ color: Number(margin) >= 0 ? "var(--ok-text)" : "var(--err-text)" }}>
+              <div className="text-sm" style={{ color: Number(margin) >= 0 ? "var(--color-success)" : "var(--color-danger)", marginTop: 4 }}>
                 Margem calculada: R$ {margin}
               </div>
             )}
+            {form.problema && (
+              <div className="form-group" style={{ marginTop: "0.75rem" }}>
+                <label>Problema (SH) <SourceBadge src={fieldOrigins["problema"]} /></label>
+                <input value={form.problema} onChange={(e) => setF("problema", e.target.value)} />
+              </div>
+            )}
             <div className="form-group" style={{ marginTop: "0.75rem" }}>
-              <label>Observações</label>
+              <label>Observações <SourceBadge src={fieldOrigins["notes"] ?? fieldOrigins["observacaoServico"]} /></label>
               <textarea value={form.notes} onChange={(e) => setF("notes", e.target.value)} rows={2} style={{ resize: "vertical" }} />
             </div>
+            {prefill?.codigoComercial && (
+              <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginTop: 4 }}>
+                <Info size={10} style={{ verticalAlign: "middle", marginRight: 3 }} />
+                Código comercial: <strong>{prefill.codigoComercial}</strong>
+                {prefill.deposito && ` · Depósito: ${prefill.deposito}`}
+              </div>
+            )}
           </div>
 
-          {/* Peças */}
-          <div className="card">
-            <div className="gap-row" style={{ marginBottom: "0.75rem" }}>
+          {/* Peças necessárias */}
+          <div className="card" style={{ marginTop: "1rem" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
               <h2 style={{ margin: 0 }}>Peças necessárias *</h2>
-              <span className="spacer" />
+              <span style={{ flex: 1 }} />
               <button className="btn btn-secondary btn-sm" onClick={addPart}>
                 <Plus size={13} /> Adicionar peça
               </button>
             </div>
+            {blockers.parts && <p style={{ color: "var(--color-danger)", fontSize: 12, margin: "0 0 8px" }}>{blockers.parts}</p>}
+            {blockers.partCor && <p style={{ color: "var(--color-danger)", fontSize: 12, margin: "0 0 8px" }}>{blockers.partCor}</p>}
             {parts.length === 0 && (
-              <p className="muted text-sm">Nenhuma peça adicionada. Adicione pelo menos uma peça para finalizar a análise.</p>
+              <p className="muted text-sm">Nenhuma peça adicionada. Adicione ao menos uma para finalizar a análise.</p>
             )}
-            {parts.map((part) => (
-              <div key={part.key} style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto auto", gap: "0.5rem", marginBottom: "0.5rem", alignItems: "end" }}>
-                <div className="form-group" style={{ margin: 0 }}>
-                  <label>Descrição</label>
-                  <input value={part.description} onChange={(e) => setPart(part.key, "description", e.target.value)} placeholder="Ex.: Tela LCD" />
+            {parts.map((part) => {
+              const preview = buildChavePeca(part.pecaNome, part.modelo || form.model, part.incluirCor, part.corUsada || form.color);
+              return (
+                <div key={part.key} style={{ borderBottom: "1px solid var(--color-border)", paddingBottom: "0.75rem", marginBottom: "0.75rem" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr auto", gap: "0.5rem", alignItems: "end" }}>
+                    <div className="form-group" style={{ margin: 0, position: "relative" }}>
+                      <label>Nome da peça</label>
+                      <input
+                        value={part.pecaNome}
+                        onChange={(e) => {
+                          setPart(part.key, "pecaNome", e.target.value);
+                          fetchSuggestions(e.target.value, part.key);
+                        }}
+                        onBlur={() => setTimeout(() => { if (activeSuggestKey === part.key) setActiveSuggestKey(null); }, 150)}
+                        placeholder="Ex.: TELA, BATERIA, TAMPA TRASEIRA"
+                      />
+                      {activeSuggestKey === part.key && partSuggestions.length > 0 && (
+                        <div style={{
+                          position: "absolute", zIndex: 10, top: "100%", left: 0, right: 0,
+                          background: "var(--color-surface)", border: "1px solid var(--color-border)",
+                          borderRadius: 4, maxHeight: 150, overflowY: "auto",
+                        }}>
+                          {partSuggestions.map((s) => (
+                            <div key={s} style={{ padding: "4px 8px", cursor: "pointer", fontSize: 12 }}
+                              onMouseDown={() => {
+                                setPart(part.key, "pecaNome", s);
+                                setActiveSuggestKey(null);
+                                setPartSuggestions([]);
+                              }}>
+                              {s}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label>Modelo (CHAVEPECA)</label>
+                      <input
+                        value={part.modelo}
+                        onChange={(e) => setPart(part.key, "modelo", e.target.value)}
+                        placeholder={form.model}
+                      />
+                    </div>
+                    <button className="btn btn-ghost btn-sm" style={{ alignSelf: "end" }} onClick={() => removePart(part.key)} title="Remover">
+                      <X size={13} />
+                    </button>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "1rem", marginTop: "0.4rem" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={part.incluirCor}
+                        onChange={(e) => setPart(part.key, "incluirCor", e.target.checked)}
+                      />
+                      Incluir cor do aparelho
+                    </label>
+                    {part.incluirCor && (
+                      <div className="form-group" style={{ margin: 0, flex: "0 0 140px" }}>
+                        <label style={{ fontSize: 11 }}>Cor usada</label>
+                        <input
+                          value={part.corUsada}
+                          onChange={(e) => setPart(part.key, "corUsada", e.target.value)}
+                          placeholder={form.color || "PRETO"}
+                          style={{ padding: "2px 6px", fontSize: 12 }}
+                        />
+                        {!part.corUsada.trim() && <span style={{ color: "var(--color-danger)", fontSize: 10 }}>Obrigatória</span>}
+                      </div>
+                    )}
+                    <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)", fontFamily: "monospace" }}>
+                      → {preview || "(preencha o nome)"}
+                    </span>
+                  </div>
                 </div>
-                <div className="form-group" style={{ margin: 0 }}>
-                  <label>CHAVE PEÇA</label>
-                  <input value={part.chavePeca} onChange={(e) => setPart(part.key, "chavePeca", e.target.value)} placeholder="Ex.: TEL-A12" />
-                </div>
-                <div className="form-group" style={{ margin: 0 }}>
-                  <label>Status</label>
-                  <select value={part.status} onChange={(e) => setPart(part.key, "status", e.target.value)}>
-                    {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
-                  </select>
-                </div>
-                <button className="btn btn-ghost btn-sm" style={{ alignSelf: "end" }} onClick={() => removePart(part.key)} title="Remover">
-                  <X size={13} />
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
-          {/* Aviso motor */}
-          <div className="motor-notice">
-            O processamento automático das novas análises será ativado na próxima atualização do motor.
-          </div>
+          {/* Pendências */}
+          {hasBlockers && (
+            <div style={{ background: "var(--color-warning-subtle, rgba(234,179,8,0.08))", border: "1px solid var(--color-warning)", borderRadius: 6, padding: "8px 12px", marginTop: "1rem", fontSize: 12 }}>
+              <strong style={{ color: "var(--color-warning)" }}>Pendências para finalizar:</strong>
+              <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+                {Object.values(blockers).map((b, i) => <li key={i}>{b}</li>)}
+              </ul>
+            </div>
+          )}
 
           {/* Ações */}
-          <div className="gap-row" style={{ marginTop: "1rem" }}>
+          <div style={{ display: "flex", gap: "0.75rem", marginTop: "1rem" }}>
             <button className="btn btn-secondary" onClick={() => handleSave(false)} disabled={saving}>
               <Save size={14} />
               {saving ? "Salvando…" : "Salvar em análise"}
             </button>
-            <button className="btn btn-primary" onClick={() => handleSave(true)} disabled={saving}>
+            <button
+              className="btn btn-primary"
+              onClick={() => handleSave(true)}
+              disabled={saving || hasBlockers}
+              title={hasBlockers ? Object.values(blockers).join(" | ") : undefined}
+            >
               <CheckCircle size={14} />
               {saving ? "Salvando…" : "Finalizar análise"}
             </button>

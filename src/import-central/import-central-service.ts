@@ -44,7 +44,9 @@ export type SourceKey =
   | "pedidos"
   | "bkp"
   | "triagem-saida"
-  | "sh";
+  | "sh"
+  | "peacs"
+  | "demonstrativo";
 
 export type StagingStatus =
   | "UPLOADED"
@@ -109,6 +111,8 @@ export interface AllSourcesStatus {
   bkp: SourceStatus;
   "triagem-saida": SourceStatus;
   sh: SourceStatus;
+  peacs: SourceStatus;
+  demonstrativo: SourceStatus;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +127,8 @@ const ALLOWED_EXTENSIONS: Record<SourceKey, string[]> = {
   bkp:            [".xlsx", ".xls"],
   "triagem-saida":[".xlsx", ".xls"],
   sh:             [".xlsx", ".xls"],
+  peacs:          [".xlsx", ".xls"],
+  demonstrativo:  [".xlsx", ".xls"],
 };
 
 const XLSX_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // ZIP PK header
@@ -334,7 +340,9 @@ const SOURCE_IMPORT_TABLES: Record<SourceKey, string> = {
   pedidos:        "pedidos_imports",
   bkp:            "bkp_imports",
   "triagem-saida":"triagem_saida_imports",
-  sh:             "sh_catalog_imports",
+  sh:             "sh_os_imports",
+  peacs:          "peacs_imports",
+  demonstrativo:  "demonstrativo_imports",
 };
 
 export function createStaging(
@@ -509,6 +517,8 @@ export function getAllSourcesStatus(db: Db): AllSourcesStatus {
     bkp:            statusFor("bkp"),
     "triagem-saida":statusFor("triagem-saida"),
     sh:             statusFor("sh"),
+    peacs:          statusFor("peacs"),
+    demonstrativo:  statusFor("demonstrativo"),
   };
 }
 
@@ -1971,6 +1981,85 @@ export function confirmTriagemSaida(
 // CARD 7 — SH CATÁLOGO
 // ===========================================================================
 
+// ===========================================================================
+// CARD 7 — SH ORDENS DE SERVIÇO
+// Lê colunas fixas: B=OS, O=marca, P=modelo, Q=cor, R=IMEI
+// + DEFEITO e OBS_SERVICO por nome de coluna
+// Aceita XLS antigo e XLSX
+// ===========================================================================
+
+function readShOsRows(filePath: string): {
+  rows: Array<{ osRaw: string | null; osNorm: string | null; imeiRaw: string | null; imeiNorm: string | null; marca: string | null; modelo: string | null; cor: string | null; defeito: string | null; obsServico: string | null }>;
+  totalDataLines: number;
+  sheetUsed: string;
+} {
+  const wbMeta = XLSX.readFile(filePath, { bookSheets: true });
+  const allSheets: string[] = wbMeta.SheetNames ?? [];
+  // Prefer a sheet named SH, sH, etc.; fall back to first
+  const targetSheet = allSheets.find((n) => normalizeHeader(n) === "SH") ?? allSheets[0];
+  if (!targetSheet) throw new ImportCentralError("EMPTY_FILE", "Arquivo SH sem abas.");
+
+  const wb = XLSX.readFile(filePath, { sheets: [targetSheet], cellFormula: false, cellHTML: false });
+  const rawRows: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { header: 1, defval: null });
+  if (rawRows.length < 2) throw new ImportCentralError("EMPTY_SHEET", "Aba SH vazia ou sem dados.");
+
+  // Find header row — scan up to row 10
+  let headerRowIdx = 0;
+  const headers: string[] = [];
+  for (let i = 0; i < Math.min(rawRows.length, 10); i++) {
+    const r = rawRows[i] as unknown[];
+    const strs = r.map((c) => (c === null || c === undefined ? "" : String(c)));
+    // Look for OS or IMEI or SERIE in any cell
+    if (strs.some((s) => /^(OS|IMEI|SERIE|SERIAL)$/i.test(s.trim()))) {
+      headerRowIdx = i;
+      headers.push(...strs);
+      break;
+    }
+  }
+  // If no header row found, use row 0 as header
+  if (headers.length === 0) {
+    headerRowIdx = 0;
+    headers.push(...(rawRows[0] as unknown[]).map((c) => (c === null || c === undefined ? "" : String(c))));
+  }
+
+  // Fixed columns (0-based): B=1, O=14, P=15, Q=16, R=17
+  // But also try by column name
+  const cOs    = colIdx(headers, "OS", "OS SH", "NUMERO OS", "N OS") >= 0
+    ? colIdx(headers, "OS", "OS SH", "NUMERO OS", "N OS") : 1;      // col B fallback
+  const cMarca = colIdx(headers, "MARCA") >= 0
+    ? colIdx(headers, "MARCA") : 14; // col O fallback
+  const cModelo = colIdx(headers, "MODELO", "MODEL") >= 0
+    ? colIdx(headers, "MODELO", "MODEL") : 15; // col P fallback
+  const cCor   = colIdx(headers, "COR", "COLOR") >= 0
+    ? colIdx(headers, "COR", "COLOR") : 16; // col Q fallback
+  const cImei  = colIdx(headers, "IMEI", "SERIE", "SERIAL", "IMEI 1") >= 0
+    ? colIdx(headers, "IMEI", "SERIE", "SERIAL", "IMEI 1") : 17; // col R fallback
+  const cDefeito    = colIdx(headers, "DEFEITO", "PROBLEMA", "DEFECT");
+  const cObsServico = colIdx(headers, "OBS_SERVICO", "OBS SERVICO", "OBSERVACAO SERVICO", "OBSERVAÇÃO SERVIÇO", "COMPLEMENTO");
+
+  const rows = [];
+  let totalDataLines = 0;
+  for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
+    const r = rawRows[i] as unknown[];
+    if (!r || r.every((c) => c === null)) continue;
+    totalDataLines++;
+    const osRaw   = cellStr(r, cOs);
+    const osNorm  = osRaw ? normalizeOs(osRaw) : null;
+    const imeiRaw = cellStr(r, cImei);
+    const imeiNorm= imeiRaw ? normalizeImei(imeiRaw) : null;
+    rows.push({
+      osRaw, osNorm,
+      imeiRaw, imeiNorm,
+      marca:      cellStr(r, cMarca),
+      modelo:     cellStr(r, cModelo),
+      cor:        cellStr(r, cCor),
+      defeito:    cDefeito    >= 0 ? cellStr(r, cDefeito)    : null,
+      obsServico: cObsServico >= 0 ? cellStr(r, cObsServico) : null,
+    });
+  }
+  return { rows, totalDataLines, sheetUsed: targetSheet };
+}
+
 export async function previewSh(
   db: Db,
   filePath: string,
@@ -1981,60 +2070,26 @@ export async function previewSh(
 
   const fileHash = hashFile(filePath);
   const fileSize = fs.statSync(filePath).size;
-  const existingId = checkDuplicateHash(db, "sh_catalog_imports", fileHash);
+  const existingId = checkDuplicateHash(db, "sh_os_imports", fileHash);
   const stagingId = createStaging(db, "sh", filename, fileHash, filePath, fileSize, userId);
 
   try {
-    const wbMeta = XLSX.readFile(filePath, { bookSheets: true });
-    const allSheets: string[] = wbMeta.SheetNames ?? [];
-    const targetSheet = allSheets.find((n) => normalizeHeader(n) === "SH") ?? allSheets[0];
-    if (!targetSheet) throw new ImportCentralError("EMPTY_FILE", "Arquivo sem abas.");
-
-    const wb = XLSX.readFile(filePath, { sheets: [targetSheet], cellFormula: false, cellHTML: false });
-    const ws = wb.Sheets[targetSheet];
-    const rawRows: unknown[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-    if (rawRows.length === 0) throw new ImportCentralError("EMPTY_SHEET", "Aba vazia.");
-
-    const headers = (rawRows[0] as unknown[]).map((h) => (h === null ? "" : String(h)));
-    const cCodigo  = colIdx(headers, "CODIGO", "CÓDIGO");
-    const cNome    = colIdx(headers, "NOME");
-    const cGrupo   = colIdx(headers, "GRUPO");
-    const cEstoque = colIdx(headers, "ESTOQUE_DISP", "ESTOQUE DISP");
-
+    const { rows, totalDataLines, sheetUsed } = readShOsRows(filePath);
+    const rowsValid = rows.filter((r) => r.osNorm || r.imeiNorm).length;
     const issues: ImportIssueRaw[] = [];
-    const hasNome  = cNome  >= 0;
-    const hasGrupo = cGrupo >= 0;
-    const hasDefect = headers.some((h) => normalizeHeader(h) === "DEFEITO");
-    const hasSerie  = headers.some((h) => normalizeHeader(h) === "SERIE");
-
-    if (!hasNome && (hasDefect || hasSerie)) {
-      issues.push({
-        row: null, severity: "WARNING", code: "FORMAT_OS",
-        message: `Arquivo parece ser de ordens de serviço (tem DEFEITO/SERIE), não catálogo. Colunas: ${headers.filter(h => h).join(", ")}`,
-      });
-    }
-    if (cCodigo < 0)
-      throw new ImportCentralError("MISSING_COL", `Coluna CODIGO não encontrada. Colunas: ${headers.filter(h => h).join(", ")}`);
-
-    let rowsValid = 0; let noCodigo = 0;
-    for (let i = 1; i < rawRows.length; i++) {
-      const r = rawRows[i] as unknown[];
-      if (!r || r.every((c) => c === null)) continue;
-      if (!cellStr(r, cCodigo)) { noCodigo++; continue; }
-      rowsValid++;
+    const noOsOrImei = rows.filter((r) => !r.osNorm && !r.imeiNorm).length;
+    if (noOsOrImei > 0) {
+      issues.push({ row: null, severity: "WARNING", code: "NO_OS_OR_IMEI", message: `${noOsOrImei} linha(s) sem OS nem IMEI válido.` });
     }
 
     const preview: StagedPreview = {
       stagingId, source: "sh", filename, fileHash, fileSize,
       status: "PREVIEW_READY", alreadyImported: !!existingId, existingImportId: existingId,
-      rowsFound: rawRows.length - 1, rowsValid, issues,
-      previewRows: rawRows.slice(1, 6).map((r) => ({
-        codigo: cellStr(r as unknown[], cCodigo),
-        nome:   cNome   >= 0 ? cellStr(r as unknown[], cNome)   : null,
-        grupo:  cGrupo  >= 0 ? cellStr(r as unknown[], cGrupo)  : null,
-        estoque:cEstoque>= 0 ? cellStr(r as unknown[], cEstoque): null,
+      rowsFound: totalDataLines, rowsValid, issues,
+      previewRows: rows.slice(0, 5).map((r) => ({
+        os: r.osRaw, imei: r.imeiRaw, marca: r.marca, modelo: r.modelo, cor: r.cor, defeito: r.defeito,
       })),
-      extra: { sheetUsed: targetSheet, noCodigo, hasNome, hasGrupo, formatWarning: !hasNome },
+      extra: { sheetUsed, noOsOrImei },
     };
 
     setStagingPreviewReady(db, stagingId, JSON.stringify(preview));
@@ -2053,100 +2108,417 @@ export function confirmSh(
   userId: number | null,
 ): { rowsInserted: number } {
   const staged = getStagedFile(db, stagingId);
-  if (!staged)                     throw new ImportCentralError("NOT_FOUND",        "Staging não encontrado.");
-  if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY",  "Preview não pronto.");
-  if (!fs.existsSync(staged.stagedPath)) throw new ImportCentralError("FILE_GONE",  "Arquivo temporário não encontrado.");
+  if (!staged)                          throw new ImportCentralError("NOT_FOUND",       "Staging não encontrado.");
+  if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY",      "Preview não pronto.");
+  if (!fs.existsSync(staged.stagedPath)) throw new ImportCentralError("FILE_GONE",      "Arquivo temporário não encontrado.");
   if (staged.source !== "sh")            throw new ImportCentralError("SOURCE_MISMATCH","Staging pertence a outra fonte.");
 
-  const existingId = checkDuplicateHash(db, "sh_catalog_imports", staged.fileHash);
+  const existingId = checkDuplicateHash(db, "sh_os_imports", staged.fileHash);
+  if (existingId) throw new ImportCentralError("ALREADY_IMPORTED", "Arquivo já importado.");
+
+  const { rows, totalDataLines } = readShOsRows(staged.stagedPath);
+  let rowsInserted = 0;
+
+  withTx(db, () => {
+    const importRow = db
+      .prepare(
+        `INSERT INTO sh_os_imports (filename, file_hash, status, rows_found, created_by_user_id)
+         VALUES (?, ?, 'PENDING', ?, ?)`,
+      )
+      .run(staged.filename, staged.fileHash, totalDataLines, userId);
+    const importId = Number(importRow.lastInsertRowid);
+
+    const insertRow = db.prepare(
+      `INSERT INTO sh_os_rows
+         (sh_os_import_id, os_norm, imei_norm, os_raw, imei_raw, marca, modelo, cor, defeito, obs_servico)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    for (const r of rows) {
+      if (!r.osNorm && !r.imeiNorm) continue;
+      insertRow.run(importId, r.osNorm, r.imeiNorm, r.osRaw, r.imeiRaw, r.marca, r.modelo, r.cor, r.defeito, r.obsServico);
+      rowsInserted++;
+    }
+
+    const issues: ImportIssueRaw[] = [];
+    const skipped = rows.length - rowsInserted;
+    if (skipped > 0) issues.push({ row: null, severity: "WARNING", code: "NO_OS_OR_IMEI", message: `${skipped} linha(s) sem OS nem IMEI ignoradas.` });
+    persistIssues(db, "sh", importId, issues);
+    db.prepare(
+      `UPDATE sh_os_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, issues_count=? WHERE id=?`,
+    ).run(rowsInserted, issues.length, importId);
+
+    confirmStaging(db, stagingId, importId);
+  });
+
+  try { fs.unlinkSync(staged.stagedPath); } catch { /* ignore */ }
+  return { rowsInserted };
+}
+
+// ===========================================================================
+// CARD 8 — PEACS STANDALONE
+// Aceita xlsx/xls com aba contendo "PEACS". Upsert em peacs_catalog.
+// Col A = MARCA-MODELO, Col E = TABELA SEMINOVO PRAZO
+// ===========================================================================
+
+export async function previewPeacs(
+  db: Db,
+  filePath: string,
+  filename: string,
+  userId: number | null,
+): Promise<StagedPreview> {
+  validateFileForSource(filePath, "peacs", filename);
+
+  const fileHash = hashFile(filePath);
+  const fileSize = fs.statSync(filePath).size;
+  const existingId = checkDuplicateHash(db, "peacs_imports", fileHash);
+  const stagingId = createStaging(db, "peacs", filename, fileHash, filePath, fileSize, userId);
+
+  try {
+    const wbMeta = XLSX.readFile(filePath, { bookSheets: true });
+    const allSheets: string[] = wbMeta.SheetNames ?? [];
+    const targetSheet =
+      allSheets.find((n) => normalizeHeader(n).includes("PEACS")) ??
+      allSheets.find((n) => normalizeHeader(n).includes("AVALIA")) ??
+      allSheets[0];
+    if (!targetSheet) throw new ImportCentralError("EMPTY_FILE", "Arquivo sem abas.");
+
+    const wb = XLSX.readFile(filePath, { sheets: [targetSheet], cellFormula: false, cellHTML: false });
+    const rawRows: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { header: 1, defval: null });
+    if (rawRows.length === 0) throw new ImportCentralError("EMPTY_SHEET", "Aba vazia.");
+
+    // Find header row (has MARCA-MODELO or MARCA or MODELO)
+    let headerRowIdx = 0;
+    const hdrs: string[] = [];
+    for (let i = 0; i < Math.min(rawRows.length, 10); i++) {
+      const r = rawRows[i] as unknown[];
+      const strs = r.map((c) => (c === null || c === undefined ? "" : String(c)));
+      if (strs.some((s) => /MARCA|MODELO|PEACS/i.test(s))) {
+        headerRowIdx = i;
+        hdrs.push(...strs);
+        break;
+      }
+    }
+    if (hdrs.length === 0) {
+      headerRowIdx = 0;
+      hdrs.push(...(rawRows[0] as unknown[]).map((c) => (c === null || c === undefined ? "" : String(c))));
+    }
+
+    const cMarcaModelo = colIdx(hdrs, "MARCA-MODELO", "MARCAMODELO", "MARCA MODELO", "MARCA/MODELO");
+    const cPreco       = colIdx(hdrs, "TABELA SEMINOVO PRAZO", "TABELASEMINOVOPRAZO", "PRECO", "PREÇO", "VENDA");
+    const cFamilia     = colIdx(hdrs, "FAMILIA", "FAMÍLIA");
+    const cDataAtualizacao = colIdx(hdrs, "DATA ATUALIZACAO", "DATA ATUALIZAÇÃO", "DATA");
+
+    // Col A fallback for MARCA-MODELO, col E for price
+    const colMM = cMarcaModelo >= 0 ? cMarcaModelo : 0;
+    const colPr = cPreco       >= 0 ? cPreco       : 4;
+
+    const issues: ImportIssueRaw[] = [];
+    let rowsValid = 0; let noMm = 0;
+    for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
+      const r = rawRows[i] as unknown[];
+      if (!r || r.every((c) => c === null)) continue;
+      if (!cellStr(r, colMM)) { noMm++; continue; }
+      rowsValid++;
+    }
+    if (noMm > 0) issues.push({ row: null, severity: "WARNING", code: "NO_MARCA_MODELO", message: `${noMm} linha(s) sem MARCA-MODELO ignoradas.` });
+    if (cPreco < 0) issues.push({ row: null, severity: "WARNING", code: "NO_PRICE_COL", message: "Coluna de preço não localizada; usando coluna E (índice 4)." });
+
+    const preview: StagedPreview = {
+      stagingId, source: "peacs", filename, fileHash, fileSize,
+      status: "PREVIEW_READY", alreadyImported: !!existingId, existingImportId: existingId,
+      rowsFound: rawRows.length - 1 - headerRowIdx, rowsValid, issues,
+      previewRows: rawRows.slice(headerRowIdx + 1, headerRowIdx + 6).map((r) => ({
+        marcaModelo: cellStr(r as unknown[], colMM),
+        preco: parseCostBR((r as unknown[])[colPr]),
+        familia: cFamilia >= 0 ? cellStr(r as unknown[], cFamilia) : null,
+      })),
+      extra: { sheetUsed: targetSheet, noMm, colMM, colPr, hasDataAtualizacao: cDataAtualizacao >= 0 },
+    };
+
+    setStagingPreviewReady(db, stagingId, JSON.stringify(preview));
+    return preview;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setStagingFailed(db, stagingId, msg);
+    if (err instanceof ImportCentralError) throw err;
+    throw new ImportCentralError("PARSE_ERROR", msg);
+  }
+}
+
+export function confirmPeacs(
+  db: Db,
+  stagingId: number,
+  userId: number | null,
+): { rowsUpserted: number } {
+  const staged = getStagedFile(db, stagingId);
+  if (!staged)                          throw new ImportCentralError("NOT_FOUND",       "Staging não encontrado.");
+  if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY",      "Preview não pronto.");
+  if (!fs.existsSync(staged.stagedPath)) throw new ImportCentralError("FILE_GONE",      "Arquivo temporário não encontrado.");
+  if (staged.source !== "peacs")         throw new ImportCentralError("SOURCE_MISMATCH","Staging pertence a outra fonte.");
+
+  const existingId = checkDuplicateHash(db, "peacs_imports", staged.fileHash);
   if (existingId) throw new ImportCentralError("ALREADY_IMPORTED", "Arquivo já importado.");
 
   const wbMeta = XLSX.readFile(staged.stagedPath, { bookSheets: true });
   const allSheets: string[] = wbMeta.SheetNames ?? [];
-  const targetSheet = allSheets.find((n) => normalizeHeader(n) === "SH") ?? allSheets[0];
+  const targetSheet =
+    allSheets.find((n) => normalizeHeader(n).includes("PEACS")) ??
+    allSheets.find((n) => normalizeHeader(n).includes("AVALIA")) ??
+    allSheets[0];
   if (!targetSheet) throw new ImportCentralError("EMPTY_FILE", "Arquivo sem abas.");
 
   const wb = XLSX.readFile(staged.stagedPath, { sheets: [targetSheet], cellFormula: false, cellHTML: false });
   const rawRows: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { header: 1, defval: null });
-  const headers = (rawRows[0] as unknown[]).map((h) => (h === null ? "" : String(h)));
 
-  const cCodigo    = colIdx(headers, "CODIGO", "CÓDIGO");
-  const cNumero    = colIdx(headers, "NUMERO", "NÚMERO");
-  const cNome      = colIdx(headers, "NOME");
-  const cNomecurto = colIdx(headers, "NOMECURTO", "NOME CURTO");
-  const cGrupo     = colIdx(headers, "GRUPO");
-  const cSubgrupo  = colIdx(headers, "SUBGRUPO");
-  const cFabricante= colIdx(headers, "FABRICANTE");
-  const cEstoque   = colIdx(headers, "ESTOQUE_DISP", "ESTOQUE DISP");
-  const cCusto     = colIdx(headers, "CUSTO");
-  const cVenda     = colIdx(headers, "VENDA");
-  const cFornecedor= colIdx(headers, "FORNECEDOR");
-  const cLocal     = colIdx(headers, "LOCAL");
-  const cGaveta    = colIdx(headers, "GAVETA");
-  const cArquivado = colIdx(headers, "ARQUIVADO");
-  const cGtin      = colIdx(headers, "GTIN");
-  const cUsaSerial = colIdx(headers, "USA_SERIAL", "USA SERIAL");
+  let headerRowIdx = 0;
+  const hdrs: string[] = [];
+  for (let i = 0; i < Math.min(rawRows.length, 10); i++) {
+    const r = rawRows[i] as unknown[];
+    const strs = r.map((c) => (c === null || c === undefined ? "" : String(c)));
+    if (strs.some((s) => /MARCA|MODELO|PEACS/i.test(s))) { headerRowIdx = i; hdrs.push(...strs); break; }
+  }
+  if (hdrs.length === 0) {
+    headerRowIdx = 0;
+    hdrs.push(...(rawRows[0] as unknown[]).map((c) => (c === null || c === undefined ? "" : String(c))));
+  }
 
-  if (cCodigo < 0) throw new ImportCentralError("MISSING_COL", "Coluna CODIGO não encontrada.");
+  const cMarcaModelo = colIdx(hdrs, "MARCA-MODELO", "MARCAMODELO", "MARCA MODELO", "MARCA/MODELO");
+  const cPreco       = colIdx(hdrs, "TABELA SEMINOVO PRAZO", "TABELASEMINOVOPRAZO", "PRECO", "PREÇO", "VENDA");
+  const cFamilia     = colIdx(hdrs, "FAMILIA", "FAMÍLIA");
+  const cMemoria     = colIdx(hdrs, "MEMORIA", "MEMÓRIA");
+  const cDataAtual   = colIdx(hdrs, "DATA ATUALIZACAO", "DATA ATUALIZAÇÃO", "DATA");
+  const colMM = cMarcaModelo >= 0 ? cMarcaModelo : 0;
+  const colPr = cPreco       >= 0 ? cPreco       : 4;
+
+  let rowsUpserted = 0;
+  let updatedDate: string | null = null;
+
+  withTx(db, () => {
+    const importRow = db
+      .prepare(
+        `INSERT INTO peacs_imports (filename, file_hash, status, rows_found, created_by_user_id)
+         VALUES (?, ?, 'PENDING', ?, ?)`,
+      )
+      .run(staged.filename, staged.fileHash, rawRows.length - 1 - headerRowIdx, userId);
+    const importId = Number(importRow.lastInsertRowid);
+
+    // Atomic swap — deactivate existing
+    db.prepare("UPDATE peacs_catalog SET active=0 WHERE active=1").run();
+
+    const upsert = db.prepare(
+      `INSERT INTO peacs_catalog
+         (marca_modelo, marca_modelo_norm, familia, memoria_src, estimated_sale, active, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, datetime('now'))
+       ON CONFLICT(marca_modelo_norm) WHERE active=1
+       DO UPDATE SET
+         marca_modelo=excluded.marca_modelo,
+         familia=excluded.familia,
+         memoria_src=excluded.memoria_src,
+         estimated_sale=excluded.estimated_sale,
+         active=1,
+         updated_at=datetime('now')`,
+    );
+
+    for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
+      const r = rawRows[i] as unknown[];
+      if (!r || r.every((c) => c === null)) continue;
+      const mm = cellStr(r, colMM);
+      if (!mm) continue;
+      const mmNorm = normalizeKey(mm);
+      const preco = parseCostBR(r[colPr]);
+      const familia = cFamilia >= 0 ? cellStr(r, cFamilia) : null;
+      const memoria = cMemoria >= 0 ? cellStr(r, cMemoria) : null;
+      if (!updatedDate && cDataAtual >= 0) {
+        updatedDate = xlsxDateToISO(r[cDataAtual]);
+      }
+      upsert.run(mm, mmNorm, familia, memoria, preco ?? null);
+      rowsUpserted++;
+    }
+
+    const issues: ImportIssueRaw[] = [];
+    persistIssues(db, "peacs", importId, issues);
+    db.prepare(
+      `UPDATE peacs_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, updated_date=?, issues_count=0 WHERE id=?`,
+    ).run(rowsUpserted, updatedDate, importId);
+
+    confirmStaging(db, stagingId, importId);
+  });
+
+  try { fs.unlinkSync(staged.stagedPath); } catch { /* ignore */ }
+  return { rowsUpserted };
+}
+
+// ===========================================================================
+// CARD 9 — DEMONSTRATIVO DE SALDOS
+// XLS do Datasys — referência, descrição, código comercial, fabricante, saldo
+// ===========================================================================
+
+export async function previewDemonstrativo(
+  db: Db,
+  filePath: string,
+  filename: string,
+  userId: number | null,
+): Promise<StagedPreview> {
+  validateFileForSource(filePath, "demonstrativo", filename);
+
+  const fileHash = hashFile(filePath);
+  const fileSize = fs.statSync(filePath).size;
+  const existingId = checkDuplicateHash(db, "demonstrativo_imports", fileHash);
+  const stagingId = createStaging(db, "demonstrativo", filename, fileHash, filePath, fileSize, userId);
+
+  try {
+    const wb = XLSX.readFile(filePath, { cellFormula: false, cellHTML: false });
+    const allSheets: string[] = wb.SheetNames ?? [];
+    const targetSheet =
+      allSheets.find((n) => normalizeHeader(n).includes("SALDO")) ??
+      allSheets.find((n) => normalizeHeader(n).includes("DEMONSTRAT")) ??
+      allSheets[0];
+    if (!targetSheet) throw new ImportCentralError("EMPTY_FILE", "Arquivo sem abas.");
+
+    const rawRows: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { header: 1, defval: null });
+    if (rawRows.length === 0) throw new ImportCentralError("EMPTY_SHEET", "Aba vazia.");
+
+    // Find header row (look for REFERENCIA, PRODUTO, SALDO)
+    let headerRowIdx = 0;
+    const hdrs: string[] = [];
+    for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
+      const r = rawRows[i] as unknown[];
+      const strs = r.map((c) => (c === null || c === undefined ? "" : String(c)));
+      if (strs.some((s) => /REFER[EÊ]NCIA|PRODUTO|SALDO|DESCRI/i.test(s))) {
+        headerRowIdx = i; hdrs.push(...strs); break;
+      }
+    }
+    if (hdrs.length === 0) {
+      headerRowIdx = 0;
+      hdrs.push(...(rawRows[0] as unknown[]).map((c) => (c === null || c === undefined ? "" : String(c))));
+    }
+
+    const cRef      = colIdx(hdrs, "REFERENCIA", "REFERÊNCIA", "PRODUTO", "REF");
+    const cDesc     = colIdx(hdrs, "DESCRICAO", "DESCRIÇÃO", "DESCR");
+    const cCodCom   = colIdx(hdrs, "CODIGO COMERCIAL", "CÓDIGO COMERCIAL", "COD COMERCIAL");
+    const cSaldo     = colIdx(hdrs, "SALDO", "SALDO ATUAL", "SALDO INFORMADO", "QTD");
+
+    const issues: ImportIssueRaw[] = [];
+    if (cRef < 0) issues.push({ row: null, severity: "WARNING", code: "NO_REF_COL", message: "Coluna de referência não localizada." });
+
+    let rowsValid = 0;
+    for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
+      const r = rawRows[i] as unknown[];
+      if (!r || r.every((c) => c === null)) continue;
+      if (cRef >= 0 && !cellStr(r, cRef)) continue;
+      rowsValid++;
+    }
+
+    const preview: StagedPreview = {
+      stagingId, source: "demonstrativo", filename, fileHash, fileSize,
+      status: "PREVIEW_READY", alreadyImported: !!existingId, existingImportId: existingId,
+      rowsFound: rawRows.length - 1 - headerRowIdx, rowsValid, issues,
+      previewRows: rawRows.slice(headerRowIdx + 1, headerRowIdx + 6).map((r) => ({
+        referencia:   cRef    >= 0 ? cellStr(r as unknown[], cRef)    : null,
+        descricao:    cDesc   >= 0 ? cellStr(r as unknown[], cDesc)   : null,
+        codComercial: cCodCom >= 0 ? cellStr(r as unknown[], cCodCom) : null,
+        saldo:        cSaldo  >= 0 ? parseCostBR((r as unknown[])[cSaldo]) : null,
+      })),
+      extra: { sheetUsed: targetSheet, colsFound: { ref: cRef >= 0, desc: cDesc >= 0, codComercial: cCodCom >= 0, saldo: cSaldo >= 0 } },
+    };
+
+    setStagingPreviewReady(db, stagingId, JSON.stringify(preview));
+    return preview;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setStagingFailed(db, stagingId, msg);
+    if (err instanceof ImportCentralError) throw err;
+    throw new ImportCentralError("PARSE_ERROR", msg);
+  }
+}
+
+export function confirmDemonstrativo(
+  db: Db,
+  stagingId: number,
+  userId: number | null,
+): { rowsInserted: number } {
+  const staged = getStagedFile(db, stagingId);
+  if (!staged)                          throw new ImportCentralError("NOT_FOUND",       "Staging não encontrado.");
+  if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY",      "Preview não pronto.");
+  if (!fs.existsSync(staged.stagedPath)) throw new ImportCentralError("FILE_GONE",      "Arquivo temporário não encontrado.");
+  if (staged.source !== "demonstrativo") throw new ImportCentralError("SOURCE_MISMATCH","Staging pertence a outra fonte.");
+
+  const existingId = checkDuplicateHash(db, "demonstrativo_imports", staged.fileHash);
+  if (existingId) throw new ImportCentralError("ALREADY_IMPORTED", "Arquivo já importado.");
+
+  const wb = XLSX.readFile(staged.stagedPath, { cellFormula: false, cellHTML: false });
+  const allSheets: string[] = wb.SheetNames ?? [];
+  const targetSheet =
+    allSheets.find((n) => normalizeHeader(n).includes("SALDO")) ??
+    allSheets.find((n) => normalizeHeader(n).includes("DEMONSTRAT")) ??
+    allSheets[0];
+  if (!targetSheet) throw new ImportCentralError("EMPTY_FILE", "Arquivo sem abas.");
+
+  const rawRows: unknown[][] = XLSX.utils.sheet_to_json(wb.Sheets[targetSheet], { header: 1, defval: null });
+
+  let headerRowIdx = 0;
+  const hdrs: string[] = [];
+  for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
+    const r = rawRows[i] as unknown[];
+    const strs = r.map((c) => (c === null || c === undefined ? "" : String(c)));
+    if (strs.some((s) => /REFER[EÊ]NCIA|PRODUTO|SALDO|DESCRI/i.test(s))) { headerRowIdx = i; hdrs.push(...strs); break; }
+  }
+  if (hdrs.length === 0) {
+    headerRowIdx = 0;
+    hdrs.push(...(rawRows[0] as unknown[]).map((c) => (c === null || c === undefined ? "" : String(c))));
+  }
+
+  const cRef      = colIdx(hdrs, "REFERENCIA", "REFERÊNCIA", "PRODUTO", "REF");
+  const cDesc     = colIdx(hdrs, "DESCRICAO", "DESCRIÇÃO", "DESCR");
+  const cCodCom   = colIdx(hdrs, "CODIGO COMERCIAL", "CÓDIGO COMERCIAL", "COD COMERCIAL");
+  const cFab      = colIdx(hdrs, "FABRICANTE");
+  const cGrupo    = colIdx(hdrs, "GRUPO");
+  const cSubgrupo = colIdx(hdrs, "SUBGRUPO");
+  const cFamilia  = colIdx(hdrs, "FAMILIA", "FAMÍLIA");
+  const cSaldo    = colIdx(hdrs, "SALDO", "SALDO ATUAL", "SALDO INFORMADO", "QTD");
 
   let rowsInserted = 0;
 
   withTx(db, () => {
     const importRow = db
       .prepare(
-        `INSERT INTO sh_catalog_imports (filename, file_hash, status, rows_found, created_by_user_id)
+        `INSERT INTO demonstrativo_imports (filename, file_hash, status, rows_found, created_by_user_id)
          VALUES (?, ?, 'PENDING', ?, ?)`,
       )
-      .run(staged.filename, staged.fileHash, rawRows.length - 1, userId);
+      .run(staged.filename, staged.fileHash, rawRows.length - 1 - headerRowIdx, userId);
     const importId = Number(importRow.lastInsertRowid);
 
     const insertRow = db.prepare(
-      `INSERT INTO sh_catalog_rows
-         (sh_catalog_import_id, codigo, numero, nome, nomecurto, grupo, subgrupo,
-          fabricante, estoque_disp, custo, venda, fornecedor, local, gaveta,
-          arquivado, gtin, usa_serial, raw_data_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO demonstrativo_rows
+         (demonstrativo_import_id, referencia, referencia_norm, descricao, codigo_comercial,
+          fabricante, grupo, subgrupo, familia, saldo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
-    for (let i = 1; i < rawRows.length; i++) {
+    for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
       const r = rawRows[i] as unknown[];
       if (!r || r.every((c) => c === null)) continue;
-      const codigo = cellStr(r, cCodigo);
-      if (!codigo) continue;
+      const ref = cRef >= 0 ? cellStr(r, cRef) : null;
+      if (cRef >= 0 && !ref) continue;
+      const refNorm = ref ? normalizeKey(ref) : null;
       insertRow.run(
-        importId, codigo,
-        cNumero    >= 0 ? cellStr(r, cNumero)    : null,
-        cNome      >= 0 ? cellStr(r, cNome)      : null,
-        cNomecurto >= 0 ? cellStr(r, cNomecurto) : null,
-        cGrupo     >= 0 ? cellStr(r, cGrupo)     : null,
-        cSubgrupo  >= 0 ? cellStr(r, cSubgrupo)  : null,
-        cFabricante>= 0 ? cellStr(r, cFabricante): null,
-        cEstoque   >= 0 ? parseCostBR(r[cEstoque]): null,
-        cCusto     >= 0 ? parseCostBR(r[cCusto]) : null,
-        cVenda     >= 0 ? parseCostBR(r[cVenda]) : null,
-        cFornecedor>= 0 ? cellStr(r, cFornecedor): null,
-        cLocal     >= 0 ? cellStr(r, cLocal)     : null,
-        cGaveta    >= 0 ? cellStr(r, cGaveta)    : null,
-        cArquivado >= 0 ? cellStr(r, cArquivado) : null,
-        cGtin      >= 0 ? cellStr(r, cGtin)      : null,
-        cUsaSerial >= 0 ? cellStr(r, cUsaSerial) : null,
-        null,
+        importId,
+        ref, refNorm,
+        cDesc    >= 0 ? cellStr(r, cDesc)    : null,
+        cCodCom  >= 0 ? cellStr(r, cCodCom)  : null,
+        cFab     >= 0 ? cellStr(r, cFab)     : null,
+        cGrupo   >= 0 ? cellStr(r, cGrupo)   : null,
+        cSubgrupo>= 0 ? cellStr(r, cSubgrupo): null,
+        cFamilia >= 0 ? cellStr(r, cFamilia) : null,
+        cSaldo   >= 0 ? parseCostBR(r[cSaldo]) : null,
       );
       rowsInserted++;
     }
 
-    const shIssues: ImportIssueRaw[] = [];
-    let shNoCodigo = 0;
-    for (let i = 1; i < rawRows.length; i++) {
-      const r2 = rawRows[i] as unknown[];
-      if (!r2 || r2.every((c) => c === null)) continue;
-      if (!cellStr(r2, cCodigo)) shNoCodigo++;
-    }
-    if (shNoCodigo > 0) shIssues.push({ row: null, severity: "WARNING", code: "NO_CODIGO", message: `${shNoCodigo} linha(s) sem CODIGO ignoradas.` });
-    persistIssues(db, "sh", importId, shIssues);
     db.prepare(
-      `UPDATE sh_catalog_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, issues_count=? WHERE id=?`,
-    ).run(rowsInserted, shIssues.length, importId);
+      `UPDATE demonstrativo_imports SET status='COMPLETED', finished_at=datetime('now'), rows_valid=?, issues_count=0 WHERE id=?`,
+    ).run(rowsInserted, importId);
 
     confirmStaging(db, stagingId, importId);
   });
