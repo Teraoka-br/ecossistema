@@ -330,6 +330,19 @@ function executeEngine(
       AND status NOT IN ('CANCELADA','SEPARADA','CONSUMIDA','RESERVADA')
   `).all(...caseIds) as unknown as PartRow[];
 
+  // Identificar part_requests com pedido ativo (ORDERED + pedido AWAITING/PARTIALLY_RECEIVED)
+  const activeOrderPartIds = new Set<number>(
+    (db.prepare(`
+      SELECT DISTINCT purch.part_request_id
+      FROM purchase_requests purch
+      JOIN purchase_order_items poi ON poi.purchase_request_id = purch.id
+      JOIN purchase_orders po ON po.id = poi.purchase_order_id
+      WHERE purch.part_request_id IS NOT NULL
+        AND purch.status = 'ORDERED'
+        AND po.status IN ('AWAITING_RECEIPT','PARTIALLY_RECEIVED')
+    `).all() as Array<{ part_request_id: number }>).map(r => r.part_request_id)
+  );
+
   const partsByCase = new Map<number, PartRow[]>();
   for (const p of parts) {
     const arr = partsByCase.get(p.repair_case_id) ?? [];
@@ -429,10 +442,23 @@ function executeEngine(
       }
     }
 
+    // Determinar newStatus da passagem 2:
+    // - MATCH_PARCIAL se alguma peça foi alocada
+    // - AGUARDANDO_RECEBIMENTO se nenhuma alocada mas todas as faltantes têm pedido ativo
+    // - PEDIR_PECA caso contrário
     let newStatus: string;
-    if (hasAll) newStatus = "MATCH"; // all parts found (shouldn't reach here but handle it)
-    else if (hasPartial) newStatus = "MATCH_PARCIAL";
-    else newStatus = "PEDIR_PECA";
+    if (hasAll) {
+      newStatus = "MATCH";
+    } else if (hasPartial) {
+      newStatus = "MATCH_PARCIAL";
+    } else {
+      const allMissingHaveOrder = allocations
+        .filter(a => a.resultStatus === "PEDIR_PECA")
+        .every(a => activeOrderPartIds.has(a.partRequestId));
+      newStatus = allMissingHaveOrder && allocations.some(a => a.resultStatus === "PEDIR_PECA")
+        ? "AGUARDANDO_RECEBIMENTO"
+        : "PEDIR_PECA";
+    }
 
     decisions.push({ caseId: sc.caseRow.id, prevStatus: sc.caseRow.workflow_status, newStatus, parts: allocations });
     if (hasPartial) partialKitsFound++;
@@ -468,18 +494,36 @@ function executeEngine(
         const part = parts.find(p => p.id === a.partRequestId);
         if (!part) continue;
         if (a.resultStatus === "MATCH" || a.resultStatus === "MATCH_PARCIAL") {
-          if (part.status === "PEDIR_PECA" || part.status === "VERIFICAR") {
+          // Peça alocada: promover para INDICADA (de PEDIR_PECA, VERIFICAR ou AGUARDANDO_RECEBIMENTO)
+          if (part.status === "PEDIR_PECA" || part.status === "VERIFICAR" || part.status === "AGUARDANDO_RECEBIMENTO") {
             db.prepare("UPDATE part_requests SET status = 'INDICADA', updated_at = datetime('now') WHERE id = ?").run(a.partRequestId);
           }
         } else if (a.resultStatus === "PEDIR_PECA") {
-          if (part.status === "INDICADA") {
-            db.prepare("UPDATE part_requests SET status = 'PEDIR_PECA', updated_at = datetime('now') WHERE id = ?").run(a.partRequestId);
+          // Peça não alocada
+          if (activeOrderPartIds.has(a.partRequestId)) {
+            // Tem pedido ativo — manter/definir AGUARDANDO_RECEBIMENTO
+            if (part.status === "PEDIR_PECA" || part.status === "INDICADA") {
+              db.prepare("UPDATE part_requests SET status = 'AGUARDANDO_RECEBIMENTO', updated_at = datetime('now') WHERE id = ?").run(a.partRequestId);
+            }
+          } else {
+            // Sem pedido ativo — devolve para PEDIR_PECA se estava em INDICADA ou AGUARDANDO_RECEBIMENTO
+            if (part.status === "INDICADA" || part.status === "AGUARDANDO_RECEBIMENTO") {
+              db.prepare("UPDATE part_requests SET status = 'PEDIR_PECA', updated_at = datetime('now') WHERE id = ?").run(a.partRequestId);
+            }
           }
+        } else if (a.resultStatus === "VERIFICAR") {
+          // Mantém VERIFICAR — não promove nem regride
         }
       }
 
-      // Update workflow_status (do not demote APTO_REPARO/EM_SEPARACAO/DIRECIONADO_TECNICO etc.)
+      // Update workflow_status (do not demote APTO_REPARO/AGUARDANDO_RECEBIMENTO→PEDIR_PECA etc.)
+      // AGUARDANDO_RECEBIMENTO é bloqueado: só o recebimento real ou cancelamento de pedido o muda
       const lockedStatuses = new Set(["APTO_REPARO","EM_SEPARACAO","DIRECIONADO_TECNICO","EM_REPARO","REPARO_EXECUTADO","TRIAGEM_FINAL","RETORNO_TECNICO","CONCLUIDO","VENDA_ESTADO","CANCELADO"]);
+      // Não regredir AGUARDANDO_RECEBIMENTO para PEDIR_PECA enquanto há pedido ativo
+      if (dec.prevStatus === "AGUARDANDO_RECEBIMENTO" && dec.newStatus === "PEDIR_PECA") {
+        const caseHasActiveOrder = dec.parts.some(a => activeOrderPartIds.has(a.partRequestId));
+        if (caseHasActiveOrder) continue; // skip this case's workflow update
+      }
       if (!lockedStatuses.has(dec.prevStatus) && dec.prevStatus !== dec.newStatus) {
         db.prepare(
           "UPDATE repair_cases SET workflow_status = ?, updated_at = datetime('now') WHERE id = ?"

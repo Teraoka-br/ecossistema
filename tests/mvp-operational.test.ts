@@ -9,7 +9,7 @@ import {
   ensurePurchaseRequestForPart,
   PurchaseRequestLinkError,
 } from "../src/operational/purchase-request-service.js";
-import { createPurchaseOrder } from "../src/operational/procurement-service.js";
+import { createPurchaseOrder, cancelPurchaseOrder } from "../src/operational/procurement-service.js";
 import { applyAnaliseMiToRepairCases } from "../src/import-central/operational-sync-service.js";
 
 // ─── Helpers de setup ─────────────────────────────────────────────────────────
@@ -384,5 +384,87 @@ describe("migration 022 — índice uidx_pr_part_request_active", () => {
          VALUES ('X','Y','y','R','r',1,'PART_REQUEST','APPROVED',?,datetime('now'),datetime('now'))`,
       ).run(partId);
     }).not.toThrow();
+  });
+});
+
+// ─── 5. cancelPurchaseOrder — transacional ────────────────────────────────────
+
+let _poSeq = 0;
+function insertPurchaseOrder(db: Db, status = "AWAITING_RECEIPT"): number {
+  const res = db.prepare(
+    `INSERT INTO purchase_orders (order_number, status, created_at)
+     VALUES (?, ?, datetime('now'))`,
+  ).run(`PO-CANCEL-${++_poSeq}`, status);
+  return res.lastInsertRowid as number;
+}
+
+function insertPurchaseOrderItem(db: Db, orderId: number, purchaseRequestId: number | null): number {
+  const res = db.prepare(
+    `INSERT INTO purchase_order_items
+       (purchase_order_id, referencia, referencia_norm, chave_peca, chave_peca_norm,
+        quantity_ordered, quantity_received, purchase_request_id, created_at)
+     VALUES (?, 'REF-001', 'ref001', 'CHAVE-001', 'chave001', 1, 0, ?, datetime('now'))`,
+  ).run(orderId, purchaseRequestId ?? null);
+  return res.lastInsertRowid as number;
+}
+
+describe("cancelPurchaseOrder — transactional revert", () => {
+  let db: Db;
+  beforeEach(async () => { db = await createDb(); });
+
+  it("reverte purchase_request para APPROVED e part_request para PEDIR_PECA ao cancelar", () => {
+    const caseId = insertRepairCase(db, { workflow: "AGUARDANDO_RECEBIMENTO" });
+    const partId = insertPartRequest(db, caseId, { status: "AGUARDANDO_RECEBIMENTO" });
+    const prId = insertPurchaseRequest(db, { partRequestId: partId, status: "ORDERED" });
+    const orderId = insertPurchaseOrder(db);
+    insertPurchaseOrderItem(db, orderId, prId);
+
+    cancelPurchaseOrder(db, orderId, { cancelledBy: "admin", cancelReason: "Teste cancelamento" });
+
+    const pr = db.prepare("SELECT status FROM purchase_requests WHERE id = ?").get(prId) as { status: string };
+    expect(pr.status).toBe("APPROVED");
+
+    const part = db.prepare("SELECT status FROM part_requests WHERE id = ?").get(partId) as { status: string };
+    expect(part.status).toBe("PEDIR_PECA");
+
+    const rc = db.prepare("SELECT workflow_status FROM repair_cases WHERE id = ?").get(caseId) as { workflow_status: string };
+    expect(rc.workflow_status).toBe("PEDIR_PECA");
+  });
+
+  it("cancelamento idempotente: segunda chamada não lança erro", () => {
+    const orderId = insertPurchaseOrder(db, "CANCELLED");
+    expect(() => {
+      cancelPurchaseOrder(db, orderId, { cancelledBy: "admin", cancelReason: "Re-cancel" });
+    }).not.toThrow();
+  });
+
+  it("não regride repair_case se ainda há outra part_request AGUARDANDO_RECEBIMENTO no mesmo caso", () => {
+    // Caso com duas peças distintas; ao cancelar o pedido de uma, a outra ainda aguarda
+    const caseId = insertRepairCase(db, { workflow: "AGUARDANDO_RECEBIMENTO" });
+    const partId1 = insertPartRequest(db, caseId, { status: "AGUARDANDO_RECEBIMENTO", chave: "CHAVE-A", legacyId: "LP-A" });
+    const partId2 = insertPartRequest(db, caseId, { status: "AGUARDANDO_RECEBIMENTO", chave: "CHAVE-B", legacyId: "LP-B" });
+
+    const prId1 = insertPurchaseRequest(db, { partRequestId: partId1, status: "ORDERED", chave: "CHAVE-A" });
+    const prId2 = insertPurchaseRequest(db, { partRequestId: partId2, status: "ORDERED", chave: "CHAVE-B" });
+
+    const order1Id = insertPurchaseOrder(db);
+    insertPurchaseOrderItem(db, order1Id, prId1);
+
+    const order2Id = insertPurchaseOrder(db);
+    insertPurchaseOrderItem(db, order2Id, prId2);
+
+    // Cancela o pedido da peça 1 — peça 2 ainda tem pedido ativo
+    cancelPurchaseOrder(db, order1Id, { cancelledBy: "admin", cancelReason: "Cancelar primeiro pedido" });
+
+    // repair_case deve permanecer AGUARDANDO_RECEBIMENTO pois part 2 ainda aguarda
+    const rc = db.prepare("SELECT workflow_status FROM repair_cases WHERE id = ?").get(caseId) as { workflow_status: string };
+    expect(rc.workflow_status).toBe("AGUARDANDO_RECEBIMENTO");
+  });
+
+  it("não cancela pedido já totalmente recebido", () => {
+    const orderId = insertPurchaseOrder(db, "RECEIVED");
+    expect(() => {
+      cancelPurchaseOrder(db, orderId, { cancelledBy: "admin", cancelReason: "Tentativa inválida" });
+    }).toThrow();
   });
 });

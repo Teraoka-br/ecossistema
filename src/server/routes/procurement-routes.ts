@@ -111,7 +111,14 @@ procurementRouter.post("/purchase-orders/:id/cancel", (req, res) => {
   try {
     const id = idParam(req.params.id);
     const cancelledBy = req.sessionUser!.displayName;
-    res.json({ order: proc.cancelPurchaseOrder(getDb(), id, { ...parsed.data, cancelledBy }) });
+    const db = getDb();
+    const order = proc.cancelPurchaseOrder(db, id, { ...parsed.data, cancelledBy });
+    // Reprocessar motor após cancelamento para reclassificar casos afetados
+    import("../../match/engine-orchestrator.js").then(async ({ requestMatchRecompute, processPendingRecompute }) => {
+      requestMatchRecompute(db, `CANCEL_ORDER_${id}`, "purchase_order", id);
+      await processPendingRecompute(db);
+    }).catch(() => { /* motor não-crítico */ });
+    res.json({ order });
   } catch (err) {
     handleError(err, res);
   }

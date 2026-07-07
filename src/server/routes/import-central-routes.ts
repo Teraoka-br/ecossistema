@@ -239,26 +239,27 @@ importCentralRouter.post("/:source/confirm", requireAuth, requireAdmin, async (r
 
     // Aplicar sync operacional e coletar resultados — falha não desfaz a importação
     const sync: Record<string, unknown> = {};
+    const operationalErrors: string[] = [];
     let shouldTriggerMatch = false;
 
     if (importId) {
-      try {
-        if (source === "his") {
-          sync.his = applyHisToRepairCases(db, importId);
-          shouldTriggerMatch = true;
-        } else if (source === "rel-seriais") {
-          sync.relSeriais = applyRelSeriaisToRepairCases(db, importId);
-        } else if (source === "analise-mi") {
-          sync.analiseMi = applyAnaliseMiToRepairCases(db, importId);
-          shouldTriggerMatch = true;
-        } else if (source === "pedidos") {
-          try { sync.bipagem = applyBipagemToStock(db, importId); } catch (e) { sync.bipagemError = (e as Error).message; }
-          try { sync.peacs = applyPeacsToRepairCases(db); } catch (e) { sync.peacsError = (e as Error).message; }
-          try { sync.reconciliacao = applyPedidosReconciliation(db, importId); } catch (e) { sync.reconciliacaoError = (e as Error).message; }
-          shouldTriggerMatch = true;
-        }
-      } catch (syncErr) {
-        sync.syncError = (syncErr as Error).message;
+      if (source === "his") {
+        try { sync.his = applyHisToRepairCases(db, importId); shouldTriggerMatch = true; }
+        catch (e) { operationalErrors.push(`HIS sync: ${(e as Error).message}`); }
+      } else if (source === "rel-seriais") {
+        try { sync.relSeriais = applyRelSeriaisToRepairCases(db, importId); }
+        catch (e) { operationalErrors.push(`Rel. Seriais sync: ${(e as Error).message}`); }
+      } else if (source === "analise-mi") {
+        try { sync.analiseMi = applyAnaliseMiToRepairCases(db, importId); shouldTriggerMatch = true; }
+        catch (e) { operationalErrors.push(`Análise MI sync: ${(e as Error).message}`); }
+      } else if (source === "pedidos") {
+        try { sync.bipagem = applyBipagemToStock(db, importId); }
+        catch (e) { operationalErrors.push(`Bipagem: ${(e as Error).message}`); }
+        try { sync.peacs = applyPeacsToRepairCases(db); }
+        catch (e) { operationalErrors.push(`PEACS: ${(e as Error).message}`); }
+        try { sync.reconciliacao = applyPedidosReconciliation(db, importId); }
+        catch (e) { operationalErrors.push(`Reconciliação pedidos: ${(e as Error).message}`); }
+        shouldTriggerMatch = true;
       }
     }
 
@@ -286,7 +287,19 @@ importCentralRouter.post("/:source/confirm", requireAuth, requireAdmin, async (r
       }
     }
 
-    res.json({ ok: true, ...(result as object), sync, matchTriggered, matchExecuted, matchStats, matchError });
+    const operationalOk = operationalErrors.length === 0;
+    res.json({
+      ok: true,
+      importOk: true,
+      operationalOk,
+      operationalErrors: operationalOk ? undefined : operationalErrors,
+      ...(result as object),
+      sync,
+      matchTriggered,
+      matchExecuted,
+      matchStats,
+      matchError,
+    });
   } catch (err) {
     if (err instanceof ImportCentralError) {
       const status =

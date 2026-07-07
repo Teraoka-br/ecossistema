@@ -232,17 +232,89 @@ export interface CancelOrderInput {
   cancelReason: string;
 }
 
+const PRESERVED_CASE_STATUSES_CANCEL = new Set([
+  "RESERVADA","SEPARADA","CONSUMIDA","APTO_REPARO","DIRECIONADO_TECNICO","CONCLUIDO",
+]);
+
 export function cancelPurchaseOrder(db: Db, id: number, input: CancelOrderInput): PurchaseOrderWithItems {
   const order = getPurchaseOrder(db, id);
-  if (order.status === "CANCELLED") return order; // idempotente
+  if (order.status === "CANCELLED") return getPurchaseOrder(db, id); // idempotente
   if (order.status === "RECEIVED") {
     throw new ProcurementError(422, `Pedido ${order.order_number} já foi totalmente recebido — não pode ser cancelado.`);
   }
   const cancelledBy = requireNonEmpty(input.cancelledBy, "responsável");
   const cancelReason = requireNonEmpty(input.cancelReason, "motivo do cancelamento");
-  db.prepare(
-    `UPDATE purchase_orders SET status = 'CANCELLED', cancelled_at = datetime('now'), cancelled_by = ?, cancel_reason = ?
-     WHERE id = ?`,
-  ).run(cancelledBy, cancelReason, id);
-  return getPurchaseOrder(db, id);
+
+  db.exec("BEGIN");
+  try {
+    db.prepare(
+      `UPDATE purchase_orders SET status = 'CANCELLED', cancelled_at = datetime('now'), cancelled_by = ?, cancel_reason = ?
+       WHERE id = ?`,
+    ).run(cancelledBy, cancelReason, id);
+
+    // Reverter purchase_requests vinculadas a este pedido → APPROVED
+    const linkedRequests = db.prepare(
+      `SELECT purch.id AS purchaseRequestId, purch.part_request_id
+       FROM purchase_order_items poi
+       JOIN purchase_requests purch ON purch.id = poi.purchase_request_id
+       WHERE poi.purchase_order_id = ? AND purch.status = 'ORDERED'`,
+    ).all(id) as { purchaseRequestId: number; part_request_id: number | null }[];
+
+    for (const lr of linkedRequests) {
+      db.prepare(
+        "UPDATE purchase_requests SET status = 'APPROVED', updated_at = datetime('now') WHERE id = ?",
+      ).run(lr.purchaseRequestId);
+
+      if (lr.part_request_id == null) continue;
+
+      // Verificar se a part_request tem outro pedido ativo antes de regredir
+      const otherActive = (db.prepare(
+        `SELECT COUNT(*) AS c
+         FROM purchase_order_items poi2
+         JOIN purchase_requests purch2 ON purch2.id = poi2.purchase_request_id
+         JOIN purchase_orders po2 ON po2.id = poi2.purchase_order_id
+         WHERE purch2.part_request_id = ?
+           AND poi2.purchase_order_id != ?
+           AND purch2.status = 'ORDERED'
+           AND po2.status IN ('AWAITING_RECEIPT','PARTIALLY_RECEIVED')`,
+      ).get(lr.part_request_id, id) as { c: number }).c;
+
+      if (otherActive > 0) continue;
+
+      // Sem outro pedido ativo: regredir part_request → PEDIR_PECA se estava AGUARDANDO_RECEBIMENTO
+      db.prepare(
+        `UPDATE part_requests SET status = 'PEDIR_PECA', updated_at = datetime('now')
+         WHERE id = ? AND status = 'AGUARDANDO_RECEBIMENTO'`,
+      ).run(lr.part_request_id);
+
+      // Regredir repair_case se estava AGUARDANDO_RECEBIMENTO e não há mais peças esperando
+      const prRow = db.prepare(
+        "SELECT repair_case_id FROM part_requests WHERE id = ?",
+      ).get(lr.part_request_id) as { repair_case_id: number | null } | undefined;
+      if (!prRow?.repair_case_id) continue;
+
+      const caseId = prRow.repair_case_id;
+      const stillWaiting = (db.prepare(
+        `SELECT COUNT(*) AS c FROM part_requests
+         WHERE repair_case_id = ? AND status = 'AGUARDANDO_RECEBIMENTO' AND cancelled_at IS NULL`,
+      ).get(caseId) as { c: number }).c;
+
+      if (stillWaiting > 0) continue;
+
+      const caseStatus = (db.prepare(
+        "SELECT workflow_status FROM repair_cases WHERE id = ?",
+      ).get(caseId) as { workflow_status: string } | undefined)?.workflow_status;
+      if (caseStatus && !PRESERVED_CASE_STATUSES_CANCEL.has(caseStatus)) {
+        db.prepare(
+          `UPDATE repair_cases SET workflow_status = 'PEDIR_PECA', updated_at = datetime('now') WHERE id = ?`,
+        ).run(caseId);
+      }
+    }
+
+    db.exec("COMMIT");
+    return getPurchaseOrder(db, id);
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }

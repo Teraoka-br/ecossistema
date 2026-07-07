@@ -15,6 +15,10 @@ interface PartInfo {
   reservationId: number | null;
   matchResultStatus: string | null;
   allocatedReference: string | null;
+  activePurchaseRequestId: number | null;
+  purchaseRequestStatus: string | null;
+  activePurchaseOrderId: number | null;
+  purchaseOrderStatus: string | null;
 }
 
 interface CaseDetail {
@@ -38,6 +42,8 @@ interface CaseDetail {
   technician: { id: number; name: string } | null;
   directedTechnician: { id: number; name: string } | null;
   history: Array<{ id: number; event_type: string; created_at: string; created_by?: string }>;
+  purchasablePartsCount: number;
+  partsAlreadyInPurchaseCount: number;
 }
 
 interface RepairDrawerProps {
@@ -314,18 +320,25 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                 </div>
               )}
 
-              {/* Incluir em compra — visível quando status = PEDIR_PECA */}
-              {data.workflowStatus === "PEDIR_PECA" && (
-                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: "0.6rem 0", borderBottom: "1px solid var(--border)" }}>
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={handleAddToPurchase}
-                    disabled={addingToPurchase}
-                    style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}
-                  >
-                    {addingToPurchase ? <Loader2 size={13} className="spin" /> : <ShoppingCart size={13} />}
-                    Incluir em compra
-                  </button>
+              {/* Incluir em compra — visível quando há peças pendentes sem ou com compra ativa */}
+              {(data.purchasablePartsCount > 0 || data.partsAlreadyInPurchaseCount > 0) && (
+                <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: "0.6rem 0", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
+                  {data.purchasablePartsCount > 0 ? (
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={handleAddToPurchase}
+                      disabled={addingToPurchase}
+                      style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}
+                    >
+                      {addingToPurchase ? <Loader2 size={13} className="spin" /> : <ShoppingCart size={13} />}
+                      Incluir em compra
+                    </button>
+                  ) : (
+                    <span style={{ fontSize: "0.82rem", color: "var(--muted)", display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                      <ShoppingCart size={13} />
+                      Peças faltantes já incluídas em compra
+                    </span>
+                  )}
                   {purchaseMsg && <span style={{ fontSize: "0.8rem", color: "var(--success)" }}>{purchaseMsg}</span>}
                 </div>
               )}
@@ -350,6 +363,16 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                       {p.matchResultStatus === "MATCH_PARCIAL" && <Package size={13} style={{ color: "var(--warning)" }} />}
                       {p.matchResultStatus === "PEDIR_PECA" && <AlertTriangle size={13} style={{ color: "var(--muted)" }} />}
                       <span>{p.status}</span>
+                      {p.activePurchaseRequestId != null && (
+                        <span style={{ fontSize: "0.72rem", padding: "1px 5px", borderRadius: "4px",
+                          background: p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED"
+                            ? "var(--warning-subtle, rgba(234,179,8,0.15))" : "var(--accent-subtle, rgba(99,102,241,0.1))",
+                          color: p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED"
+                            ? "var(--warning)" : "var(--accent)" }}>
+                          {p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED"
+                            ? "Em pedido" : "Em compra"}
+                        </span>
+                      )}
                     </div>
                     {p.reservationId !== null && (
                       <button

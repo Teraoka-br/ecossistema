@@ -326,6 +326,7 @@ function PendingDrawer({
   const [selected, setSelected] = useState<{ entry: StagingEntry; preview: PreviewResult } | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
+  const [operationalWarnings, setOperationalWarnings] = useState<string[] | null>(null);
 
   function load() {
     setEntries(null);
@@ -344,6 +345,7 @@ function PendingDrawer({
       const preview = JSON.parse(entry.previewJson) as PreviewResult;
       setSelected({ entry, preview });
       setConfirmError(null);
+      setOperationalWarnings(null);
     } catch { setError("Preview inválido."); }
   }
 
@@ -351,16 +353,22 @@ function PendingDrawer({
     if (!selected) return;
     setConfirming(true);
     setConfirmError(null);
+    setOperationalWarnings(null);
     try {
       const r = await fetch(`/api/import-central/${source}/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ stagingId: selected.entry.id }),
       });
-      const data = await r.json() as { ok?: boolean; error?: string };
+      const data = await r.json() as { ok?: boolean; error?: string; operationalOk?: boolean; operationalErrors?: string[] };
       if (!r.ok) { setConfirmError(data.error ?? "Falha ao confirmar."); return; }
       onConfirmed();
-      onClose();
+      if (data.operationalOk === false && data.operationalErrors?.length) {
+        setOperationalWarnings(data.operationalErrors);
+        // Não fecha: importação ok, mas sync operacional falhou — usuário deve ver os erros
+      } else {
+        onClose();
+      }
     } catch { setConfirmError("Erro de rede ao confirmar."); }
     finally { setConfirming(false); }
   }
@@ -466,6 +474,14 @@ function PendingDrawer({
               )}
 
               {confirmError && <p style={{ color: "var(--color-danger)", fontSize: 12 }}>{confirmError}</p>}
+              {operationalWarnings && (
+                <div style={{ background: "var(--color-warning-subtle, rgba(234,179,8,0.1))", border: "1px solid var(--color-warning)", borderRadius: 4, padding: "8px 10px", fontSize: 12 }}>
+                  <strong style={{ color: "var(--color-warning)" }}>Importação concluída, mas o sync operacional encontrou erros:</strong>
+                  <ul style={{ margin: "4px 0 0 14px", padding: 0 }}>
+                    {operationalWarnings.map((w, i) => <li key={i}>{w}</li>)}
+                  </ul>
+                </div>
+              )}
 
               <div style={{ display: "flex", gap: 8, marginTop: "auto" }}>
                 <button className="btn btn-secondary btn-sm" onClick={() => { handleCancel(selected.entry.id); setSelected(null); }}>Cancelar staging</button>
@@ -554,11 +570,12 @@ function UploadDialog({
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [step, setStep] = useState<"upload" | "preview" | "confirming" | "done" | "error">("upload");
+  const [step, setStep] = useState<"upload" | "preview" | "confirming" | "done" | "done_with_errors" | "error">("upload");
   const [preview, setPreview]       = useState<PreviewResult | null>(null);
   const [uploading, setUploading]   = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [errorMsg, setErrorMsg]     = useState<string | null>(null);
+  const [operationalErrors, setOperationalErrors] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function handleFileSelect(file: File) {
@@ -593,14 +610,20 @@ function UploadDialog({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ stagingId: preview.stagingId }),
       });
-      const data = await r.json() as { ok?: boolean; error?: string };
+      const data = await r.json() as { ok?: boolean; error?: string; operationalOk?: boolean; operationalErrors?: string[] };
       if (!r.ok) {
         setErrorMsg(data.error ?? "Falha ao confirmar importação.");
         setStep("error");
         return;
       }
+      onDone();
+      if (data.operationalOk === false && data.operationalErrors?.length) {
+        setOperationalErrors(data.operationalErrors);
+        setStep("done_with_errors");
+        return;
+      }
       setStep("done");
-      setTimeout(() => { onDone(); onClose(); }, 1500);
+      setTimeout(() => { onClose(); }, 1500);
     } catch {
       setErrorMsg("Erro de rede ao confirmar.");
       setStep("error");
@@ -748,6 +771,21 @@ function UploadDialog({
             </div>
           )}
 
+          {step === "done_with_errors" && (
+            <div style={{ padding: 24 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                <CheckCircle2 size={28} style={{ color: "var(--color-success)", flexShrink: 0 }} />
+                <p style={{ fontWeight: 600, margin: 0 }}>Importação concluída</p>
+              </div>
+              <div style={{ background: "var(--color-warning-subtle, rgba(234,179,8,0.1))", border: "1px solid var(--color-warning)", borderRadius: 4, padding: "8px 12px", fontSize: 13 }}>
+                <strong style={{ color: "var(--color-warning)" }}>Sync operacional com erros:</strong>
+                <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
+                  {operationalErrors.map((e, i) => <li key={i}>{e}</li>)}
+                </ul>
+              </div>
+            </div>
+          )}
+
           {step === "error" && (
             <div style={{ textAlign: "center", padding: 24 }}>
               <XCircle size={40} style={{ color: "var(--color-danger)", marginBottom: 12 }} />
@@ -757,10 +795,10 @@ function UploadDialog({
           )}
         </div>
 
-        {(step === "preview" || step === "error") && (
+        {(step === "preview" || step === "error" || step === "done_with_errors") && (
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "12px 20px", borderTop: "1px solid var(--color-border)" }}>
             <button className="btn btn-secondary btn-sm" onClick={handleCancel}>
-              {step === "error" ? "Fechar" : "Cancelar"}
+              {step === "error" || step === "done_with_errors" ? "Fechar" : "Cancelar"}
             </button>
             {step === "preview" && !preview?.alreadyImported && (
               <button

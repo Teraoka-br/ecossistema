@@ -114,16 +114,51 @@ export function confirmReceipt(db: Db, orderId: number, input: ConfirmReceiptInp
     }
   }
 
-  // Validação de chave contra o catálogo operacional (quando a chave existir).
+  // Validação de chave:
+  // - item vinculado a purchase_request com part_request_id: validar via part_request (não catálogo)
+  // - item avulso (sem vínculo): manter validação contra catálogo operacional
   const batchId = operationalBatchId(db);
   for (const line of preview.lines) {
     const poItem = poItemOrThrow(order, line.purchaseOrderItemId);
-    if (poItem.chave_peca_norm && batchId !== null && !catalogHasKey(db, batchId, poItem.chave_peca_norm)) {
-      throw new ProcurementError(
-        422,
-        `CHAVEPECA "${poItem.chave_peca}" do item ${poItem.id} não existe no catálogo operacional.`,
-        { code: "UNKNOWN_KEY", purchaseOrderItemId: poItem.id },
-      );
+    if (!poItem.chave_peca_norm) continue; // sem chave: sem validação
+
+    // Tentar resolver vínculo part_request
+    const partRequest = poItem.purchase_request_id != null
+      ? (db.prepare(
+          `SELECT pr.id, pr.chave_peca_norm, pr.status
+           FROM purchase_requests purch
+           JOIN part_requests pr ON pr.id = purch.part_request_id
+           WHERE purch.id = ? AND purch.part_request_id IS NOT NULL`,
+        ).get(poItem.purchase_request_id) as { id: number; chave_peca_norm: string | null; status: string } | undefined)
+      : undefined;
+
+    if (partRequest) {
+      // Fluxo vinculado: validar contra a part_request
+      if (partRequest.status === "CANCELADA") {
+        throw new ProcurementError(
+          422,
+          `A solicitação de peça vinculada ao item ${poItem.id} está cancelada.`,
+          { code: "PART_CANCELLED", purchaseOrderItemId: poItem.id },
+        );
+      }
+      // A chave do item deve corresponder à da part_request (quando a part_request tem chave)
+      if (partRequest.chave_peca_norm && partRequest.chave_peca_norm !== poItem.chave_peca_norm) {
+        throw new ProcurementError(
+          422,
+          `A CHAVEPECA do item (${poItem.chave_peca}) não corresponde à solicitação vinculada.`,
+          { code: "KEY_MISMATCH", purchaseOrderItemId: poItem.id },
+        );
+      }
+      // Chave nova (não existe no catálogo): permitido por vínculo explícito
+    } else {
+      // Fluxo legado / avulso: exige chave no catálogo operacional
+      if (batchId !== null && !catalogHasKey(db, batchId, poItem.chave_peca_norm)) {
+        throw new ProcurementError(
+          422,
+          `CHAVEPECA "${poItem.chave_peca}" do item ${poItem.id} não existe no catálogo operacional.`,
+          { code: "UNKNOWN_KEY", purchaseOrderItemId: poItem.id },
+        );
+      }
     }
   }
 

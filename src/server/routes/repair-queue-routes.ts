@@ -185,11 +185,41 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
       }
     }
 
+    // Enriquecer cada part_request com informações de compra ativa
+    const purchaseInfoRows = db.prepare(`
+      SELECT
+        purch.part_request_id,
+        purch.id          AS purchase_request_id,
+        purch.status      AS purchase_request_status,
+        po.id             AS purchase_order_id,
+        po.status         AS purchase_order_status
+      FROM purchase_requests purch
+      LEFT JOIN purchase_order_items poi ON poi.purchase_request_id = purch.id
+      LEFT JOIN purchase_orders po ON po.id = poi.purchase_order_id
+      WHERE purch.part_request_id IN (${rc.parts.map(() => "?").join(",")})
+        AND purch.status IN ('APPROVED','ORDERED')
+      ORDER BY purch.id DESC
+    `).all(...rc.parts.map(p => p.id)) as Array<{
+      part_request_id: number;
+      purchase_request_id: number;
+      purchase_request_status: string;
+      purchase_order_id: number | null;
+      purchase_order_status: string | null;
+    }>;
+
+    const purchaseByPart = new Map<number, typeof purchaseInfoRows[number]>();
+    for (const row of purchaseInfoRows) {
+      if (!purchaseByPart.has(row.part_request_id)) {
+        purchaseByPart.set(row.part_request_id, row);
+      }
+    }
+
     // Enrich parts with availability
     const partsEnriched = rc.parts.map(p => {
       const reserved = reservations.find(r => r.partRequestId === p.id && r.status === "ACTIVE");
       const available = p.chavePecaNorm ? (stockMap.get(p.chavePecaNorm) ?? 0) : 0;
       const matchResult = matchResults.find(mr => mr.part_request_id === p.id);
+      const purchInfo = purchaseByPart.get(p.id);
       return {
         ...p,
         availableQty: available,
@@ -197,8 +227,20 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
         reservationId: reserved?.id ?? null,
         matchResultStatus: matchResult?.result_status ?? null,
         allocatedReference: matchResult?.allocated_reference ?? null,
+        activePurchaseRequestId: purchInfo?.purchase_request_id ?? null,
+        purchaseRequestStatus: purchInfo?.purchase_request_status ?? null,
+        activePurchaseOrderId: purchInfo?.purchase_order_id ?? null,
+        purchaseOrderStatus: purchInfo?.purchase_order_status ?? null,
       };
     });
+
+    // Resumo de compra para o drawer
+    const purchasableParts = partsEnriched.filter(
+      p => p.status === "PEDIR_PECA" && p.activePurchaseRequestId == null,
+    );
+    const alreadyInPurchase = partsEnriched.filter(
+      p => p.status === "PEDIR_PECA" && p.activePurchaseRequestId != null,
+    );
 
     // History
     const history = db.prepare(`
@@ -223,6 +265,8 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
       history,
       technician,
       directedTechnician,
+      purchasablePartsCount: purchasableParts.length,
+      partsAlreadyInPurchaseCount: alreadyInPurchase.length,
     });
   } catch (err) {
     next(err);
