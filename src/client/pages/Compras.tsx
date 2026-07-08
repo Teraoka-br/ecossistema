@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   cancelPurchaseOrder, confirmReceipt, createPurchaseOrder,
-  getPurchaseOrders, getPurchaseRequests, previewReceipt,
-  type PurchaseOrder, type PurchaseRequest, type ReceivePreviewLine,
+  getPurchaseOrders, getPurchaseRequests,
+  type PurchaseOrder, type PurchaseRequest,
 } from "../api.js";
 import { ErrorBanner, Loading, fmtInt, fmtMoney } from "../ui.js";
 import { ShoppingCart, Package, CheckCircle2, X, Loader2, RefreshCw } from "lucide-react";
@@ -297,47 +297,68 @@ function AguardandoTab({
   );
 }
 
+function lineStatus(it: PurchaseOrder["items"][number], qty: number): { label: string; color: string } {
+  const saldo = it.quantity_ordered - it.quantity_received;
+  if (qty === 0) return { label: "sem recebimento", color: "var(--text-muted, #888)" };
+  if (qty > saldo) return { label: "excedente", color: "var(--err-text, #f87171)" };
+  if (qty === saldo) return { label: "completo", color: "var(--ok-text, #34d399)" };
+  return { label: "parcial", color: "var(--warn-text, #fbbf24)" };
+}
+
 function ReceberModal({
   order, onClose, onDone,
 }: { order: PurchaseOrder; onClose: () => void; onDone: () => void }) {
+  const remaining = (it: PurchaseOrder["items"][number]) => Math.max(0, it.quantity_ordered - it.quantity_received);
+
   const [quantities, setQuantities] = useState<Record<number, number>>(() => {
     const init: Record<number, number> = {};
-    for (const it of order.items) init[it.id] = Math.max(0, it.quantity_ordered - it.quantity_received);
+    for (const it of order.items) init[it.id] = remaining(it);
     return init;
   });
-  const [preview, setPreview] = useState<ReceivePreviewLine[] | null>(null);
   const [allowOverReceipt, setAllowOverReceipt] = useState(false);
   const [justification, setJustification] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [confirmed, setConfirmed] = useState<{ unitsReceived: number } | null>(null);
+  const [confirmed, setConfirmed] = useState<{ unitsReceived: number; matchStats?: { fullKitsFound: number; partialKitsFound: number; casesChanged: number } } | null>(null);
 
   const items = useMemo(
     () => order.items.filter((it) => quantities[it.id] > 0).map((it) => ({ purchaseOrderItemId: it.id, quantity: quantities[it.id] })),
     [order.items, quantities],
   );
 
-  async function doPreview() {
-    setError(null); setBusy(true);
-    try { setPreview((await previewReceipt(order.id, items)).lines); }
-    catch (e) { setError((e as Error).message); }
-    finally { setBusy(false); }
+  const anyOver = order.items.some((it) => (quantities[it.id] ?? 0) > remaining(it));
+
+  function receberSaldo() {
+    const next: Record<number, number> = {};
+    for (const it of order.items) next[it.id] = remaining(it);
+    setQuantities(next);
+  }
+  function zerarTudo() {
+    const next: Record<number, number> = {};
+    for (const it of order.items) next[it.id] = 0;
+    setQuantities(next);
   }
 
   async function doConfirm() {
+    if (anyOver && (!allowOverReceipt || justification.trim().length < 10)) {
+      setError("Excedente detectado: marque a opção e informe justificativa (mín. 10 caracteres).");
+      return;
+    }
     setBusy(true); setError(null);
     try {
       const result = await confirmReceipt(order.id, { allowOverReceipt, justification: justification || null, items });
-      setConfirmed({ unitsReceived: result.unitsReceived });
+      setConfirmed({
+        unitsReceived: result.unitsReceived,
+        matchStats: (result as Record<string, unknown>).matchStats as { fullKitsFound: number; partialKitsFound: number; casesChanged: number } | undefined,
+      });
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }
 
-  const anyOver = preview?.some((l) => l.over) ?? false;
-
   return (
     <div
       className="modal-overlay"
+      onClick={onClose}
       style={{
         position: "fixed", inset: 0, zIndex: 1000,
         background: "rgba(0,0,0,0.55)", display: "flex",
@@ -346,66 +367,102 @@ function ReceberModal({
     >
       <div
         className="modal"
+        onClick={(e) => e.stopPropagation()}
         style={{
-          width: "min(680px, 100%)", maxHeight: "92vh",
+          width: "min(1100px, calc(100vw - 2rem))", maxHeight: "92vh",
           display: "flex", flexDirection: "column", overflow: "hidden",
         }}
       >
-        <div style={{ padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-          <h3 style={{ margin: 0 }}>Receber pedido {order.order_number}</h3>
+        {/* Header fixo */}
+        <div style={{ padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", alignItems: "center", gap: "1rem" }}>
+          <div style={{ flex: 1 }}>
+            <h3 style={{ margin: 0 }}>Receber pedido {order.order_number}</h3>
+            {order.supplier && <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{order.supplier}</div>}
+          </div>
+          {!confirmed && (
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <button className="btn btn-ghost btn-sm" onClick={receberSaldo} disabled={busy}>Receber saldo</button>
+              <button className="btn btn-ghost btn-sm" onClick={zerarTudo} disabled={busy}>Zerar tudo</button>
+            </div>
+          )}
         </div>
 
-        {/* Área scrollável */}
+        {/* Corpo rolável */}
         <div style={{ overflowY: "auto", flex: 1, padding: "1rem 1.25rem" }}>
           {error && <ErrorBanner message={error} />}
           {confirmed ? (
-            <div style={{
-              background: "var(--ok-dim)", border: "1px solid rgba(16,185,129,0.3)",
-              borderRadius: "var(--r-md)", padding: "1rem", color: "var(--ok-text)",
-            }}>
-              <CheckCircle2 size={16} style={{ display: "inline", marginRight: 6 }} />
-              Recebimento confirmado. <strong>{confirmed.unitsReceived}</strong> unidade{confirmed.unitsReceived !== 1 ? "s" : ""} adicionada{confirmed.unitsReceived !== 1 ? "s" : ""} ao estoque.
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+              <div style={{
+                background: "var(--ok-dim)", border: "1px solid rgba(16,185,129,0.3)",
+                borderRadius: "var(--r-md)", padding: "1rem", color: "var(--ok-text)",
+              }}>
+                <CheckCircle2 size={16} style={{ display: "inline", marginRight: 6 }} />
+                Recebimento confirmado. <strong>{confirmed.unitsReceived}</strong> unidade{confirmed.unitsReceived !== 1 ? "s" : ""} adicionada{confirmed.unitsReceived !== 1 ? "s" : ""} ao estoque.
+              </div>
+              {confirmed.matchStats && (
+                <div style={{ fontSize: "0.82rem", color: "var(--text-muted)", padding: "0.5rem 0.75rem", background: "var(--surface-subtle, rgba(99,102,241,0.06))", borderRadius: "var(--r-md)" }}>
+                  Motor executado — MATCH: <strong>{confirmed.matchStats.fullKitsFound}</strong> · Parcial: <strong>{confirmed.matchStats.partialKitsFound}</strong> · Casos atualizados: <strong>{confirmed.matchStats.casesChanged}</strong>
+                </div>
+              )}
             </div>
           ) : (
             <>
-              <div className="table-wrap" style={{ marginBottom: "0.75rem" }}>
-                <table>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
                   <thead>
-                    <tr>
-                      <th>Referência</th><th>Chave</th>
-                      <th className="num">Pedido</th><th className="num">Recebido</th>
-                      <th className="num">Saldo</th><th className="num">Agora</th>
+                    <tr style={{ position: "sticky", top: 0, background: "var(--surface, #1e1e2e)", zIndex: 1 }}>
+                      <th style={{ textAlign: "left", padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)", minWidth: 120 }}>Referência</th>
+                      <th style={{ textAlign: "left", padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)", minWidth: 200, maxWidth: 320 }}>Chave da peça</th>
+                      <th style={{ textAlign: "right", padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)", width: 70 }}>Pedido</th>
+                      <th style={{ textAlign: "right", padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)", width: 80 }}>Recebido</th>
+                      <th style={{ textAlign: "right", padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)", width: 70 }}>Saldo</th>
+                      <th style={{ textAlign: "right", padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)", width: 100 }}>Recebendo</th>
+                      <th style={{ textAlign: "left", padding: "0.5rem 0.75rem", borderBottom: "1px solid var(--border)", width: 110 }}>Status</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {order.items.map((it) => (
-                      <tr key={it.id}>
-                        <td className="mono">{it.referencia}</td>
-                        <td className="small">{it.chave_peca ?? "—"}</td>
-                        <td className="num">{it.quantity_ordered}</td>
-                        <td className="num">{it.quantity_received}</td>
-                        <td className="num">{it.quantity_ordered - it.quantity_received}</td>
-                        <td className="num">
-                          <input type="number" min={0} style={{ width: "5rem" }}
-                            value={quantities[it.id] ?? 0}
-                            onChange={(e) => setQuantities((prev) => ({ ...prev, [it.id]: Number(e.target.value) }))}
-                          />
-                        </td>
-                      </tr>
-                    ))}
+                    {order.items.map((it) => {
+                      const qty = quantities[it.id] ?? 0;
+                      const saldo = remaining(it);
+                      const st = lineStatus(it, qty);
+                      return (
+                        <tr key={it.id} style={{ borderBottom: "1px solid var(--border-subtle, rgba(255,255,255,0.05))" }}>
+                          <td style={{ padding: "0.5rem 0.75rem", fontFamily: "monospace", fontSize: "0.8rem", whiteSpace: "nowrap" }}>{it.referencia}</td>
+                          <td style={{ padding: "0.5rem 0.75rem", fontSize: "0.8rem", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={it.chave_peca ?? undefined}>{it.chave_peca ?? <span style={{ color: "var(--text-muted)" }}>—</span>}</td>
+                          <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>{it.quantity_ordered}</td>
+                          <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>{it.quantity_received}</td>
+                          <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", color: saldo === 0 ? "var(--ok-text)" : undefined }}>{saldo}</td>
+                          <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>
+                            <input
+                              type="number" min={0}
+                              style={{ width: "5.5rem", textAlign: "right" }}
+                              value={qty}
+                              onChange={(e) => setQuantities((prev) => ({ ...prev, [it.id]: Math.max(0, Number(e.target.value)) }))}
+                            />
+                          </td>
+                          <td style={{ padding: "0.5rem 0.75rem", fontSize: "0.75rem", color: st.color, fontWeight: qty > 0 ? 500 : undefined }}>{st.label}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
 
-              {anyOver && preview && (
-                <div style={{ background: "var(--warn-dim)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: "var(--r-md)", padding: "0.75rem 1rem", marginBottom: "0.75rem", fontSize: "0.82rem", color: "var(--warn-text)" }}>
-                  Recebimento acima do saldo detectado.
+              {anyOver && (
+                <div style={{ marginTop: "0.75rem", background: "var(--warn-dim)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: "var(--r-md)", padding: "0.75rem 1rem", fontSize: "0.82rem", color: "var(--warn-text)" }}>
+                  ⚠ Recebimento acima do saldo detectado em um ou mais itens.
                   <div style={{ marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.82rem" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
                       <input type="checkbox" checked={allowOverReceipt} onChange={(e) => setAllowOverReceipt(e.target.checked)} />
                       Permitir recebimento acima do pedido
                     </label>
-                    <input value={justification} onChange={(e) => setJustification(e.target.value)} placeholder="Justificativa (mín. 10 caracteres)" />
+                    <input
+                      className="input"
+                      value={justification}
+                      onChange={(e) => setJustification(e.target.value)}
+                      placeholder="Justificativa obrigatória (mín. 10 caracteres)"
+                      style={{ fontSize: "0.82rem" }}
+                    />
                   </div>
                 </div>
               )}
@@ -413,17 +470,20 @@ function ReceberModal({
           )}
         </div>
 
-        {/* Rodapé fixo sempre visível */}
+        {/* Footer fixo */}
         <div className="modal-actions" style={{ borderTop: "1px solid var(--border)", padding: "0.75rem 1.25rem", flexShrink: 0 }}>
           {confirmed ? (
-            <button className="btn btn-secondary btn-sm" onClick={onDone}>Fechar</button>
+            <button className="btn btn-secondary btn-sm" onClick={onDone}>Fechar e atualizar</button>
           ) : (
             <>
-              <button className="btn btn-secondary btn-sm" onClick={doPreview} disabled={busy}>
-                Pré-visualizar
-              </button>
+              <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{items.length} item(ns) · {items.reduce((s, i) => s + i.quantity, 0)} unidade(s)</span>
+              <span style={{ flex: 1 }} />
               <button className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>Cancelar</button>
-              <button className="btn btn-primary btn-sm" onClick={doConfirm} disabled={busy || items.length === 0}>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={doConfirm}
+                disabled={busy || items.length === 0 || (anyOver && (!allowOverReceipt || justification.trim().length < 10))}
+              >
                 {busy ? <><Loader2 size={12} className="spin" /> Confirmando…</> : "Confirmar recebimento"}
               </button>
             </>

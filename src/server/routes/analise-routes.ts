@@ -198,16 +198,25 @@ analiseRouter.get("/part-suggestions", requireAuth, (req, res, next) => {
     const db = getDb();
     const pattern = `%${q.toUpperCase()}%`;
 
-    // Apenas peca_nome (nome base da peça) — nunca CHAVEPECAs completas
+    // Nome base da peça: peca_nome preferido, description como fallback (registros legados)
     const fromParts = db.prepare(
-      `SELECT DISTINCT peca_nome AS name FROM part_requests
-       WHERE peca_nome IS NOT NULL AND upper(peca_nome) LIKE ? LIMIT 15`,
+      `SELECT DISTINCT COALESCE(peca_nome, description) AS name
+       FROM part_requests
+       WHERE COALESCE(peca_nome, description) IS NOT NULL
+         AND upper(COALESCE(peca_nome, description)) LIKE ?
+       LIMIT 20`,
+    ).all(pattern) as { name: string }[];
+
+    // Complementar com peca_solicitada da Análise MI
+    const fromMi = db.prepare(
+      `SELECT DISTINCT peca_solicitada AS name FROM analise_mi_rows
+       WHERE peca_solicitada IS NOT NULL AND upper(peca_solicitada) LIKE ? LIMIT 10`,
     ).all(pattern) as { name: string }[];
 
     const seen = new Set<string>();
     const suggestions: string[] = [];
-    for (const { name } of fromParts) {
-      const trimmed = name.trim();
+    for (const { name } of [...fromParts, ...fromMi]) {
+      const trimmed = name.trim().toUpperCase();
       if (trimmed && !seen.has(trimmed)) { seen.add(trimmed); suggestions.push(trimmed); }
       if (suggestions.length >= 15) break;
     }

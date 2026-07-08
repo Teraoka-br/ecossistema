@@ -555,9 +555,14 @@ export function startRepair(
   }
 
   db.prepare(`
-    UPDATE repair_cases SET workflow_status = 'EM_REPARO', updated_at = datetime('now'), updated_by_user_id = ?
+    UPDATE repair_cases SET
+      workflow_status = 'EM_REPARO',
+      repair_started_at = datetime('now'),
+      repair_started_by_user_id = ?,
+      updated_at = datetime('now'),
+      updated_by_user_id = ?
     WHERE id = ?
-  `).run(params.userId ?? null, repairCaseId);
+  `).run(params.userId ?? null, params.userId ?? null, repairCaseId);
 
   recordOperationalEvent(db, {
     repairCaseId,
@@ -625,9 +630,14 @@ export function completeRepair(
     }
 
     db.prepare(`
-      UPDATE repair_cases SET workflow_status = 'REPARO_EXECUTADO', updated_at = datetime('now'), updated_by_user_id = ?
+      UPDATE repair_cases SET
+        workflow_status = 'REPARO_EXECUTADO',
+        repair_completed_at = datetime('now'),
+        repair_completed_by_user_id = ?,
+        updated_at = datetime('now'),
+        updated_by_user_id = ?
       WHERE id = ?
-    `).run(params.userId ?? null, repairCaseId);
+    `).run(params.userId ?? null, params.userId ?? null, repairCaseId);
 
     recordOperationalEvent(db, {
       repairCaseId,
