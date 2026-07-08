@@ -78,7 +78,7 @@ export function getPrefill(db: Db, query: string): PrefillResult {
       shRow = db
         .prepare(
           `SELECT os_raw, imei_raw, marca, modelo, cor, defeito, obs_servico
-           FROM sh_os_current WHERE os_norm = ? LIMIT 1`,
+           FROM sh_os_current WHERE os_norm = ? ORDER BY id DESC LIMIT 1`,
         )
         .get(osNorm) as Record<string, unknown> | undefined;
     }

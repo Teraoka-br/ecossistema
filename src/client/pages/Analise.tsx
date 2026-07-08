@@ -28,7 +28,14 @@ interface PartDraft {
   key: string;
   pecaNome: string;
   incluirCor: boolean;
+  /** Quando true, pecaNome já é o CHAVEPECA completo — não concatenar modelo */
+  isChavePecaExistente?: boolean;
   // cor é sempre a do aparelho — não editável por peça
+}
+
+interface PartSuggestion {
+  text: string;
+  type: "nome" | "chave";
 }
 
 interface SavedCase {
@@ -134,7 +141,7 @@ export function Analise() {
   const [savedCase, setSavedCase] = useState<SavedCase | null>(null);
 
   // Part suggestions
-  const [partSuggestions, setPartSuggestions] = useState<string[]>([]);
+  const [partSuggestions, setPartSuggestions] = useState<PartSuggestion[]>([]);
   const [activeSuggestKey, setActiveSuggestKey] = useState<string | null>(null);
 
   // ---------------------------------------------------------------------------
@@ -250,7 +257,7 @@ export function Analise() {
     if (pecaNome.length < 2) { setPartSuggestions([]); setActiveSuggestKey(null); return; }
     const r = await fetch(`/api/analise/part-suggestions?q=${encodeURIComponent(pecaNome)}`).catch(() => null);
     if (!r?.ok) return;
-    const d = await r.json() as { suggestions: string[] };
+    const d = await r.json() as { suggestions: PartSuggestion[] };
     setPartSuggestions(d.suggestions);
     setActiveSuggestKey(partKey);
   }, []);
@@ -273,11 +280,14 @@ export function Analise() {
 
     try {
       // modelo sempre vem dos dados do aparelho — nunca da peça individualmente
+      // se isChavePecaExistente, pecaNome já é o CHAVEPECA completo (não concatenar modelo)
       const partsPayload = parts.map((p) => ({
         pecaNome: p.pecaNome,
-        incluirCor: p.incluirCor,
-        corUsada: p.incluirCor ? form.color : "",
-        chavePeca: buildChavePeca(p.pecaNome, form.model, p.incluirCor, form.color),
+        incluirCor: p.incluirCor && !p.isChavePecaExistente,
+        corUsada: (p.incluirCor && !p.isChavePecaExistente) ? form.color : "",
+        chavePeca: p.isChavePecaExistente
+          ? p.pecaNome.trim().toUpperCase()
+          : buildChavePeca(p.pecaNome, form.model, p.incluirCor, form.color),
       }));
 
       if (finalize) {
@@ -519,7 +529,9 @@ export function Analise() {
               <p className="muted text-sm">Nenhuma peça adicionada. Adicione ao menos uma para finalizar a análise.</p>
             )}
             {parts.map((part) => {
-              const preview = buildChavePeca(part.pecaNome, form.model, part.incluirCor, form.color);
+              const preview = part.isChavePecaExistente
+                ? part.pecaNome.trim().toUpperCase()
+                : buildChavePeca(part.pecaNome, form.model, part.incluirCor, form.color);
               return (
                 <div key={part.key} style={{ borderBottom: "1px solid var(--color-border)", paddingBottom: "0.75rem", marginBottom: "0.75rem" }}>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "0.5rem", alignItems: "end" }}>
@@ -529,6 +541,7 @@ export function Analise() {
                         value={part.pecaNome}
                         onChange={(e) => {
                           setPart(part.key, "pecaNome", e.target.value);
+                          setPart(part.key, "isChavePecaExistente", false);
                           fetchSuggestions(e.target.value, part.key);
                         }}
                         onBlur={() => setTimeout(() => { if (activeSuggestKey === part.key) setActiveSuggestKey(null); }, 150)}
@@ -541,13 +554,18 @@ export function Analise() {
                           borderRadius: 4, maxHeight: 150, overflowY: "auto",
                         }}>
                           {partSuggestions.map((s) => (
-                            <div key={s} style={{ padding: "4px 8px", cursor: "pointer", fontSize: 12 }}
+                            <div key={s.text + s.type} style={{ padding: "4px 8px", cursor: "pointer", fontSize: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}
                               onMouseDown={() => {
-                                setPart(part.key, "pecaNome", s);
+                                setPart(part.key, "pecaNome", s.text);
+                                setPart(part.key, "isChavePecaExistente", s.type === "chave");
+                                if (s.type === "chave") setPart(part.key, "incluirCor", false);
                                 setActiveSuggestKey(null);
                                 setPartSuggestions([]);
                               }}>
-                              {s}
+                              <span>{s.text}</span>
+                              {s.type === "chave" && (
+                                <span style={{ fontSize: 10, color: "var(--color-text-muted)", marginLeft: 6, flexShrink: 0 }}>chave</span>
+                              )}
                             </div>
                           ))}
                         </div>

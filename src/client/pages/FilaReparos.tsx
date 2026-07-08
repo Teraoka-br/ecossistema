@@ -194,6 +194,12 @@ function RepairCard({ item, onClick }: { item: QueueItem; onClick: () => void })
   );
 }
 
+interface QueueSummary {
+  summary: Record<string, number>;
+  total: number;
+  priorityCount: number;
+}
+
 export function FilaReparos() {
   const [filter, setFilter] = useState<QueueFilter>("DO_NOW");
   const [items, setItems] = useState<QueueItem[]>([]);
@@ -205,6 +211,7 @@ export function FilaReparos() {
   const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [queueSummary, setQueueSummary] = useState<QueueSummary | null>(null);
   const { user } = useAuth();
 
   const LIMIT = 30;
@@ -226,6 +233,13 @@ export function FilaReparos() {
     return () => clearTimeout(t);
   }, [searchInput]);
 
+  const loadSummary = useCallback(async () => {
+    try {
+      const r = await fetch("/api/fila-reparos/summary");
+      if (r.ok) setQueueSummary(await r.json() as QueueSummary);
+    } catch { /* ignore */ }
+  }, []);
+
   const loadItems = useCallback(async () => {
     setLoading(true);
     try {
@@ -245,7 +259,8 @@ export function FilaReparos() {
   useEffect(() => {
     void loadItems();
     void loadEngine();
-  }, [loadItems, loadEngine]);
+    void loadSummary();
+  }, [loadItems, loadEngine, loadSummary]);
 
   useEffect(() => {
     if (!engineState || (engineState.status !== "RUNNING" && engineState.status !== "STALE")) return;
@@ -256,20 +271,21 @@ export function FilaReparos() {
   async function runEngine() {
     await fetch("/api/engine/run", { method: "POST" });
     void loadEngine();
-    setTimeout(() => { void loadItems(); void loadEngine(); }, 2000);
+    setTimeout(() => { void loadItems(); void loadEngine(); void loadSummary(); }, 2000);
   }
 
   function handleDrawerClose(refresh: boolean) {
     setSelectedId(null);
-    if (refresh) void loadItems();
+    if (refresh) { void loadItems(); void loadSummary(); }
   }
 
   const totalPages = Math.ceil(total / LIMIT);
 
-  // KPIs a partir dos items visíveis
-  const kpiMatch    = items.filter(i => i.workflowStatus === "MATCH").length;
-  const kpiVerif    = items.filter(i => i.workflowStatus === "VERIFICAR").length;
-  const kpiPriority = items.filter(i => i.manualPriorityActive).length;
+  // KPIs a partir do summary real (todos os registros, não só a página atual)
+  const kpiMatch    = queueSummary?.summary["MATCH"] ?? 0;
+  const kpiVerif    = queueSummary?.summary["VERIFICAR"] ?? 0;
+  const kpiPriority = queueSummary?.priorityCount ?? 0;
+  const kpiTotal    = queueSummary?.total ?? total;
 
   return (
     <div className="page-container">
@@ -294,11 +310,11 @@ export function FilaReparos() {
       </div>
 
       {/* KPI bar — só quando tem dados */}
-      {!loading && total > 0 && (
+      {!loading && kpiTotal > 0 && (
         <div className="kpi-bar">
           <div className="kpi-card">
             <div className="kpi-label">Total</div>
-            <div className="kpi-value">{total}</div>
+            <div className="kpi-value">{kpiTotal}</div>
             <div className="kpi-sub">aparelhos</div>
           </div>
           {kpiMatch > 0 && (

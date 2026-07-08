@@ -198,28 +198,43 @@ analiseRouter.get("/part-suggestions", requireAuth, (req, res, next) => {
     const db = getDb();
     const pattern = `%${q.toUpperCase()}%`;
 
-    // Nome base da peça: peca_nome preferido, description como fallback (registros legados)
-    const fromParts = db.prepare(
-      `SELECT DISTINCT COALESCE(peca_nome, description) AS name
-       FROM part_requests
-       WHERE COALESCE(peca_nome, description) IS NOT NULL
-         AND upper(COALESCE(peca_nome, description)) LIKE ?
-       LIMIT 20`,
-    ).all(pattern) as { name: string }[];
+    // Nomes de peça (peca_nome = nome sem modelo)
+    const fromPecaNome = db.prepare(
+      `SELECT DISTINCT peca_nome AS text FROM part_requests
+       WHERE peca_nome IS NOT NULL AND upper(peca_nome) LIKE ? LIMIT 15`,
+    ).all(pattern) as { text: string }[];
 
-    // Complementar com peca_solicitada da Análise MI
+    // CHAVEPECAs completas (já incluem modelo — não concatenar modelo novamente)
+    const fromChave = db.prepare(
+      `SELECT DISTINCT chave_peca AS text FROM part_requests
+       WHERE chave_peca IS NOT NULL AND upper(chave_peca) LIKE ? LIMIT 10`,
+    ).all(pattern) as { text: string }[];
+
+    // Nomes da Análise MI
     const fromMi = db.prepare(
-      `SELECT DISTINCT peca_solicitada AS name FROM analise_mi_rows
+      `SELECT DISTINCT peca_solicitada AS text FROM analise_mi_rows
        WHERE peca_solicitada IS NOT NULL AND upper(peca_solicitada) LIKE ? LIMIT 10`,
-    ).all(pattern) as { name: string }[];
+    ).all(pattern) as { text: string }[];
 
     const seen = new Set<string>();
-    const suggestions: string[] = [];
-    for (const { name } of [...fromParts, ...fromMi]) {
-      const trimmed = name.trim().toUpperCase();
-      if (trimmed && !seen.has(trimmed)) { seen.add(trimmed); suggestions.push(trimmed); }
+    const suggestions: { text: string; type: "nome" | "chave" }[] = [];
+
+    for (const { text } of fromPecaNome) {
+      const t = text.trim().toUpperCase();
+      if (t && !seen.has(t)) { seen.add(t); suggestions.push({ text: t, type: "nome" }); }
       if (suggestions.length >= 15) break;
     }
+    for (const { text } of fromMi) {
+      const t = text.trim().toUpperCase();
+      if (t && !seen.has(t)) { seen.add(t); suggestions.push({ text: t, type: "nome" }); }
+      if (suggestions.length >= 20) break;
+    }
+    for (const { text } of fromChave) {
+      const t = text.trim().toUpperCase();
+      if (t && !seen.has(t)) { seen.add(t); suggestions.push({ text: t, type: "chave" }); }
+      if (suggestions.length >= 25) break;
+    }
+
     res.json({ suggestions });
   } catch (err) {
     next(err);

@@ -150,6 +150,22 @@ repairQueueRouter.get("/fila-reparos", requireAuth, (req, res) => {
   res.json({ items, total, page, limit, filter });
 });
 
+// ─── Summary (KPIs reais) ─────────────────────────────────────────────────
+
+repairQueueRouter.get("/fila-reparos/summary", requireAuth, (_req, res) => {
+  const db = getDb();
+  const rows = db.prepare(
+    `SELECT workflow_status, COUNT(*) AS cnt FROM repair_cases GROUP BY workflow_status`,
+  ).all() as { workflow_status: string; cnt: number }[];
+  const summary: Record<string, number> = {};
+  for (const r of rows) summary[r.workflow_status] = r.cnt;
+  const total = (db.prepare("SELECT COUNT(*) AS c FROM repair_cases").get() as { c: number }).c;
+  const priorityCount = (
+    db.prepare("SELECT COUNT(*) AS c FROM repair_cases WHERE manual_priority_active = 1").get() as { c: number }
+  ).c;
+  res.json({ summary, total, priorityCount });
+});
+
 // ─── Drawer do caso ───────────────────────────────────────────────────────
 
 repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
@@ -244,12 +260,12 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
       p => p.status === "PEDIR_PECA" && p.activePurchaseRequestId != null,
     );
 
-    // History
+    // History — entity_id stored as TEXT via String(repairCaseId)
     const history = db.prepare(`
       SELECT * FROM operational_events
       WHERE entity_type = 'repair_case' AND entity_id = ?
       ORDER BY created_at DESC LIMIT 50
-    `).all(id) as Record<string, unknown>[];
+    `).all(String(id)) as Record<string, unknown>[];
 
     const technician = rc.assignedTechnicianId
       ? db.prepare("SELECT * FROM staff_members WHERE id = ?").get(rc.assignedTechnicianId)
@@ -479,10 +495,10 @@ repairQueueRouter.post("/match-rules/:id/activate", requireAuth, requireAdmin, a
     const userId = (req as Request).sessionUser?.id ?? null;
     const { reason } = req.body as { reason: string };
     const updated = activateRuleSet(db, parseInt(req.params.id), { reason, userId });
-    // Trigger engine recompute
-    const { requestMatchRecompute } = await import("../../match/engine-orchestrator.js");
+    const { requestMatchRecompute, processPendingRecompute } = await import("../../match/engine-orchestrator.js");
     requestMatchRecompute(db, `RULE_ACTIVATED_v${updated.version}`, "match_rule_set", updated.id);
-    res.json(updated);
+    const result = await processPendingRecompute(db);
+    res.json({ ...updated, casesEvaluated: result?.casesEvaluated ?? 0 });
   } catch (err) {
     next(err);
   }

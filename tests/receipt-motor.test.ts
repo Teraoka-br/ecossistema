@@ -336,27 +336,39 @@ describe("part-suggestions — autocomplete", () => {
     `).run(rcId);
   });
 
-  function getSuggestions(db: Db, q: string): string[] {
+  type Suggestion = { text: string; type: "nome" | "chave" };
+
+  function getSuggestions(db: Db, q: string): Suggestion[] {
     const pattern = `%${q.toUpperCase()}%`;
-    const fromParts = db.prepare(
-      `SELECT DISTINCT COALESCE(peca_nome, description) AS name
-       FROM part_requests
-       WHERE COALESCE(peca_nome, description) IS NOT NULL
-         AND upper(COALESCE(peca_nome, description)) LIKE ?
-       LIMIT 20`
-    ).all(pattern) as { name: string }[];
+
+    const fromPecaNome = db.prepare(
+      `SELECT DISTINCT peca_nome AS text FROM part_requests
+       WHERE peca_nome IS NOT NULL AND upper(peca_nome) LIKE ? LIMIT 15`
+    ).all(pattern) as { text: string }[];
+
+    const fromChave = db.prepare(
+      `SELECT DISTINCT chave_peca AS text FROM part_requests
+       WHERE chave_peca IS NOT NULL AND upper(chave_peca) LIKE ? LIMIT 10`
+    ).all(pattern) as { text: string }[];
 
     const fromMi = db.prepare(
-      `SELECT DISTINCT peca_solicitada AS name FROM analise_mi_rows
+      `SELECT DISTINCT peca_solicitada AS text FROM analise_mi_rows
        WHERE peca_solicitada IS NOT NULL AND upper(peca_solicitada) LIKE ? LIMIT 10`
-    ).all(pattern) as { name: string }[];
+    ).all(pattern) as { text: string }[];
 
     const seen = new Set<string>();
-    const suggestions: string[] = [];
-    for (const { name } of [...fromParts, ...fromMi]) {
-      const trimmed = name.trim().toUpperCase();
-      if (trimmed && !seen.has(trimmed)) { seen.add(trimmed); suggestions.push(trimmed); }
-      if (suggestions.length >= 15) break;
+    const suggestions: Suggestion[] = [];
+    for (const { text } of fromPecaNome) {
+      const t = text.trim().toUpperCase();
+      if (t && !seen.has(t)) { seen.add(t); suggestions.push({ text: t, type: "nome" }); }
+    }
+    for (const { text } of fromMi) {
+      const t = text.trim().toUpperCase();
+      if (t && !seen.has(t)) { seen.add(t); suggestions.push({ text: t, type: "nome" }); }
+    }
+    for (const { text } of fromChave) {
+      const t = text.trim().toUpperCase();
+      if (t && !seen.has(t)) { seen.add(t); suggestions.push({ text: t, type: "chave" }); }
     }
     return suggestions;
   }
@@ -364,18 +376,23 @@ describe("part-suggestions — autocomplete", () => {
   it("retorna sugestões ao digitar 'frontal'", () => {
     const s = getSuggestions(db, "frontal");
     expect(s.length).toBeGreaterThan(0);
-    expect(s.some((x) => x.includes("FRONTAL"))).toBe(true);
+    expect(s.some((x) => x.text.includes("FRONTAL"))).toBe(true);
   });
 
-  it("usa description como fallback quando peca_nome é null", () => {
-    const s = getSuggestions(db, "bat");
-    expect(s).toContain("BATERIA");
-  });
-
-  it("prefere peca_nome quando preenchido", () => {
+  it("retorna peca_nome como type='nome'", () => {
     const s = getSuggestions(db, "tela");
-    expect(s).toContain("TELA FRONTAL");
-    expect(s).not.toContain("TELA COMPLETA"); // description oculta quando peca_nome existe
+    const nome = s.find((x) => x.text === "TELA FRONTAL");
+    expect(nome).toBeDefined();
+    expect(nome!.type).toBe("nome");
+  });
+
+  it("retorna chave_peca como type='chave' (sem duplicar modelo)", () => {
+    const s = getSuggestions(db, "frontal");
+    const chave = s.find((x) => x.type === "chave" && x.text.includes("FRONTAL COM ARO"));
+    expect(chave).toBeDefined();
+    // chave não deve ser duplicada em nomes
+    const nomeTexts = s.filter((x) => x.type === "nome").map((x) => x.text);
+    expect(nomeTexts).not.toContain("FRONTAL COM ARO A52");
   });
 
   it("texto livre continua funcionando (sem sugestões ≠ erro)", () => {

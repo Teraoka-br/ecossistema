@@ -16,7 +16,7 @@ interface MatchRuleSet {
   activatedAt: string | null;
 }
 
-function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: number) => void }) {
+function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: number, casesEvaluated: number) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [activating, setActivating] = useState(false);
   const [reason, setReason] = useState("");
@@ -31,7 +31,10 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason }),
       });
-      if (r.ok) onActivate(rule.id);
+      if (r.ok) {
+        const d = await r.json() as { casesEvaluated?: number };
+        onActivate(rule.id, d.casesEvaluated ?? 0);
+      }
     } finally {
       setActivating(false);
     }
@@ -201,6 +204,7 @@ export function AdminMatchRules() {
   const [rules, setRules] = useState<MatchRuleSet[]>([]);
   const [loading, setLoading] = useState(true);
   const [showNewForm, setShowNewForm] = useState(false);
+  const [activateMsg, setActivateMsg] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -238,8 +242,15 @@ export function AdminMatchRules() {
         <div className="loading-state"><Loader2 size={18} className="spin" /></div>
       ) : (
         <div className="rule-list">
+          {activateMsg && (
+            <div className="alert alert-ok" style={{ marginBottom: "0.75rem" }}>{activateMsg}</div>
+          )}
           {rules.map(r => (
-            <RuleCard key={r.id} rule={r} onActivate={() => void load()} />
+            <RuleCard key={r.id} rule={r} onActivate={(_, cases) => {
+              void load();
+              setActivateMsg(`Regras aplicadas. ${cases} caso${cases !== 1 ? "s" : ""} reavaliado${cases !== 1 ? "s" : ""}.`);
+              setTimeout(() => setActivateMsg(null), 5000);
+            }} />
           ))}
         </div>
       )}
