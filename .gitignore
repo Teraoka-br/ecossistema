@@ -30,6 +30,9 @@ tmp/
 *.log
 npm-debug.log*
 
+# beta runtime
+.beta-pids
+
 # editor / OS
 .DS_Store
 Thumbs.db
