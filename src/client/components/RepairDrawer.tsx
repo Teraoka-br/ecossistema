@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   X, Package, Clock, Star, ChevronRight, AlertTriangle, CheckCircle2,
-  UserCheck, History, Info, Loader2, Users, ShoppingCart,
+  UserCheck, History, Info, Loader2, Users, ShoppingCart, MessageSquarePlus,
 } from "lucide-react";
 import { addToPurchase } from "../api.js";
 
@@ -21,6 +21,16 @@ interface PartInfo {
   purchaseOrderStatus: string | null;
 }
 
+interface HistoryEvent {
+  id: number;
+  event_type: string;
+  previous_status: string | null;
+  new_status: string | null;
+  responsible_name: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
 interface CaseDetail {
   id: number;
   imei: string | null;
@@ -37,11 +47,12 @@ interface CaseDetail {
   workflowStatus: string;
   analysisStatus: string;
   manualPriorityActive: boolean;
+  notes: string | null;
   parts: PartInfo[];
   nextAction: { code: string; label: string; description: string; enabled: boolean };
   technician: { id: number; name: string } | null;
   directedTechnician: { id: number; name: string } | null;
-  history: Array<{ id: number; event_type: string; created_at: string; created_by?: string }>;
+  history: HistoryEvent[];
   purchasablePartsCount: number;
   partsAlreadyInPurchaseCount: number;
 }
@@ -62,7 +73,32 @@ const CANCEL_REASONS = [
   { code: "OTHER", label: "Outro" },
 ];
 
+const EVENT_LABELS: Record<string, string> = {
+  NOTE_ADDED: "Observação adicionada",
+  DIRECTED_TO_TECHNICIAN: "Direcionado ao técnico",
+  REPAIR_STARTED: "Reparo iniciado",
+  REPAIR_COMPLETED: "Reparo concluído",
+  PART_SEPARATED: "Peça separada",
+  RESERVATION_CREATED: "Reserva criada",
+  RESERVATION_RELEASED: "Reserva cancelada",
+  ANALYSIS_COMPLETED: "Análise concluída",
+  MATCH_STATUS_CHANGED: "Status de match alterado",
+  KIT_RESERVED: "Kit reservado",
+};
+
+function eventLabel(type: string): string {
+  return EVENT_LABELS[type] ?? type.replace(/_/g, " ").toLowerCase().replace(/^\w/, c => c.toUpperCase());
+}
+
 type DrawerTab = "parts" | "score" | "history";
+type ConfirmAction = "SEPARATE_KIT" | "SEPARATE_PARTIAL" | "CANCEL_RESERVATION" | "ADD_TO_PURCHASE"
+  | "DIRECT_TO_TECHNICIAN" | "START_REPAIR" | "COMPLETE_REPAIR";
+
+interface ActionConfirmState {
+  action: ConfirmAction;
+  partId?: number;
+  notes: string;
+}
 
 export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
   const [data, setData] = useState<CaseDetail | null>(null);
@@ -72,14 +108,20 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
   const [error, setError] = useState<string | null>(null);
   const [technicians, setTechnicians] = useState<Array<{ id: number; name: string }>>([]);
   const [selectedTechId, setSelectedTechId] = useState<number | null>(null);
-  const [showDirectModal, setShowDirectModal] = useState(false);
-  const [addingToPurchase, setAddingToPurchase] = useState(false);
+  const [addingToPurchase] = useState(false);
   const [purchaseMsg, setPurchaseMsg] = useState<string | null>(null);
   const [cancelingPartId, setCancelingPartId] = useState<number | null>(null);
   const [cancelReason, setCancelReason] = useState("");
   const [cancelReasonCode, setCancelReasonCode] = useState("");
   const [refreshCount, setRefreshCount] = useState(0);
   const [didChange, setDidChange] = useState(false);
+
+  // Notes
+  const [noteText, setNoteText] = useState("");
+  const [savingNote, setSavingNote] = useState(false);
+
+  // Confirm modal
+  const [confirmState, setConfirmState] = useState<ActionConfirmState | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -105,129 +147,113 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
     setRefreshCount(c => c + 1);
   }
 
-  async function handleSeparateKit() {
+  async function handleSaveNote() {
+    if (!noteText.trim() || noteText.trim().length < 2) return;
+    setSavingNote(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/fila-reparos/${repairCaseId}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: noteText.trim() }),
+      });
+      if (!r.ok) {
+        const j = await r.json() as { error?: string };
+        throw new Error(j.error ?? "Erro ao salvar observação");
+      }
+      setNoteText("");
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erro");
+    } finally {
+      setSavingNote(false);
+    }
+  }
+
+  async function executeConfirmedAction(state: ActionConfirmState) {
     if (!data) return;
     setWorking(true);
     setError(null);
+    setConfirmState(null);
     try {
-      // Backend determina quais peças e referências reservar — não enviamos partes do cliente
-      const r = await fetch(`/api/fila-reparos/${repairCaseId}/reserve-kit`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (!r.ok) {
-        const j = await r.json() as { error?: string };
-        throw new Error(j.error ?? "Erro ao reservar kit");
+      switch (state.action) {
+        case "SEPARATE_KIT": {
+          const r = await fetch(`/api/fila-reparos/${repairCaseId}/reserve-kit`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+          });
+          if (!r.ok) { const j = await r.json() as { error?: string }; throw new Error(j.error ?? "Erro ao reservar kit"); }
+          break;
+        }
+        case "SEPARATE_PARTIAL": {
+          const disponivel = data.parts.filter(p => p.matchResultStatus === "MATCH_PARCIAL" && p.reservationId === null && p.availableQty > 0);
+          if (disponivel.length === 0) break;
+          const r = await fetch(`/api/fila-reparos/${repairCaseId}/reserve-partial`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ parts: disponivel.map(p => ({ partRequestId: p.id, chavePeca: p.chavePeca ?? "", reference: p.allocatedReference, quantity: 1 })) }),
+          });
+          if (!r.ok) { const j = await r.json() as { error?: string }; throw new Error(j.error ?? "Erro ao reservar parcial"); }
+          break;
+        }
+        case "CANCEL_RESERVATION": {
+          const r = await fetch(`/api/fila-reparos/${repairCaseId}/release-reservation`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ partRequestId: state.partId, reason: cancelReason, reasonCode: cancelReasonCode || undefined }),
+          });
+          if (!r.ok) { const j = await r.json() as { error?: string }; throw new Error(j.error ?? "Erro ao cancelar reserva"); }
+          setCancelingPartId(null); setCancelReason(""); setCancelReasonCode("");
+          break;
+        }
+        case "ADD_TO_PURCHASE": {
+          const res = await addToPurchase(repairCaseId);
+          setPurchaseMsg(res.created > 0 ? `${res.created} solicitação(ões) criada(s) em compra.` : "Todas as peças já estavam em compra.");
+          break;
+        }
+        case "DIRECT_TO_TECHNICIAN": {
+          if (!selectedTechId) break;
+          const r = await fetch(`/api/fila-reparos/${repairCaseId}/direct-technician`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ technicianId: selectedTechId, notes: state.notes || undefined }),
+          });
+          if (!r.ok) { const j = await r.json() as { error?: string }; throw new Error(j.error ?? "Erro ao direcionar"); }
+          break;
+        }
+        case "START_REPAIR": {
+          const r = await fetch(`/api/fila-reparos/${repairCaseId}/start-repair`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+          });
+          if (!r.ok) { const j = await r.json() as { error?: string }; throw new Error(j.error ?? "Erro ao iniciar reparo"); }
+          break;
+        }
+        case "COMPLETE_REPAIR": {
+          const r = await fetch(`/api/fila-reparos/${repairCaseId}/complete-repair`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ notes: state.notes || undefined }),
+          });
+          if (!r.ok) { const j = await r.json() as { error?: string }; throw new Error(j.error ?? "Erro ao concluir reparo"); }
+          break;
+        }
       }
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Erro");
     } finally {
       setWorking(false);
-    }
-  }
-
-  async function handleSeparatePartial() {
-    if (!data) return;
-    const disponivel = data.parts.filter(p => p.matchResultStatus === "MATCH_PARCIAL" && p.reservationId === null && p.availableQty > 0);
-    if (disponivel.length === 0) return;
-
-    setWorking(true);
-    setError(null);
-    try {
-      const r = await fetch(`/api/fila-reparos/${repairCaseId}/reserve-partial`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          parts: disponivel.map(p => ({
-            partRequestId: p.id,
-            chavePeca: p.chavePeca ?? "",
-            reference: p.allocatedReference,
-            quantity: 1,
-          })),
-        }),
-      });
-      if (!r.ok) {
-        const j = await r.json() as { error?: string };
-        throw new Error(j.error ?? "Erro ao reservar parcial");
-      }
-      refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Erro");
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  async function handleCancelReservation() {
-    if (!cancelingPartId || !cancelReason) return;
-    setWorking(true);
-    setError(null);
-    try {
-      const r = await fetch(`/api/fila-reparos/${repairCaseId}/release-reservation`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ partRequestId: cancelingPartId, reason: cancelReason, reasonCode: cancelReasonCode || undefined }),
-      });
-      if (!r.ok) {
-        const j = await r.json() as { error?: string };
-        throw new Error(j.error ?? "Erro ao cancelar reserva");
-      }
-      setCancelingPartId(null);
-      setCancelReason("");
-      setCancelReasonCode("");
-      refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Erro");
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  async function handleDirectToTechnician() {
-    if (!selectedTechId) return;
-    setWorking(true);
-    setError(null);
-    try {
-      const r = await fetch(`/api/fila-reparos/${repairCaseId}/direct-technician`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ technicianId: selectedTechId }),
-      });
-      if (!r.ok) {
-        const j = await r.json() as { error?: string };
-        throw new Error(j.error ?? "Erro ao direcionar");
-      }
-      setShowDirectModal(false);
-      refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Erro");
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  async function handleAddToPurchase() {
-    setAddingToPurchase(true);
-    setPurchaseMsg(null);
-    setError(null);
-    try {
-      const res = await addToPurchase(repairCaseId);
-      setPurchaseMsg(
-        res.created > 0
-          ? `${res.created} solicitação(ões) criada(s) em compra.`
-          : "Todas as peças já estavam em compra.",
-      );
-      if (res.created > 0) refresh(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Erro ao incluir em compra");
-    } finally {
-      setAddingToPurchase(false);
     }
   }
 
   const modelStr = data ? [data.model, data.capacity].filter(Boolean).join(" ") : "";
+  const ws = data?.workflowStatus ?? "";
+
+  const showSeparateKit = ws === "MATCH";
+  const showSeparatePartial = ws === "MATCH_PARCIAL";
+  const showAddToPurchase = ws === "PEDIR_PECA" || ws === "MATCH_PARCIAL";
+  const showDirectTech = ws === "APTO_REPARO";
+  const showStartRepair = ws === "DIRECIONADO_TECNICO";
+  const showCompleteRepair = ws === "EM_REPARO";
 
   return (
     <div
@@ -245,25 +271,35 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
         onClick={e => e.stopPropagation()}
         style={{
           position: "relative", inset: "auto",
-          width: "min(680px, 100%)", maxHeight: "92vh",
+          width: "min(1040px, calc(100vw - 2rem))", maxHeight: "92vh",
           borderRadius: "var(--r-md, 8px)",
           display: "flex", flexDirection: "column",
           overflow: "hidden",
           boxShadow: "0 20px 60px rgba(0,0,0,0.4)",
         }}
       >
-        <div className="drawer-header">
+        {/* Header fixo */}
+        <div className="drawer-header" style={{ flexShrink: 0 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
               {data?.manualPriorityActive && <Star size={14} fill="currentColor" style={{ color: "var(--warning)" }} />}
               <span className="drawer-title">{modelStr || "Aparelho"}</span>
               {data?.color && <span className="drawer-sub">{data.color}</span>}
+              {data && (
+                <span style={{ marginLeft: "auto", fontSize: "0.75rem", padding: "2px 8px", borderRadius: 12,
+                  background: "var(--accent-subtle, rgba(99,102,241,0.1))", color: "var(--accent)" }}>
+                  {data.workflowStatus.replace(/_/g, " ")}
+                </span>
+              )}
             </div>
             <div className="drawer-meta">
               {data?.imei && <span>IMEI {data.imei}</span>}
               {data?.os && <span>OS {data.os}</span>}
               {data?.repairDate && <span>{data.repairDate}</span>}
               {data?.ageDays != null && <span>{data.ageDays}d</span>}
+              {(data?.technician ?? data?.directedTechnician) && (
+                <span>Técnico: {data.technician?.name ?? data.directedTechnician?.name}</span>
+              )}
             </div>
           </div>
           <button className="btn-ghost-sm" onClick={() => onClose(didChange)}>
@@ -273,7 +309,7 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
 
         {/* Linha do processo */}
         {data && (
-          <div className="process-line">
+          <div className="process-line" style={{ flexShrink: 0 }}>
             {["Análise", "Match", "Separação", "Técnico", "Triagem", "Conclusão"].map((step, i) => {
               const active = (
                 (i === 0 && ["EM_ANALISE"].includes(data.workflowStatus)) ||
@@ -294,7 +330,7 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
         )}
 
         {/* Tabs */}
-        <div className="drawer-tabs">
+        <div className="drawer-tabs" style={{ flexShrink: 0 }}>
           <button className={`drawer-tab ${tab === "parts" ? "active" : ""}`} onClick={() => setTab("parts")}>
             <Package size={13} /> Peças
           </button>
@@ -302,51 +338,61 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
             <Info size={13} /> Prioridade
           </button>
           <button className={`drawer-tab ${tab === "history" ? "active" : ""}`} onClick={() => setTab("history")}>
-            <History size={13} /> Histórico
+            <History size={13} /> Histórico {data && data.history.length > 0 && <span style={{ marginLeft: 4, fontSize: "0.7rem", background: "var(--accent)", color: "#fff", borderRadius: 10, padding: "0 5px" }}>{data.history.length}</span>}
           </button>
         </div>
 
+        {/* Corpo rolável */}
         <div className="drawer-body" style={{ overflowY: "auto", flex: 1 }}>
           {loading && <div className="loading-state"><Loader2 size={18} className="spin" /></div>}
           {error && <div className="error-banner">{error}</div>}
 
           {!loading && data && tab === "parts" && (
             <>
-              {/* Action CTA */}
+              {/* Next action CTA */}
               {data.nextAction.enabled && (
                 <div className="drawer-cta">
                   <div>
                     <div className="cta-label">{data.nextAction.label}</div>
                     <div className="cta-desc">{data.nextAction.description}</div>
                   </div>
-                  {data.nextAction.code === "SEPARATE_KIT" && (
-                    <button className="btn-primary" onClick={handleSeparateKit} disabled={working}>
-                      {working ? <Loader2 size={14} className="spin" /> : <Package size={14} />}
-                      Separar kit
+                  {showSeparateKit && (
+                    <button className="btn-primary" onClick={() => setConfirmState({ action: "SEPARATE_KIT", notes: "" })} disabled={working}>
+                      <Package size={14} /> Separar kit
                     </button>
                   )}
-                  {data.nextAction.code === "SEPARATE_AVAILABLE" && (
-                    <button className="btn-primary" onClick={handleSeparatePartial} disabled={working}>
-                      {working ? <Loader2 size={14} className="spin" /> : <Package size={14} />}
-                      Separar disponíveis
+                  {showSeparatePartial && (
+                    <button className="btn-primary" onClick={() => setConfirmState({ action: "SEPARATE_PARTIAL", notes: "" })} disabled={working}>
+                      <Package size={14} /> Separar disponíveis
                     </button>
                   )}
-                  {data.nextAction.code === "DIRECT_TO_TECHNICIAN" && (
-                    <button className="btn-primary" onClick={() => setShowDirectModal(true)} disabled={working}>
-                      <UserCheck size={14} />
-                      Direcionar
+                  {showDirectTech && (
+                    <button className="btn-primary" onClick={() => setConfirmState({ action: "DIRECT_TO_TECHNICIAN", notes: "" })} disabled={working}>
+                      <UserCheck size={14} /> Direcionar ao técnico
+                    </button>
+                  )}
+                  {showStartRepair && (
+                    <button className="btn-primary" onClick={() => setConfirmState({ action: "START_REPAIR", notes: "" })} disabled={working}>
+                      {working ? <Loader2 size={14} className="spin" /> : <UserCheck size={14} />}
+                      Iniciar reparo
+                    </button>
+                  )}
+                  {showCompleteRepair && (
+                    <button className="btn-primary" onClick={() => setConfirmState({ action: "COMPLETE_REPAIR", notes: "" })} disabled={working}>
+                      {working ? <Loader2 size={14} className="spin" /> : <CheckCircle2 size={14} />}
+                      Concluir reparo
                     </button>
                   )}
                 </div>
               )}
 
-              {/* Incluir em compra — visível quando há peças pendentes sem ou com compra ativa */}
-              {(data.purchasablePartsCount > 0 || data.partsAlreadyInPurchaseCount > 0) && (
+              {/* Incluir em compra */}
+              {showAddToPurchase && (data.purchasablePartsCount > 0 || data.partsAlreadyInPurchaseCount > 0) && (
                 <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: "0.6rem 0", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
                   {data.purchasablePartsCount > 0 ? (
                     <button
                       className="btn btn-secondary btn-sm"
-                      onClick={handleAddToPurchase}
+                      onClick={() => setConfirmState({ action: "ADD_TO_PURCHASE", notes: "" })}
                       disabled={addingToPurchase}
                       style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}
                     >
@@ -355,8 +401,7 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                     </button>
                   ) : (
                     <span style={{ fontSize: "0.82rem", color: "var(--muted)", display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                      <ShoppingCart size={13} />
-                      Peças faltantes já incluídas em compra
+                      <ShoppingCart size={13} /> Peças faltantes já incluídas em compra
                     </span>
                   )}
                   {purchaseMsg && <span style={{ fontSize: "0.8rem", color: "var(--success)" }}>{purchaseMsg}</span>}
@@ -373,9 +418,7 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                       {p.allocatedReference && <span className="part-ref">REF {p.allocatedReference}</span>}
                     </div>
                     <div className="part-stock">
-                      <span className={p.availableQty > 0 ? "stock-ok" : "stock-zero"}>
-                        {p.availableQty} disp.
-                      </span>
+                      <span className={p.availableQty > 0 ? "stock-ok" : "stock-zero"}>{p.availableQty} disp.</span>
                       {p.reservedQty > 0 && <span className="stock-reserved">{p.reservedQty} res.</span>}
                     </div>
                     <div className="part-status">
@@ -389,8 +432,7 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                             ? "var(--warning-subtle, rgba(234,179,8,0.15))" : "var(--accent-subtle, rgba(99,102,241,0.1))",
                           color: p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED"
                             ? "var(--warning)" : "var(--accent)" }}>
-                          {p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED"
-                            ? "Em pedido" : "Em compra"}
+                          {p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED" ? "Em pedido" : "Em compra"}
                         </span>
                       )}
                     </div>
@@ -407,7 +449,7 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                 ))}
               </div>
 
-              {/* Cancel reservation modal */}
+              {/* Cancel reservation — seleção de motivo */}
               {cancelingPartId !== null && (
                 <div className="modal-overlay" onClick={() => setCancelingPartId(null)}>
                   <div className="modal" onClick={e => e.stopPropagation()}>
@@ -434,52 +476,11 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                       <button className="btn-ghost" onClick={() => setCancelingPartId(null)}>Voltar</button>
                       <button
                         className="btn-danger"
-                        onClick={handleCancelReservation}
-                        disabled={!cancelReason || working}
+                        onClick={() => setConfirmState({ action: "CANCEL_RESERVATION", partId: cancelingPartId!, notes: cancelReason })}
+                        disabled={!cancelReason}
                       >
-                        {working ? <Loader2 size={14} className="spin" /> : null}
                         Confirmar cancelamento
                       </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Direct to technician modal */}
-              {showDirectModal && (
-                <div className="modal-overlay" onClick={() => setShowDirectModal(false)}>
-                  <div className="modal" onClick={e => e.stopPropagation()}>
-                    <h3>Direcionar ao técnico</h3>
-                    {technicians.length === 0 ? (
-                      <div style={{ padding: "1rem 0", textAlign: "center" }}>
-                        <p style={{ color: "var(--muted)", marginBottom: "0.75rem" }}>Nenhum técnico ativo cadastrado.</p>
-                        <a href="/admin/pessoas?tab=tecnicos" className="btn-primary" style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", textDecoration: "none" }}>
-                          <Users size={14} /> Cadastrar técnico
-                        </a>
-                      </div>
-                    ) : (
-                      <div className="tech-list">
-                        {technicians.map(t => (
-                          <label key={t.id} className={`tech-option ${selectedTechId === t.id ? "selected" : ""}`}>
-                            <input type="radio" name="technician" onChange={() => setSelectedTechId(t.id)} />
-                            <Users size={14} />
-                            {t.name}
-                          </label>
-                        ))}
-                      </div>
-                    )}
-                    <div className="modal-actions">
-                      <button className="btn-ghost" onClick={() => setShowDirectModal(false)}>Cancelar</button>
-                      {technicians.length > 0 && (
-                        <button
-                          className="btn-primary"
-                          onClick={handleDirectToTechnician}
-                          disabled={!selectedTechId || working}
-                        >
-                          {working ? <Loader2 size={14} className="spin" /> : <UserCheck size={14} />}
-                          Confirmar direcionamento
-                        </button>
-                      )}
                     </div>
                   </div>
                 </div>
@@ -489,28 +490,22 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
 
           {!loading && data && tab === "score" && (
             <div className="score-section">
-              <div className="score-row">
-                <span>Idade</span>
-                <span>{data.ageDays ?? "—"} dias</span>
-              </div>
-              <div className="score-row">
-                <span>Custo</span>
-                <span>{data.cost != null ? `R$ ${data.cost.toFixed(2)}` : "—"}</span>
-              </div>
-              <div className="score-row">
-                <span>Venda estimada</span>
-                <span>{data.estimatedSale != null ? `R$ ${data.estimatedSale.toFixed(2)}` : "—"}</span>
-              </div>
+              <div className="score-row"><span>Idade</span><span>{data.ageDays ?? "—"} dias</span></div>
+              <div className="score-row"><span>Custo</span><span>{data.cost != null ? `R$ ${data.cost.toFixed(2)}` : "—"}</span></div>
+              <div className="score-row"><span>Venda estimada</span><span>{data.estimatedSale != null ? `R$ ${data.estimatedSale.toFixed(2)}` : "—"}</span></div>
               <div className="score-row">
                 <span>Margem</span>
                 <span style={{ color: (data.margin ?? 0) >= 0 ? "var(--success)" : "var(--danger)" }}>
                   {data.margin != null ? `R$ ${data.margin.toFixed(2)}` : "—"}
                 </span>
               </div>
-              <div className="score-row">
-                <span>Técnico</span>
-                <span>{data.technician?.name ?? data.directedTechnician?.name ?? "—"}</span>
-              </div>
+              <div className="score-row"><span>Técnico</span><span>{data.technician?.name ?? data.directedTechnician?.name ?? "—"}</span></div>
+              {data.notes && (
+                <div className="score-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.25rem" }}>
+                  <span>Observações</span>
+                  <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>{data.notes}</span>
+                </div>
+              )}
               <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: "1rem" }}>
                 Score e pontos detalhados disponíveis nos resultados do motor (Auditoria do Motor).
               </p>
@@ -518,21 +513,178 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
           )}
 
           {!loading && data && tab === "history" && (
-            <div className="history-list">
-              {data.history.length === 0 && <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Sem histórico registrado.</p>}
-              {data.history.map(h => (
-                <div key={h.id} className="history-row">
-                  <Clock size={12} />
-                  <span>{h.event_type}</span>
-                  <span style={{ color: "var(--muted)", marginLeft: "auto", fontSize: "0.75rem" }}>
-                    {h.created_at.slice(0, 16).replace("T", " ")}
-                  </span>
+            <div>
+              {/* Adicionar observação */}
+              <div style={{ padding: "0.75rem 0", borderBottom: "1px solid var(--border)", display: "flex", gap: "0.5rem", flexDirection: "column" }}>
+                <textarea
+                  className="input"
+                  placeholder="Adicionar observação…"
+                  rows={2}
+                  value={noteText}
+                  onChange={e => setNoteText(e.target.value)}
+                  style={{ resize: "vertical", fontSize: "0.85rem" }}
+                />
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleSaveNote}
+                    disabled={savingNote || noteText.trim().length < 2}
+                    style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}
+                  >
+                    {savingNote ? <Loader2 size={13} className="spin" /> : <MessageSquarePlus size={13} />}
+                    Adicionar observação
+                  </button>
                 </div>
+              </div>
+
+              {/* Timeline */}
+              <div className="history-list">
+                {data.history.length === 0 && (
+                  <p style={{ color: "var(--muted)", fontSize: "0.85rem", padding: "1rem 0" }}>
+                    Não há eventos operacionais registrados para este aparelho.
+                  </p>
+                )}
+                {data.history.map(h => (
+                  <div key={h.id} className="history-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.2rem" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", width: "100%" }}>
+                      <Clock size={12} />
+                      <span style={{ fontWeight: 500 }}>{eventLabel(h.event_type)}</span>
+                      <span style={{ color: "var(--muted)", marginLeft: "auto", fontSize: "0.75rem" }}>
+                        {h.created_at.slice(0, 16).replace("T", " ")}
+                      </span>
+                    </div>
+                    {(h.previous_status || h.new_status) && (
+                      <div style={{ fontSize: "0.77rem", color: "var(--muted)", paddingLeft: "1.2rem" }}>
+                        {h.previous_status && <span>{h.previous_status.replace(/_/g, " ")}</span>}
+                        {h.previous_status && h.new_status && <span> → </span>}
+                        {h.new_status && <span style={{ color: "var(--accent)" }}>{h.new_status.replace(/_/g, " ")}</span>}
+                      </div>
+                    )}
+                    {h.responsible_name && (
+                      <div style={{ fontSize: "0.77rem", color: "var(--muted)", paddingLeft: "1.2rem" }}>
+                        {h.responsible_name}
+                      </div>
+                    )}
+                    {h.notes && (
+                      <div style={{ fontSize: "0.82rem", paddingLeft: "1.2rem", paddingTop: "0.1rem" }}>
+                        {h.notes}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ActionConfirmModal */}
+        {confirmState && (
+          <div className="modal-overlay" onClick={() => setConfirmState(null)}>
+            <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 460 }}>
+              <ActionConfirmModal
+                state={confirmState}
+                data={data}
+                technicians={technicians}
+                selectedTechId={selectedTechId}
+                onSelectTech={setSelectedTechId}
+                onChangeNotes={notes => setConfirmState(s => s ? { ...s, notes } : s)}
+                cancelReason={cancelReason}
+                onConfirm={() => executeConfirmedAction(confirmState)}
+                onCancel={() => setConfirmState(null)}
+                working={working}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface ActionConfirmModalProps {
+  state: ActionConfirmState;
+  data: CaseDetail | null;
+  technicians: Array<{ id: number; name: string }>;
+  selectedTechId: number | null;
+  onSelectTech: (id: number) => void;
+  onChangeNotes: (notes: string) => void;
+  cancelReason: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+  working: boolean;
+}
+
+const ACTION_META: Record<ConfirmAction, { title: string; warn: string; showNotes?: boolean }> = {
+  SEPARATE_KIT: { title: "Separar kit completo", warn: "Todas as peças do motor serão reservadas no estoque." },
+  SEPARATE_PARTIAL: { title: "Separar peças disponíveis", warn: "Apenas as peças com saldo disponível serão reservadas." },
+  CANCEL_RESERVATION: { title: "Cancelar reserva", warn: "A reserva será liberada e o estoque ficará disponível novamente." },
+  ADD_TO_PURCHASE: { title: "Incluir em compra", warn: "As peças sem saldo serão incluídas em uma solicitação de compra." },
+  DIRECT_TO_TECHNICIAN: { title: "Direcionar ao técnico", warn: "O aparelho ficará aguardando início de reparo.", showNotes: true },
+  START_REPAIR: { title: "Iniciar reparo", warn: "O status mudará para EM REPARO. As peças permanecerão reservadas." },
+  COMPLETE_REPAIR: { title: "Concluir reparo", warn: "As peças reservadas serão consumidas do estoque. Esta ação não pode ser desfeita.", showNotes: true },
+};
+
+function ActionConfirmModal({ state, data, technicians, selectedTechId, onSelectTech, onChangeNotes, cancelReason, onConfirm, onCancel, working }: ActionConfirmModalProps) {
+  const meta = ACTION_META[state.action];
+  const modelStr = data ? [data.model, data.capacity].filter(Boolean).join(" ") : "Aparelho";
+
+  const isDirectTech = state.action === "DIRECT_TO_TECHNICIAN";
+  const canConfirm = !working && (
+    isDirectTech ? selectedTechId != null :
+    state.action === "CANCEL_RESERVATION" ? cancelReason.length > 0 :
+    true
+  );
+
+  return (
+    <>
+      <h3 style={{ marginBottom: "0.75rem" }}>{meta.title}</h3>
+      <div style={{ fontSize: "0.85rem", marginBottom: "0.75rem" }}>
+        <div><strong>Aparelho:</strong> {modelStr}</div>
+        {data && <div><strong>Status atual:</strong> {data.workflowStatus.replace(/_/g, " ")}</div>}
+      </div>
+      <p style={{ fontSize: "0.82rem", color: "var(--warning)", background: "var(--warning-subtle, rgba(234,179,8,0.1))", borderRadius: 6, padding: "0.5rem 0.75rem", marginBottom: "0.75rem" }}>
+        ⚠ {meta.warn}
+      </p>
+
+      {isDirectTech && (
+        <div style={{ marginBottom: "0.75rem" }}>
+          {technicians.length === 0 ? (
+            <p style={{ color: "var(--muted)", fontSize: "0.85rem" }}>Nenhum técnico ativo cadastrado.</p>
+          ) : (
+            <div className="tech-list">
+              {technicians.map(t => (
+                <label key={t.id} className={`tech-option ${selectedTechId === t.id ? "selected" : ""}`}>
+                  <input type="radio" name="tech-confirm" onChange={() => onSelectTech(t.id)} />
+                  <Users size={14} /> {t.name}
+                </label>
               ))}
             </div>
           )}
         </div>
+      )}
+
+      {meta.showNotes && (
+        <textarea
+          className="input"
+          placeholder="Observação (opcional)…"
+          rows={2}
+          value={state.notes}
+          onChange={e => onChangeNotes(e.target.value)}
+          style={{ marginBottom: "0.75rem", resize: "vertical", fontSize: "0.85rem" }}
+        />
+      )}
+
+      <div className="modal-actions">
+        <button className="btn-ghost" onClick={onCancel}>Cancelar</button>
+        <button
+          className={state.action === "COMPLETE_REPAIR" || state.action === "CANCEL_RESERVATION" ? "btn-danger" : "btn-primary"}
+          onClick={onConfirm}
+          disabled={!canConfirm}
+        >
+          {working ? <Loader2 size={14} className="spin" /> : null}
+          Confirmar
+        </button>
       </div>
-    </div>
+    </>
   );
 }

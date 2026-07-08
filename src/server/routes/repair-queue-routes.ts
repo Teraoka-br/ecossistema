@@ -10,8 +10,10 @@ import {
 } from "../../match/next-action-service.js";
 import {
   reserveKitFromEngine, reservePartial, releaseReservation, directToTechnician,
+  startRepair, completeRepair, RepairFlowError,
   listReservationsByCase,
 } from "../../operational/reservation-service.js";
+import { recordOperationalEvent } from "../../operational/operational-event-service.js";
 import {
   ensurePurchaseRequestsForCase, PurchaseRequestLinkError,
 } from "../../operational/purchase-request-service.js";
@@ -329,6 +331,84 @@ repairQueueRouter.post("/fila-reparos/:id/direct-technician", requireAuth, (req,
     directToTechnician(db, repairCaseId, { technicianId, userId, notes });
     res.json({ ok: true });
   } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Observação ───────────────────────────────────────────────────────────
+
+repairQueueRouter.post("/fila-reparos/:id/notes", requireAuth, (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+
+    const { note } = req.body as { note?: string };
+    if (!note || note.trim().length < 2) {
+      return res.status(400).json({ error: "Observação deve ter pelo menos 2 caracteres." });
+    }
+
+    const rc = db.prepare("SELECT id FROM repair_cases WHERE id = ?").get(repairCaseId);
+    if (!rc) return res.status(404).json({ error: "Caso não encontrado." });
+
+    const responsibleName = (req as Request).sessionUser?.displayName ?? null;
+
+    recordOperationalEvent(db, {
+      repairCaseId,
+      eventType: "NOTE_ADDED",
+      responsibleName,
+      notes: note.trim(),
+    });
+
+    const history = db.prepare(`
+      SELECT * FROM operational_events
+      WHERE entity_type = 'repair_case' AND entity_id = ?
+      ORDER BY created_at DESC LIMIT 50
+    `).all(String(repairCaseId));
+
+    res.json({ ok: true, history });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Iniciar reparo ───────────────────────────────────────────────────────
+
+repairQueueRouter.post("/fila-reparos/:id/start-repair", requireAuth, (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const responsibleName = (req as Request).sessionUser?.displayName ?? null;
+    startRepair(db, repairCaseId, { userId, responsibleName });
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof RepairFlowError) {
+      const code = err.code === "NOT_FOUND" ? 404 : 422;
+      return res.status(code).json({ error: err.message, code: err.code });
+    }
+    next(err);
+  }
+});
+
+// ─── Concluir reparo ──────────────────────────────────────────────────────
+
+repairQueueRouter.post("/fila-reparos/:id/complete-repair", requireAuth, (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const responsibleName = (req as Request).sessionUser?.displayName ?? null;
+    const { notes } = req.body as { notes?: string };
+    completeRepair(db, repairCaseId, { userId, responsibleName, notes: notes ?? null });
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof RepairFlowError) {
+      const code = err.code === "NOT_FOUND" ? 404 : 422;
+      return res.status(code).json({ error: err.message, code: err.code });
+    }
     next(err);
   }
 });

@@ -13,8 +13,8 @@ export type NextActionCode =
   | "ADD_TO_PURCHASE"
   | "CHECK_PURCHASE_ORDER"
   | "DIRECT_TO_TECHNICIAN"
-  | "AWAIT_TECHNICIAN_ENTRY"
-  | "AWAIT_REPAIR_EXECUTION"
+  | "START_REPAIR"
+  | "COMPLETE_REPAIR"
   | "AWAIT_TRIAGE"
   | "VIEW_HISTORY"
   | "REOPEN_OR_REVIEW";
@@ -110,19 +110,19 @@ export function deriveNextAction(
 
     case "DIRECIONADO_TECNICO":
       return {
-        code: "AWAIT_TECHNICIAN_ENTRY",
-        label: "Aguardar entrada no técnico",
-        description: "Aparelho direcionado ao técnico. Aguardando início do reparo.",
-        enabled: false,
+        code: "START_REPAIR",
+        label: "Iniciar reparo",
+        description: "Aparelho direcionado ao técnico. Confirme o início do reparo.",
+        enabled: true,
         requiredRole: "OPERATOR",
       };
 
     case "EM_REPARO":
       return {
-        code: "AWAIT_REPAIR_EXECUTION",
-        label: "Aguardar execução",
-        description: "Reparo em execução pelo técnico.",
-        enabled: false,
+        code: "COMPLETE_REPAIR",
+        label: "Concluir reparo",
+        description: "Reparo em execução. Confirme a conclusão para consumir as peças reservadas.",
+        enabled: true,
         requiredRole: "OPERATOR",
       };
 
@@ -130,7 +130,7 @@ export function deriveNextAction(
     case "TRIAGEM_FINAL":
       return {
         code: "AWAIT_TRIAGE",
-        label: "Aguardar resultado da triagem",
+        label: "Aguardar triagem final",
         description: "Reparo executado. Aguardando triagem final de qualidade.",
         enabled: false,
         requiredRole: "OPERATOR",

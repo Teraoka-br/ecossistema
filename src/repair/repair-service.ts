@@ -13,7 +13,7 @@ export const TERMINAL_WORKFLOW_STATUSES: WorkflowStatus[] = ["CONCLUIDO", "VENDA
 
 export type PartStatus =
   | "PEDIR_PECA" | "AGUARDANDO_RECEBIMENTO" | "INDICADA"
-  | "RESERVADA" | "SEPARADA" | "CANCELADA" | "VERIFICAR";
+  | "RESERVADA" | "SEPARADA" | "CONSUMIDA" | "CANCELADA" | "VERIFICAR";
 
 export interface RepairCase {
   id: number;

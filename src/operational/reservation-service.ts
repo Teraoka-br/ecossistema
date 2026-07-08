@@ -2,6 +2,7 @@ import type { Db } from "../db/database.js";
 import { normalizeKey } from "../domain/text.js";
 import { requestMatchRecompute } from "../match/engine-orchestrator.js";
 import { getCurrentOperationalStock } from "./stock-service.js";
+import { recordOperationalEvent } from "./operational-event-service.js";
 
 export interface OperationalReservation {
   id: number;
@@ -483,7 +484,7 @@ export function directToTechnician(
   }
 
   // Valida técnico
-  const tech = db.prepare("SELECT id, active, type FROM staff_members WHERE id = ?").get(params.technicianId) as { id: number; active: number; type: string } | undefined;
+  const tech = db.prepare("SELECT id, name, active, type FROM staff_members WHERE id = ?").get(params.technicianId) as { id: number; name: string; active: number; type: string } | undefined;
   if (!tech) throw new ReservationError("TECH_NOT_FOUND", "Técnico não encontrado.");
   if (!tech.active) throw new ReservationError("TECH_INACTIVE", "Técnico está inativo.");
   if (tech.type !== "TECHNICIAN") throw new ReservationError("TECH_INVALID_TYPE", "Colaborador não é um técnico.");
@@ -505,6 +506,8 @@ export function directToTechnician(
     );
   }
 
+  const prevStatus = rc.workflow_status as string;
+
   db.prepare(`
     UPDATE repair_cases SET
       workflow_status = 'DIRECIONADO_TECNICO',
@@ -517,7 +520,130 @@ export function directToTechnician(
     WHERE id = ?
   `).run(params.technicianId, params.userId ?? null, params.notes ?? null, params.userId ?? null, repairCaseId);
 
+  recordOperationalEvent(db, {
+    repairCaseId,
+    eventType: "DIRECTED_TO_TECHNICIAN",
+    previousStatus: prevStatus,
+    newStatus: "DIRECIONADO_TECNICO",
+    responsibleName: tech.name,
+    notes: params.notes ?? null,
+  });
+
   requestMatchRecompute(db, "DIRECTED_TO_TECHNICIAN", "repair_case", repairCaseId);
+}
+
+export class RepairFlowError extends Error {
+  constructor(public readonly code: string, message: string) {
+    super(message);
+    this.name = "RepairFlowError";
+  }
+}
+
+/** Inicia reparo — só permitido em DIRECIONADO_TECNICO. */
+export function startRepair(
+  db: Db,
+  repairCaseId: number,
+  params: { userId: number | null; responsibleName?: string | null },
+): void {
+  const rc = db.prepare("SELECT * FROM repair_cases WHERE id = ?").get(repairCaseId) as Record<string, unknown> | undefined;
+  if (!rc) throw new RepairFlowError("NOT_FOUND", "Caso não encontrado.");
+  if (rc.workflow_status !== "DIRECIONADO_TECNICO") {
+    throw new RepairFlowError(
+      "INVALID_STATUS",
+      `Caso deve estar em DIRECIONADO_TECNICO para iniciar reparo (atual: ${rc.workflow_status}).`,
+    );
+  }
+
+  db.prepare(`
+    UPDATE repair_cases SET workflow_status = 'EM_REPARO', updated_at = datetime('now'), updated_by_user_id = ?
+    WHERE id = ?
+  `).run(params.userId ?? null, repairCaseId);
+
+  recordOperationalEvent(db, {
+    repairCaseId,
+    eventType: "REPAIR_STARTED",
+    previousStatus: "DIRECIONADO_TECNICO",
+    newStatus: "EM_REPARO",
+    responsibleName: params.responsibleName ?? null,
+  });
+}
+
+/** Conclui reparo — consome reservas ACTIVE em transação única. */
+export function completeRepair(
+  db: Db,
+  repairCaseId: number,
+  params: { userId: number | null; responsibleName?: string | null; notes?: string | null },
+): void {
+  const rc = db.prepare("SELECT * FROM repair_cases WHERE id = ?").get(repairCaseId) as Record<string, unknown> | undefined;
+  if (!rc) throw new RepairFlowError("NOT_FOUND", "Caso não encontrado.");
+  if (rc.workflow_status !== "EM_REPARO") {
+    throw new RepairFlowError(
+      "INVALID_STATUS",
+      `Caso deve estar em EM_REPARO para concluir reparo (atual: ${rc.workflow_status}).`,
+    );
+  }
+
+  const activeReservations = db.prepare(
+    "SELECT * FROM operational_reservations WHERE repair_case_id = ? AND status = 'ACTIVE'"
+  ).all(repairCaseId) as Record<string, unknown>[];
+
+  if (activeReservations.length === 0) {
+    throw new RepairFlowError("NO_ACTIVE_RESERVATIONS", "Nenhuma reserva ativa encontrada para consumir. Verifique se as peças foram separadas.");
+  }
+
+  db.exec("BEGIN");
+  try {
+    for (const res of activeReservations) {
+      const moveResult = db.prepare(`
+        INSERT INTO stock_movements
+          (movement_type, chave_peca, chave_peca_norm, referencia, referencia_norm, quantity,
+           source_type, source_id, reservation_id, created_by_user_id)
+        VALUES ('REPAIR_CONSUMPTION',?,?,?,?,?,'operational_reservation',?,?,?)
+      `).run(
+        res.chave_peca as string,
+        res.chave_peca_norm as string,
+        (res.reference as string | null) ?? "",
+        (res.reference_norm as string | null) ?? "",
+        -((res.quantity as number) || 1),
+        res.id as number,
+        res.id as number,
+        params.userId ?? null,
+      );
+
+      const movementId = moveResult.lastInsertRowid as number;
+
+      db.prepare(`
+        UPDATE operational_reservations SET
+          status = 'CONSUMED', consumed_at = datetime('now'),
+          consumed_by_user_id = ?, stock_movement_id = ?
+        WHERE id = ?
+      `).run(params.userId ?? null, movementId, res.id as number);
+
+      db.prepare(
+        "UPDATE part_requests SET status = 'CONSUMIDA', updated_at = datetime('now') WHERE id = ?"
+      ).run(res.part_request_id as number);
+    }
+
+    db.prepare(`
+      UPDATE repair_cases SET workflow_status = 'REPARO_EXECUTADO', updated_at = datetime('now'), updated_by_user_id = ?
+      WHERE id = ?
+    `).run(params.userId ?? null, repairCaseId);
+
+    recordOperationalEvent(db, {
+      repairCaseId,
+      eventType: "REPAIR_COMPLETED",
+      previousStatus: "EM_REPARO",
+      newStatus: "REPARO_EXECUTADO",
+      responsibleName: params.responsibleName ?? null,
+      notes: params.notes ?? null,
+    });
+
+    db.exec("COMMIT");
+    requestMatchRecompute(db, "REPAIR_COMPLETED", "repair_case", repairCaseId);
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

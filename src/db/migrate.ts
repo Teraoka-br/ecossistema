@@ -31,6 +31,21 @@ function appliedMigrations(db: Db): Set<string> {
   return new Set(rows.map((r) => r.name));
 }
 
+const BACKUP_RETENTION = 5;
+
+/** Remove backups mais antigos, mantendo apenas os BACKUP_RETENTION mais recentes. */
+function pruneOldBackups(): void {
+  if (!fs.existsSync(config.backupDir)) return;
+  const files = fs
+    .readdirSync(config.backupDir)
+    .filter((f) => f.endsWith(".sqlite") || f.includes(".sqlite.bkp"))
+    .map((f) => ({ f, mtime: fs.statSync(path.join(config.backupDir, f)).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime);
+  for (const { f } of files.slice(BACKUP_RETENTION)) {
+    try { fs.unlinkSync(path.join(config.backupDir, f)); } catch { /* ignore */ }
+  }
+}
+
 /** Faz backup do arquivo de banco antes de aplicar migrations. */
 function backupDatabase(db: Db): void {
   if (config.databasePath === ":memory:") return;
@@ -44,6 +59,7 @@ function backupDatabase(db: Db): void {
   const dest = path.join(config.backupDir, `app-${stamp}.sqlite`);
   fs.copyFileSync(config.databasePath, dest);
   console.log(`[migrate] backup criado em ${dest}`);
+  pruneOldBackups();
 }
 
 export interface MigrationOutcome {

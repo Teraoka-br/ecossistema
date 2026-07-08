@@ -27,9 +27,10 @@ describe("deriveNextAction", () => {
     expect(a.enabled).toBe(true);
   });
 
-  it("DIRECIONADO_TECNICO → disabled action", () => {
+  it("DIRECIONADO_TECNICO → START_REPAIR habilitado", () => {
     const a = deriveNextAction("DIRECIONADO_TECNICO");
-    expect(a.enabled).toBe(false);
+    expect(a.code).toBe("START_REPAIR");
+    expect(a.enabled).toBe(true);
   });
 
   it("CONCLUIDO → VIEW_HISTORY", () => {
