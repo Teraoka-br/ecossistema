@@ -27,6 +27,18 @@ export function createApp(): Express {
   // ─── Públicas (não exigem auth) ──────────────────────────────────────────
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
+  app.get("/api/runtime-info", (_req, res) => {
+    const dbPath = config.databasePath;
+    const dbFile = dbPath === ":memory:" ? ":memory:" : path.basename(dbPath);
+    res.json({
+      mode: process.env.BETA_MODE === "true" ? "BETA" : process.env.NODE_ENV === "production" ? "PRODUCAO" : "DEV",
+      databasePath: dbPath,
+      databaseFile: dbFile,
+      apiPort: config.serverPort,
+      nodeEnv: process.env.NODE_ENV ?? "development",
+    });
+  });
+
   app.get("/api/ready", (_req, res) => {
     const checks: Record<string, boolean | string | number> = {};
     try {

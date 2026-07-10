@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Clock, Wrench, Package, AlertTriangle, CheckCircle2, ChevronRight,
   Star, RefreshCw, X, UserCheck, Loader2,
@@ -119,11 +119,11 @@ function EngineStatusBar({ state, pending, onRun }: { state: EngineState | null;
       {user?.role === "ADMIN" && !isRunning && (
         <button
           className="btn btn-ghost btn-sm"
-          style={{ padding: "2px 6px", marginLeft: 2 }}
+          style={{ padding: "2px 6px", marginLeft: 2, fontSize: "0.68rem" }}
           onClick={onRun}
           title="Executar motor manualmente"
         >
-          <RefreshCw size={11} />
+          Recalcular
         </button>
       )}
     </div>
@@ -212,6 +212,7 @@ export function FilaReparos() {
   const [q, setQ] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [queueSummary, setQueueSummary] = useState<QueueSummary | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
   const { user } = useAuth();
 
   const LIMIT = 30;
@@ -242,6 +243,7 @@ export function FilaReparos() {
 
   const loadItems = useCallback(async () => {
     setLoading(true);
+    setListError(null);
     try {
       const qs = new URLSearchParams({ filter, page: String(page), limit: String(LIMIT) });
       if (q) qs.set("q", q);
@@ -250,7 +252,12 @@ export function FilaReparos() {
         const data = await r.json() as { items: QueueItem[]; total: number };
         setItems(data.items);
         setTotal(data.total);
+      } else {
+        const body = await r.json().catch(() => ({})) as { error?: string };
+        setListError(body.error ?? `Erro ${r.status} ao carregar a fila.`);
       }
+    } catch (e) {
+      setListError((e as Error).message === "Failed to fetch" ? "API indisponível." : (e as Error).message);
     } finally {
       setLoading(false);
     }
@@ -261,6 +268,18 @@ export function FilaReparos() {
     void loadEngine();
     void loadSummary();
   }, [loadItems, loadEngine, loadSummary]);
+
+  const prevEngineStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!engineState) return;
+    const prev = prevEngineStatusRef.current;
+    prevEngineStatusRef.current = engineState.status;
+    // Motor acabou de terminar: recarregar dados para refletir resultado real
+    if (prev === "RUNNING" && engineState.status === "IDLE") {
+      void loadSummary();
+      void loadItems();
+    }
+  }, [engineState, loadSummary, loadItems]);
 
   useEffect(() => {
     if (!engineState || (engineState.status !== "RUNNING" && engineState.status !== "STALE")) return;
@@ -301,8 +320,8 @@ export function FilaReparos() {
           <EngineStatusBar state={engineState} pending={pending} onRun={runEngine} />
           <button
             className="btn btn-ghost btn-sm"
-            onClick={() => { void loadItems(); void loadEngine(); }}
-            title="Atualizar"
+            onClick={() => { void loadSummary(); void loadItems(); void loadEngine(); }}
+            title="Atualizar fila"
           >
             <RefreshCw size={13} />
           </button>
@@ -374,14 +393,31 @@ export function FilaReparos() {
         <div className="loading-state">
           <Loader2 size={18} className="spin" /> Carregando fila…
         </div>
+      ) : listError ? (
+        <div className="banner err" style={{ marginTop: "1rem" }}>
+          <strong>Erro ao carregar a fila:</strong> {listError}
+        </div>
       ) : items.length === 0 ? (
         <div className="empty-state">
           <Boxes size={40} style={{ opacity: 0.25 }} />
           <div>
-            <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>Nenhum aparelho nesta fila</div>
-            <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-              {filter === "DO_NOW" ? "Todos os aparelhos estão em dia." : `Sem itens no filtro "${FILTER_LABELS[filter]}".`}
-            </div>
+            {filter === "TODOS" ? (
+              <>
+                <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>Nenhum aparelho cadastrado</div>
+                <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Analise um aparelho para começar.</div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>
+                  Nenhum aparelho no filtro "{FILTER_LABELS[filter]}"
+                </div>
+                <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                  {kpiTotal > 0
+                    ? `Há ${kpiTotal} aparelho${kpiTotal !== 1 ? "s" : ""} em outros filtros.`
+                    : "Troque o filtro ou use busca para encontrar aparelhos."}
+                </div>
+              </>
+            )}
           </div>
         </div>
       ) : (

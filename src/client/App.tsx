@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import {
   Wrench, List, ShoppingCart, Boxes, ScanBarcode,
@@ -34,6 +34,31 @@ function LoadingScreen() {
   );
 }
 
+interface RuntimeInfo { mode: string; databaseFile: string; apiPort: number }
+
+function BetaBanner() {
+  const [info, setInfo] = useState<RuntimeInfo | null>(null);
+  useEffect(() => {
+    fetch("/api/runtime-info")
+      .then((r) => r.ok ? r.json() as Promise<RuntimeInfo> : Promise.reject())
+      .then(setInfo)
+      .catch(() => { /* silencioso — endpoint pode não existir em versões antigas */ });
+  }, []);
+  if (!info || info.mode !== "BETA") return null;
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: "0.3rem",
+      fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.06em",
+      background: "rgba(245,158,11,0.15)", color: "var(--warn-text)",
+      border: "1px solid rgba(245,158,11,0.35)",
+      borderRadius: "var(--r-sm)", padding: "0.15rem 0.5rem",
+      userSelect: "none",
+    }}>
+      BETA · {info.databaseFile} · :{info.apiPort}
+    </span>
+  );
+}
+
 function AuthenticatedShell() {
   const { user, refetch } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -58,6 +83,7 @@ function AuthenticatedShell() {
           <span className="topbar-brand-dot" />
           Sistema de Peças
         </span>
+        <BetaBanner />
         <span className="topbar-user">
           <span>{user.displayName}</span>
           <span className="topbar-role">{isAdmin ? "Admin" : "Operador"}</span>
