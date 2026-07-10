@@ -401,10 +401,17 @@ export function FilaReparos() {
         <div className="empty-state">
           <Boxes size={40} style={{ opacity: 0.25 }} />
           <div>
-            {filter === "TODOS" ? (
+            {kpiTotal === 0 ? (
               <>
-                <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>Nenhum aparelho cadastrado</div>
-                <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Analise um aparelho para começar.</div>
+                <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>Nenhum aparelho importado ainda</div>
+                <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                  Importe os dados em <strong>Dados</strong> para começar.
+                </div>
+              </>
+            ) : filter === "TODOS" ? (
+              <>
+                <div style={{ fontWeight: 600, marginBottom: "0.25rem" }}>Nenhum aparelho encontrado</div>
+                <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Nenhum resultado para a busca atual.</div>
               </>
             ) : (
               <>
@@ -412,9 +419,7 @@ export function FilaReparos() {
                   Nenhum aparelho no filtro "{FILTER_LABELS[filter]}"
                 </div>
                 <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-                  {kpiTotal > 0
-                    ? `Há ${kpiTotal} aparelho${kpiTotal !== 1 ? "s" : ""} em outros filtros.`
-                    : "Troque o filtro ou use busca para encontrar aparelhos."}
+                  {`Há ${kpiTotal} aparelho${kpiTotal !== 1 ? "s" : ""} em outros filtros.`}
                 </div>
               </>
             )}

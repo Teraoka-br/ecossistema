@@ -82,9 +82,11 @@ function computeBlockers(form: FormState, parts: PartDraft[]): Blockers {
   if (!form.model) b.model = "Modelo obrigatório.";
   if (!form.cost || Number(form.cost) <= 0) b.cost = "Custo deve ser maior que zero.";
   if (!form.estimatedSale || Number(form.estimatedSale) <= 0) b.estimatedSale = "Venda estimada deve ser maior que zero.";
-  if (parts.length === 0) b.parts = "Ao menos uma peça obrigatória.";
-  const missingCor = parts.find((p) => p.incluirCor && !form.color.trim());
-  if (missingCor) b.partCor = `Cor do aparelho obrigatória para "${missingCor.pecaNome || "peça sem nome"}" (checkbox marcada).`;
+  // Linhas vazias (sem nome) são ignoradas; só as preenchidas contam
+  const validParts = parts.filter((p) => p.pecaNome.trim() !== "");
+  if (validParts.length === 0) b.parts = "Ao menos uma peça obrigatória.";
+  const missingCor = validParts.find((p) => p.incluirCor && !form.color.trim());
+  if (missingCor) b.partCor = `Cor do aparelho obrigatória para "${missingCor.pecaNome}" (checkbox marcada).`;
   return b;
 }
 
@@ -143,6 +145,7 @@ export function Analise() {
   // Part suggestions
   const [partSuggestions, setPartSuggestions] = useState<PartSuggestion[]>([]);
   const [activeSuggestKey, setActiveSuggestKey] = useState<string | null>(null);
+  const [highlightedSuggIdx, setHighlightedSuggIdx] = useState(-1);
 
   // ---------------------------------------------------------------------------
   // Search → prefill
@@ -254,12 +257,18 @@ export function Analise() {
   }
 
   const fetchSuggestions = useCallback(async (pecaNome: string, partKey: string) => {
-    if (pecaNome.length < 2) { setPartSuggestions([]); setActiveSuggestKey(null); return; }
+    if (pecaNome.length < 2) {
+      setPartSuggestions([]);
+      setActiveSuggestKey(null);
+      setHighlightedSuggIdx(-1);
+      return;
+    }
     const r = await fetch(`/api/analise/part-suggestions?q=${encodeURIComponent(pecaNome)}`).catch(() => null);
     if (!r?.ok) return;
     const d = await r.json() as { suggestions: PartSuggestion[] };
     setPartSuggestions(d.suggestions);
     setActiveSuggestKey(partKey);
+    setHighlightedSuggIdx(-1);
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -281,7 +290,8 @@ export function Analise() {
     try {
       // modelo sempre vem dos dados do aparelho — nunca da peça individualmente
       // se isChavePecaExistente, pecaNome já é o CHAVEPECA completo (não concatenar modelo)
-      const partsPayload = parts.map((p) => {
+      // linhas sem nome são ignoradas (não enviadas ao backend)
+      const partsPayload = parts.filter((p) => p.pecaNome.trim() !== "").map((p) => {
         const corTrim = form.color.trim();
         let chavePeca: string;
         if (p.isChavePecaExistente) {
@@ -555,7 +565,34 @@ export function Analise() {
                           setPart(part.key, "isChavePecaExistente", false);
                           fetchSuggestions(e.target.value, part.key);
                         }}
-                        onBlur={() => setTimeout(() => { if (activeSuggestKey === part.key) setActiveSuggestKey(null); }, 150)}
+                        onBlur={() => setTimeout(() => {
+                          if (activeSuggestKey === part.key) {
+                            setActiveSuggestKey(null);
+                            setHighlightedSuggIdx(-1);
+                          }
+                        }, 150)}
+                        onKeyDown={(e) => {
+                          if (activeSuggestKey !== part.key || partSuggestions.length === 0) return;
+                          if (e.key === "ArrowDown") {
+                            e.preventDefault();
+                            setHighlightedSuggIdx((i) => Math.min(i + 1, partSuggestions.length - 1));
+                          } else if (e.key === "ArrowUp") {
+                            e.preventDefault();
+                            setHighlightedSuggIdx((i) => Math.max(i - 1, 0));
+                          } else if (e.key === "Enter" && highlightedSuggIdx >= 0) {
+                            e.preventDefault();
+                            const s = partSuggestions[highlightedSuggIdx];
+                            setPart(part.key, "pecaNome", s.text);
+                            setPart(part.key, "isChavePecaExistente", s.type === "chave");
+                            setActiveSuggestKey(null);
+                            setPartSuggestions([]);
+                            setHighlightedSuggIdx(-1);
+                          } else if (e.key === "Escape") {
+                            setActiveSuggestKey(null);
+                            setPartSuggestions([]);
+                            setHighlightedSuggIdx(-1);
+                          }
+                        }}
                         placeholder="Ex.: TELA, BATERIA, TAMPA TRASEIRA"
                       />
                       {activeSuggestKey === part.key && partSuggestions.length > 0 && (
@@ -564,13 +601,20 @@ export function Analise() {
                           background: "var(--color-surface)", border: "1px solid var(--color-border)",
                           borderRadius: 4, maxHeight: 150, overflowY: "auto",
                         }}>
-                          {partSuggestions.map((s) => (
-                            <div key={s.text + s.type} style={{ padding: "4px 8px", cursor: "pointer", fontSize: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                          {partSuggestions.map((s, idx) => (
+                            <div key={s.text + s.type}
+                              style={{
+                                padding: "4px 8px", cursor: "pointer", fontSize: 12,
+                                display: "flex", justifyContent: "space-between", alignItems: "center",
+                                background: idx === highlightedSuggIdx ? "var(--elevated)" : "transparent",
+                              }}
+                              onMouseEnter={() => setHighlightedSuggIdx(idx)}
                               onMouseDown={() => {
                                 setPart(part.key, "pecaNome", s.text);
                                 setPart(part.key, "isChavePecaExistente", s.type === "chave");
                                 setActiveSuggestKey(null);
                                 setPartSuggestions([]);
+                                setHighlightedSuggIdx(-1);
                               }}>
                               <span>{s.text}</span>
                               {s.type === "chave" && (

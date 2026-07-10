@@ -23,6 +23,7 @@
     "test:watch": "vitest",
     "cleanup:invalid-reservations": "tsx scripts/cleanup-invalid-reservations.ts",
     "beta:init": "tsx scripts/beta-init.ts",
+    "beta:reset": "tsx scripts/beta-reset.ts",
     "beta:start": "tsx scripts/beta-start.ts",
     "beta:stop": "tsx scripts/beta-stop.ts",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
