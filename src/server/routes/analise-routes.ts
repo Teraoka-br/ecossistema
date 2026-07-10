@@ -5,11 +5,12 @@
  * POST /api/analise/complete
  */
 
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { getDb } from "../../db/database.js";
 import { requireAuth } from "../middleware/auth-middleware.js";
 import { getPrefill } from "../../analise/prefill-service.js";
 import { normalizeKey } from "../../domain/text.js";
+import { recordOperationalEvent } from "../../operational/operational-event-service.js";
 
 export const analiseRouter = Router();
 
@@ -44,7 +45,8 @@ interface PartInput {
 analiseRouter.post("/complete", requireAuth, async (req, res, next) => {
   try {
     const db = getDb();
-    const userId = (req as typeof req & { sessionUser?: { id?: number } }).sessionUser?.id ?? null;
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const responsibleName = (req as Request).sessionUser?.displayName ?? null;
 
     const {
       existingCaseId,
@@ -162,10 +164,12 @@ analiseRouter.post("/complete", requireAuth, async (req, res, next) => {
       ).run(caseId);
 
       // Audit event
-      db.prepare(
-        `INSERT INTO operational_events (event_type, entity_type, entity_id, created_by_user_id)
-         VALUES ('ANALYSIS_COMPLETED', 'repair_case', ?, ?)`,
-      ).run(caseId, userId);
+      recordOperationalEvent(db, {
+        repairCaseId: caseId,
+        eventType: "ANALYSIS_COMPLETED",
+        newStatus: "PEDIR_PECA",
+        responsibleName,
+      });
 
       db.exec("COMMIT");
 

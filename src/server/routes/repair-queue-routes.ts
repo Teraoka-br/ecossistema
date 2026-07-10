@@ -498,7 +498,14 @@ repairQueueRouter.post("/match-rules/:id/activate", requireAuth, requireAdmin, a
     const { requestMatchRecompute, processPendingRecompute } = await import("../../match/engine-orchestrator.js");
     requestMatchRecompute(db, `RULE_ACTIVATED_v${updated.version}`, "match_rule_set", updated.id);
     const result = await processPendingRecompute(db);
-    res.json({ ...updated, casesEvaluated: result?.casesEvaluated ?? 0 });
+    res.json({
+      ...updated,
+      casesEvaluated: result?.casesEvaluated ?? 0,
+      casesChanged: result?.casesChanged ?? 0,
+      fullKitsFound: result?.fullKitsFound ?? 0,
+      partialKitsFound: result?.partialKitsFound ?? 0,
+      runId: result?.runId ?? null,
+    });
   } catch (err) {
     next(err);
   }

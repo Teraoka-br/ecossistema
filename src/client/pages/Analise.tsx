@@ -158,22 +158,11 @@ export function Analise() {
     setSaveError(null);
 
     try {
-      // Check for existing repair_case first
       const isImei = /^\d{10,}/.test(query.trim());
-      const q = encodeURIComponent(query.trim());
-      const caseRes = await fetch(`/api/repair-cases?limit=20`);
-      let existId: number | null = null;
-      if (caseRes.ok) {
-        const d = await caseRes.json();
-        const q2 = query.trim().toLowerCase();
-        const found = (d.cases as Array<{ id: number; imei: string | null; os: string | null }>)
-          .find((c) => (c.imei ?? "").toLowerCase() === q2 || (c.os ?? "").toLowerCase() === q2);
-        if (found) existId = found.id;
-      }
-      setExistingCaseId(existId);
+      const qEnc = encodeURIComponent(query.trim());
 
-      // Fetch prefill
-      const pRes = await fetch(`/api/analise/prefill?q=${q}`);
+      // 1. Fetch prefill (fontes oficiais — SH vence)
+      const pRes = await fetch(`/api/analise/prefill?q=${qEnc}`);
       if (!pRes.ok) {
         const err = await pRes.json().catch(() => ({}));
         throw new Error((err as { error?: string }).error ?? `Erro ${pRes.status}`);
@@ -181,28 +170,34 @@ export function Analise() {
       const p = await pRes.json() as PrefillResult;
       setPrefill(p);
 
-      // Populate form from prefill (or existing case if found)
-      if (existId) {
-        const cRes = await fetch(`/api/repair-cases/${existId}`);
-        if (cRes.ok) {
-          const cd = await cRes.json();
-          const rc = cd.repairCase as Record<string, unknown>;
-          setForm({
-            imei: String(rc["imei"] ?? ""),
-            os: String(rc["os"] ?? ""),
-            brand: String(rc["brand"] ?? ""),
-            model: String(rc["model"] ?? ""),
-            color: String(rc["color"] ?? ""),
-            ageDays: rc["ageDays"] != null ? String(rc["ageDays"]) : "",
-            cost: rc["cost"] != null ? String(rc["cost"]) : "",
-            estimatedSale: rc["estimatedSale"] != null ? String(rc["estimatedSale"]) : "",
-            problema: String(rc["problema"] ?? ""),
-            notes: String(rc["notes"] ?? ""),
-          });
-          setFieldOrigins({});
+      // 2. Aplicar prefill ao formulário (SH/HIS/PEACS têm precedência)
+      applyPrefillToForm(p, isImei ? query.trim() : null, !isImei ? query.trim() : null);
+
+      // 3. Busca exata de caso existente (sem sobrescrever os campos do formulário)
+      const searchParam = isImei ? `imei=${qEnc}` : `os=${qEnc}`;
+      const caseRes = await fetch(`/api/repair-cases/search?${searchParam}`);
+      if (caseRes.ok) {
+        const cd = await caseRes.json() as { cases: Array<{ id: number; parts?: unknown[] }> };
+        const found = cd.cases[0] ?? null;
+        if (found) {
+          setExistingCaseId(found.id);
+          // Carregar peças existentes do caso (mas NÃO sobrescrever os campos do form)
+          const rcRes = await fetch(`/api/repair-cases/${found.id}`);
+          if (rcRes.ok) {
+            const rcData = await rcRes.json() as { repairCase: { parts?: Array<{ description: string | null; chavePeca: string | null }> } };
+            const existingParts = rcData.repairCase.parts ?? [];
+            if (existingParts.length > 0) {
+              setParts(existingParts.map((ep) => ({
+                key: String(Date.now() + Math.random()),
+                pecaNome: ep.description ?? ep.chavePeca ?? "",
+                incluirCor: false,
+                isChavePecaExistente: true,
+              })));
+            }
+          }
+        } else {
+          setExistingCaseId(null);
         }
-      } else {
-        applyPrefillToForm(p, isImei ? query.trim() : null, !isImei ? query.trim() : null);
       }
     } catch (err) {
       setSearchError((err as Error).message);
@@ -281,14 +276,23 @@ export function Analise() {
     try {
       // modelo sempre vem dos dados do aparelho — nunca da peça individualmente
       // se isChavePecaExistente, pecaNome já é o CHAVEPECA completo (não concatenar modelo)
-      const partsPayload = parts.map((p) => ({
-        pecaNome: p.pecaNome,
-        incluirCor: p.incluirCor && !p.isChavePecaExistente,
-        corUsada: (p.incluirCor && !p.isChavePecaExistente) ? form.color : "",
-        chavePeca: p.isChavePecaExistente
-          ? p.pecaNome.trim().toUpperCase()
-          : buildChavePeca(p.pecaNome, form.model, p.incluirCor, form.color),
-      }));
+      const partsPayload = parts.map((p) => {
+        const corTrim = form.color.trim();
+        let chavePeca: string;
+        if (p.isChavePecaExistente) {
+          chavePeca = (p.incluirCor && corTrim)
+            ? (p.pecaNome.trim() + " " + corTrim).toUpperCase()
+            : p.pecaNome.trim().toUpperCase();
+        } else {
+          chavePeca = buildChavePeca(p.pecaNome, form.model, p.incluirCor, form.color);
+        }
+        return {
+          pecaNome: p.pecaNome,
+          incluirCor: p.incluirCor,
+          corUsada: (p.incluirCor && corTrim) ? corTrim : "",
+          chavePeca,
+        };
+      });
 
       if (finalize) {
         // Full atomic save via new endpoint
@@ -440,7 +444,7 @@ export function Analise() {
 
           {existingCaseId && (
             <div className="alert alert-info" style={{ marginBottom: "1rem" }}>
-              Editando caso existente #{existingCaseId}.
+              Editando caso existente #{existingCaseId}. Dados atualizados pelas fontes oficiais.
             </div>
           )}
 
@@ -530,7 +534,9 @@ export function Analise() {
             )}
             {parts.map((part) => {
               const preview = part.isChavePecaExistente
-                ? part.pecaNome.trim().toUpperCase()
+                ? (part.incluirCor && form.color.trim()
+                    ? (part.pecaNome.trim() + " " + form.color.trim()).toUpperCase()
+                    : part.pecaNome.trim().toUpperCase())
                 : buildChavePeca(part.pecaNome, form.model, part.incluirCor, form.color);
               return (
                 <div key={part.key} style={{ borderBottom: "1px solid var(--color-border)", paddingBottom: "0.75rem", marginBottom: "0.75rem" }}>
@@ -558,7 +564,6 @@ export function Analise() {
                               onMouseDown={() => {
                                 setPart(part.key, "pecaNome", s.text);
                                 setPart(part.key, "isChavePecaExistente", s.type === "chave");
-                                if (s.type === "chave") setPart(part.key, "incluirCor", false);
                                 setActiveSuggestKey(null);
                                 setPartSuggestions([]);
                               }}>

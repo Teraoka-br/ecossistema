@@ -16,7 +16,8 @@ interface MatchRuleSet {
   activatedAt: string | null;
 }
 
-function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: number, casesEvaluated: number) => void }) {
+interface ActivateStats { casesEvaluated: number; casesChanged: number; runId: number | null }
+function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: number, stats: ActivateStats) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [activating, setActivating] = useState(false);
   const [reason, setReason] = useState("");
@@ -32,8 +33,12 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
         body: JSON.stringify({ reason }),
       });
       if (r.ok) {
-        const d = await r.json() as { casesEvaluated?: number };
-        onActivate(rule.id, d.casesEvaluated ?? 0);
+        const d = await r.json() as { casesEvaluated?: number; casesChanged?: number; runId?: number | null };
+        onActivate(rule.id, {
+          casesEvaluated: d.casesEvaluated ?? 0,
+          casesChanged: d.casesChanged ?? 0,
+          runId: d.runId ?? null,
+        });
       }
     } finally {
       setActivating(false);
@@ -246,10 +251,14 @@ export function AdminMatchRules() {
             <div className="alert alert-ok" style={{ marginBottom: "0.75rem" }}>{activateMsg}</div>
           )}
           {rules.map(r => (
-            <RuleCard key={r.id} rule={r} onActivate={(_, cases) => {
+            <RuleCard key={r.id} rule={r} onActivate={(_, stats) => {
               void load();
-              setActivateMsg(`Regras aplicadas. ${cases} caso${cases !== 1 ? "s" : ""} reavaliado${cases !== 1 ? "s" : ""}.`);
-              setTimeout(() => setActivateMsg(null), 5000);
+              const { casesEvaluated, casesChanged } = stats;
+              const msg = casesChanged === 0
+                ? `Regras aplicadas. ${casesEvaluated} caso${casesEvaluated !== 1 ? "s" : ""} avaliado${casesEvaluated !== 1 ? "s" : ""}. Nenhum status mudou. Pesos podem alterar prioridade sem alterar quantidade de MATCH.`
+                : `Regras aplicadas. ${casesEvaluated} caso${casesEvaluated !== 1 ? "s" : ""} avaliado${casesEvaluated !== 1 ? "s" : ""}, ${casesChanged} alterado${casesChanged !== 1 ? "s" : ""}.`;
+              setActivateMsg(msg);
+              setTimeout(() => setActivateMsg(null), 8000);
             }} />
           ))}
         </div>
