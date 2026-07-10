@@ -133,8 +133,8 @@ export async function getActiveSession(): Promise<CountSession | null> {
   return r.session;
 }
 
-export async function createCountSession(responsibleName: string, notes?: string): Promise<CountSession> {
-  const r = await postJson<{ session: CountSession }>("/api/count-sessions", { responsibleName, notes });
+export async function createCountSession(responsibleName: string, notes?: string, countType?: "OFICIAL" | "PARCIAL_TESTE"): Promise<CountSession> {
+  const r = await postJson<{ session: CountSession }>("/api/count-sessions", { responsibleName, notes, countType });
   return r.session;
 }
 

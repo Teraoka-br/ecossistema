@@ -199,11 +199,16 @@ export function Analise() {
           setExistingCaseId(null);
         }
       }
+      setStep("form");
     } catch (err) {
-      setSearchError((err as Error).message);
+      const msg = (err as Error).message;
+      setSearchError(
+        msg === "Failed to fetch"
+          ? "API indisponível. Verifique se o servidor está em execução."
+          : msg,
+      );
     } finally {
       setSearching(false);
-      setStep("form");
     }
   }
 

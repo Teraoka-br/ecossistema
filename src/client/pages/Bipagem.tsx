@@ -51,6 +51,7 @@ export function Bipagem() {
 
 function NoSessionView({ onStarted }: { onStarted: () => void }) {
   const [responsibleName, setResponsibleName] = useState("");
+  const [countType, setCountType] = useState<"OFICIAL" | "PARCIAL_TESTE">("OFICIAL");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [batchInfo, setBatchInfo] = useState<{ id: number; ordersFileName: string; analysisFileName: string } | null>(null);
@@ -67,7 +68,7 @@ function NoSessionView({ onStarted }: { onStarted: () => void }) {
     setError(null);
     setBusy(true);
     try {
-      await createCountSession(responsibleName);
+      await createCountSession(responsibleName, undefined, countType);
       onStarted();
     } catch (e) {
       setError((e as Error).message);
@@ -101,17 +102,38 @@ function NoSessionView({ onStarted }: { onStarted: () => void }) {
         </p>
       )}
 
-      <div className="row" style={{ marginTop: "1rem" }}>
-        <div className="field">
-          <label>Responsável pela contagem</label>
-          <input
-            type="text"
-            value={responsibleName}
-            onChange={(e) => setResponsibleName(e.target.value)}
-            placeholder="ex.: João"
-            autoFocus
-          />
+      <div className="field" style={{ marginTop: "1rem" }}>
+        <label>Responsável pela contagem</label>
+        <input
+          type="text"
+          value={responsibleName}
+          onChange={(e) => setResponsibleName(e.target.value)}
+          placeholder="ex.: João"
+          autoFocus
+        />
+      </div>
+
+      <div className="field" style={{ marginTop: "0.75rem" }}>
+        <label>Tipo de contagem</label>
+        <div style={{ display: "flex", gap: "1rem", marginTop: "0.25rem" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+            <input type="radio" name="countType" value="OFICIAL" checked={countType === "OFICIAL"} onChange={() => setCountType("OFICIAL")} />
+            Oficial
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}>
+            <input type="radio" name="countType" value="PARCIAL_TESTE" checked={countType === "PARCIAL_TESTE"} onChange={() => setCountType("PARCIAL_TESTE")} />
+            Parcial / Teste
+          </label>
         </div>
+        {countType === "PARCIAL_TESTE" && (
+          <p className="hint" style={{ marginTop: "0.4rem" }}>
+            Contagem parcial: não exige cobertura de 80% do legado. Ao finalizar, apenas as referências contadas
+            são atualizadas no estoque — as demais mantêm o valor do snapshot anterior.
+          </p>
+        )}
+      </div>
+
+      <div className="row" style={{ marginTop: "1rem" }}>
         <button onClick={start} disabled={busy || !batchInfo || responsibleName.trim() === ""}>
           {busy ? "Iniciando…" : "Iniciar contagem"}
         </button>
@@ -509,6 +531,12 @@ function ReviewFinalize({
       {!summary && <Loading what="resumo" />}
       {summary && (
         <>
+          {session.countType === "PARCIAL_TESTE" && (
+            <div className="banner warn" style={{ marginBottom: "0.75rem" }}>
+              <strong>Contagem parcial / teste.</strong> Ao finalizar, somente as referências contadas nesta sessão
+              serão atualizadas no snapshot oficial. As demais referências manterão os valores do snapshot anterior.
+            </div>
+          )}
           <div className="metrics">
             <div className="metric"><div className="label">Beeps ativos</div><div className="value">{fmtInt(summary.activeScans)}</div></div>
             <div className="metric"><div className="label">Beeps cancelados</div><div className="value">{fmtInt(summary.cancelledScans)}</div></div>

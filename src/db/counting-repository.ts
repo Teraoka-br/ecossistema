@@ -16,6 +16,7 @@ export interface CountSessionRow {
   baseline_snapshot_id: number | null;
   baseline_cutoff_movement_id: number;
   baseline_total_units: number;
+  count_type: "OFICIAL" | "PARCIAL_TESTE";
 }
 
 export interface CountScanRow {
@@ -78,18 +79,21 @@ export function createSession(
     baselineSnapshotId: number | null;
     baselineCutoffMovementId: number;
     baselineTotalUnits: number;
+    countType?: "OFICIAL" | "PARCIAL_TESTE";
   },
 ): CountSessionRow {
   const r = db
     .prepare(
       `INSERT INTO count_sessions
         (import_batch_id, responsible_name, status, notes,
-         baseline_type, baseline_snapshot_id, baseline_cutoff_movement_id, baseline_total_units)
-       VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?)`,
+         baseline_type, baseline_snapshot_id, baseline_cutoff_movement_id, baseline_total_units,
+         count_type)
+       VALUES (?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       p.importBatchId, p.responsibleName, p.notes,
       p.baselineType, p.baselineSnapshotId, p.baselineCutoffMovementId, p.baselineTotalUnits,
+      p.countType ?? "OFICIAL",
     );
   return getSessionByIdOrThrow(db, Number(r.lastInsertRowid));
 }

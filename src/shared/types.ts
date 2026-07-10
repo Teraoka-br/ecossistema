@@ -219,6 +219,7 @@ export interface CountSession {
   cancelledAt: string | null;
   cancelledBy: string | null;
   cancelReason: string | null;
+  countType: "OFICIAL" | "PARCIAL_TESTE";
 }
 
 export interface CountScan {

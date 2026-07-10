@@ -44,6 +44,7 @@ function requireOpenSession(session: CountSessionRow): void {
 export interface CreateSessionInput {
   responsibleName: string;
   notes?: string | null;
+  countType?: "OFICIAL" | "PARCIAL_TESTE";
 }
 
 /** Cria a sessão vinculada ao lote ativo. Lança 409 com a sessão existente se já houver uma OPEN. */
@@ -74,6 +75,7 @@ export function createSession(db: Db, input: CreateSessionInput): CountSessionRo
       baselineSnapshotId: operational.base.snapshotId,
       baselineCutoffMovementId: maxMovementId(db),
       baselineTotalUnits: operational.currentTotal,
+      countType: input.countType ?? "OFICIAL",
     });
   } catch (err) {
     // Corrida rara: o índice único parcial (status='OPEN') pegou uma 2ª tentativa concorrente.
@@ -397,6 +399,7 @@ function summaryFromTotals(
   legacyByRef: Map<string, number>,
   extraBlockers: string[] = [],
   extraWarnings: string[] = [],
+  countType: "OFICIAL" | "PARCIAL_TESTE" = "OFICIAL",
 ): FinalizeSummary {
   const percentVsLegacy = legacyTotal > 0 ? totals.activeScans / legacyTotal : null;
   const belowThreshold =
@@ -406,7 +409,8 @@ function summaryFromTotals(
   const blockers = [...totals.absoluteBlockers, ...extraBlockers];
   if (belowThreshold) {
     warnings.push("COUNT_BELOW_BASELINE_THRESHOLD");
-    if (extraBlockers.length === 0) {
+    // Para PARCIAL_TESTE, o limiar de 80% é só aviso — não bloqueia finalização.
+    if (countType !== "PARCIAL_TESTE" && extraBlockers.length === 0) {
       blockers.push(
         `COUNT_BELOW_BASELINE_THRESHOLD: contagem ativa (${totals.activeScans}) está abaixo de ` +
           `${Math.round(config.countMinCompletenessRatio * 100)}% do estoque legado (${legacyTotal}).`,
@@ -445,11 +449,14 @@ export function buildFinalizeSummary(db: Db, sessionId: number): FinalizeSummary
   const extraWarnings: string[] = [];
   if (movementsDuringCount > 0) {
     extraWarnings.push("STOCK_MOVEMENTS_DURING_COUNT");
-    extraBlockers.push(
-      `STOCK_MOVEMENTS_DURING_COUNT: ${movementsDuringCount} movimentação(ões) de estoque ocorreram durante esta contagem.`,
-    );
+    // Para PARCIAL_TESTE, movimentações durante a contagem não bloqueiam.
+    if (session.count_type !== "PARCIAL_TESTE") {
+      extraBlockers.push(
+        `STOCK_MOVEMENTS_DURING_COUNT: ${movementsDuringCount} movimentação(ões) de estoque ocorreram durante esta contagem.`,
+      );
+    }
   }
-  return summaryFromTotals(totals, legacyTotal, legacyByRef, extraBlockers, extraWarnings);
+  return summaryFromTotals(totals, legacyTotal, legacyByRef, extraBlockers, extraWarnings, session.count_type);
 }
 
 // ===========================================================================
@@ -543,11 +550,13 @@ export function finalizeSession(db: Db, sessionId: number, input: FinalizeInput)
     // desta sessão (baseline congelada na criação) bloqueiam a finalização
     // normal — a contagem física pode já estar desatualizada em relação a
     // peças que entraram no meio do processo.
+    const isPartialTest = fresh.count_type === "PARCIAL_TESTE";
     const movementsDuringCount = countMovementsAfter(db, fresh.baseline_cutoff_movement_id);
     const forceReasonTrimmed = (input.forceReason ?? "").trim();
     const hasValidForce = !!input.forceIncomplete && forceReasonTrimmed.length >= 10;
 
-    if (movementsDuringCount > 0 && !hasValidForce) {
+    // Movimentações bloqueiam apenas contagens OFICIAIS.
+    if (!isPartialTest && movementsDuringCount > 0 && !hasValidForce) {
       throw new CountingError(
         422,
         `${movementsDuringCount} movimentação(ões) de estoque ocorreram durante esta contagem (após o início da ` +
@@ -557,7 +566,8 @@ export function finalizeSession(db: Db, sessionId: number, input: FinalizeInput)
       );
     }
 
-    if (belowThreshold && !hasValidForce) {
+    // Bloqueio de limiar de 80% apenas para contagens OFICIAIS.
+    if (!isPartialTest && belowThreshold && !hasValidForce) {
       throw new CountingError(
         422,
         `Contagem ativa (${totals.activeScans}) está abaixo de ${Math.round(config.countMinCompletenessRatio * 100)}% ` +
@@ -567,46 +577,93 @@ export function finalizeSession(db: Db, sessionId: number, input: FinalizeInput)
       );
     }
 
-    const consolidated = [...totals.recognizedByReference.entries()].map(([referenceNorm, v]) => ({
-      reference: v.reference,
-      referenceNorm,
-      chavePeca: v.chavePeca,
-      chavePecaNorm: v.chavePecaNorm,
-      countedQuantity: v.quantity,
-    }));
+    let consolidated: { reference: string; referenceNorm: string; chavePeca: string | null; chavePecaNorm: string | null; countedQuantity: number }[];
+    let snapshotTotalUnits: number;
+    let snapshotNotes: string | null;
 
-    // O novo snapshot absorve todas as movimentações ocorridas até agora
-    // (inclusive as detectadas durante a contagem) — passam a fazer parte da
-    // base física a partir desta finalização.
+    if (isPartialTest) {
+      // PARCIAL_TESTE: mescla contagem atual sobre a base anterior (snapshot oficial ou legado).
+      // Referências não contadas MANTÊM os valores da base — não são zeradas.
+      const prevSnapshot = q.latestOfficialSnapshot(db);
+      const baseMap = new Map<string, { reference: string; chavePeca: string | null; chavePecaNorm: string | null; quantity: number }>();
+
+      if (prevSnapshot) {
+        for (const item of q.listSnapshotItems(db, prevSnapshot.id)) {
+          baseMap.set(item.reference_norm, {
+            reference: item.reference,
+            chavePeca: item.chave_peca,
+            chavePecaNorm: item.chave_peca_norm,
+            quantity: item.counted_quantity,
+          });
+        }
+      } else if (fresh.import_batch_id) {
+        for (const [refNorm, qty] of q.legacyUnitsByReference(db, fresh.import_batch_id)) {
+          baseMap.set(refNorm, { reference: refNorm, chavePeca: null, chavePecaNorm: null, quantity: qty });
+        }
+      }
+
+      // Sobrepor com os itens contados nesta sessão.
+      for (const [referenceNorm, v] of totals.recognizedByReference) {
+        baseMap.set(referenceNorm, {
+          reference: v.reference,
+          chavePeca: v.chavePeca,
+          chavePecaNorm: v.chavePecaNorm,
+          quantity: v.quantity,
+        });
+      }
+
+      consolidated = [...baseMap.entries()].map(([referenceNorm, v]) => ({
+        reference: v.reference,
+        referenceNorm,
+        chavePeca: v.chavePeca,
+        chavePecaNorm: v.chavePecaNorm,
+        countedQuantity: v.quantity,
+      }));
+      snapshotTotalUnits = consolidated.reduce((s, it) => s + it.countedQuantity, 0);
+      snapshotNotes = "Contagem parcial/teste — apenas referências contadas foram atualizadas.";
+    } else {
+      consolidated = [...totals.recognizedByReference.entries()].map(([referenceNorm, v]) => ({
+        reference: v.reference,
+        referenceNorm,
+        chavePeca: v.chavePeca,
+        chavePecaNorm: v.chavePecaNorm,
+        countedQuantity: v.quantity,
+      }));
+      snapshotTotalUnits = totals.activeScans;
+      snapshotNotes = null;
+    }
+
+    // O novo snapshot absorve todas as movimentações ocorridas até agora.
     const baselineMovementIdMax = maxMovementId(db);
 
     snapshot = repo.createSnapshot(db, {
       countSessionId: sessionId,
       importBatchId: fresh.import_batch_id,
-      totalUnits: totals.activeScans,
+      totalUnits: snapshotTotalUnits,
       createdBy: finalizedBy,
-      notes: null,
+      notes: snapshotNotes,
       baselineMovementIdMax,
     });
     repo.insertSnapshotItems(db, snapshot.id, consolidated);
 
-    // Integridade: soma dos itens = total do snapshot = beeps ativos reconhecidos.
-    const sumItems = consolidated.reduce((sum, it) => sum + it.countedQuantity, 0);
-    if (sumItems !== snapshot.total_units || sumItems !== totals.recognizedUnits) {
-      throw new Error(
-        `Integridade violada na consolidação: soma dos itens (${sumItems}) != total do snapshot ` +
-          `(${snapshot.total_units}) ou != unidades reconhecidas (${totals.recognizedUnits}).`,
-      );
+    // Para OFICIAL: verifica integridade soma == beeps reconhecidos.
+    if (!isPartialTest) {
+      const sumItems = consolidated.reduce((sum, it) => sum + it.countedQuantity, 0);
+      if (sumItems !== snapshot.total_units || sumItems !== totals.recognizedUnits) {
+        throw new Error(
+          `Integridade violada na consolidação: soma dos itens (${sumItems}) != total do snapshot ` +
+            `(${snapshot.total_units}) ou != unidades reconhecidas (${totals.recognizedUnits}).`,
+        );
+      }
     }
 
     repo.finalizeSessionStatus(db, sessionId, finalizedBy);
 
-    // Resumo da resposta: estado de ANTES do commit (sessão OPEN, sem bloqueadores —
-    // foi exatamente isso que permitiu finalizar). Nunca recomputado pós-commit.
+    // Resumo da resposta: estado de ANTES do commit.
     const extraWarnings: string[] = [];
     if (belowThreshold) extraWarnings.push("COUNT_BELOW_BASELINE_THRESHOLD");
     if (movementsDuringCount > 0) extraWarnings.push("STOCK_MOVEMENTS_DURING_COUNT");
-    preCommitSummary = summaryFromTotals(totals, legacyTotal, legacyByRef, [], extraWarnings);
+    preCommitSummary = summaryFromTotals(totals, legacyTotal, legacyByRef, [], extraWarnings, fresh.count_type);
 
     db.exec("COMMIT");
   } catch (err) {

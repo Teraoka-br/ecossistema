@@ -23,6 +23,7 @@ function toSession(r: CountSessionRow): CountSession {
     cancelledAt: r.cancelled_at,
     cancelledBy: r.cancelled_by,
     cancelReason: r.cancel_reason,
+    countType: r.count_type ?? "OFICIAL",
   };
 }
 
@@ -94,6 +95,7 @@ countingRouter.get("/count-sessions/active", (_req, res) => {
 const createSessionSchema = z.object({
   responsibleName: z.string().min(1),
   notes: z.string().optional().nullable(),
+  countType: z.enum(["OFICIAL", "PARCIAL_TESTE"]).optional(),
 });
 
 countingRouter.post("/count-sessions", (req, res) => {

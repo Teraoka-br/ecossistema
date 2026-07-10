@@ -631,3 +631,63 @@ describe("7. Correções de integridade da bipagem (Etapa 1)", () => {
     expect(summary.legacyTotalUnits).toBe(2); // 2 unidades do lote da sessão
   });
 });
+
+describe("9. Contagem PARCIAL_TESTE", () => {
+  it("PARCIAL_TESTE finaliza com 1 item mesmo abaixo de 80%", () => {
+    const db = freshDb();
+    setupBatch(db, Array.from({ length: 10 }, (_, i) => ({ referencia: `REF${i}`, chave: `BAT${i}` })));
+    const session = svc.createSession(db, { responsibleName: "Joao", countType: "PARCIAL_TESTE" });
+    svc.registerScan(db, session.id, { reference: "REF0" });
+
+    const summary = svc.buildFinalizeSummary(db, session.id);
+    expect(summary.warnings).toContain("COUNT_BELOW_BASELINE_THRESHOLD");
+    expect(summary.canFinalize).toBe(true); // não bloqueia
+
+    const result = svc.finalizeSession(db, session.id, { finalizedBy: "Joao" });
+    expect(result.alreadyFinalized).toBe(false);
+    expect(result.snapshot.status).toBe("OFFICIAL");
+  });
+
+  it("PARCIAL_TESTE não zera referências não contadas", () => {
+    const db = freshDb();
+    setupBatch(db, [
+      { referencia: "REF1", chave: "BAT" },
+      { referencia: "REF2", chave: "TELA" },
+      { referencia: "REF3", chave: "FLEX" },
+    ]);
+    // Primeira sessão OFICIAL: bipa todas as 3 refs
+    const s1 = openSession(db);
+    svc.registerScan(db, s1.id, { reference: "REF1" });
+    svc.registerScan(db, s1.id, { reference: "REF1" });
+    svc.registerScan(db, s1.id, { reference: "REF2" });
+    svc.registerScan(db, s1.id, { reference: "REF3" });
+    svc.finalizeSession(db, s1.id, { finalizedBy: "Joao" });
+
+    // Segunda sessão PARCIAL_TESTE: bipa só REF1
+    const s2 = svc.createSession(db, { responsibleName: "Joao", countType: "PARCIAL_TESTE" });
+    svc.registerScan(db, s2.id, { reference: "REF1" });
+    svc.registerScan(db, s2.id, { reference: "REF1" });
+    svc.registerScan(db, s2.id, { reference: "REF1" });
+    const result = svc.finalizeSession(db, s2.id, { finalizedBy: "Joao" });
+
+    const items = q.listSnapshotItems(db, result.snapshot.id);
+    const ref1 = items.find((it) => it.reference_norm === "REF1");
+    const ref2 = items.find((it) => it.reference_norm === "REF2");
+    const ref3 = items.find((it) => it.reference_norm === "REF3");
+    // REF1 atualizada para 3; REF2 e REF3 mantidas do snapshot anterior (1 cada)
+    expect(ref1?.counted_quantity).toBe(3);
+    expect(ref2?.counted_quantity).toBe(1);
+    expect(ref3?.counted_quantity).toBe(1);
+  });
+
+  it("OFICIAL abaixo de 80% ainda bloqueia", () => {
+    const db = freshDb();
+    setupBatch(db, Array.from({ length: 10 }, (_, i) => ({ referencia: `REF${i}`, chave: `BAT${i}` })));
+    const session = openSession(db);
+    svc.registerScan(db, session.id, { reference: "REF0" });
+
+    const summary = svc.buildFinalizeSummary(db, session.id);
+    expect(summary.canFinalize).toBe(false);
+    expect(() => svc.finalizeSession(db, session.id, { finalizedBy: "Joao" })).toThrow(CountingError);
+  });
+});
