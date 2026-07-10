@@ -340,48 +340,31 @@ export function Analise() {
         });
         setParts([]);
       } else {
-        // Draft save: just the case (no motor)
-        const body = {
-          imei: form.imei || null,
-          os: form.os || null,
-          brand: form.brand || null,
-          model: form.model || null,
-          color: form.color || null,
-          ageDays: form.ageDays ? Number(form.ageDays) : null,
-          cost: form.cost ? Number(form.cost) : null,
-          estimatedSale: form.estimatedSale ? Number(form.estimatedSale) : null,
-          problema: form.problema || null,
-          notes: form.notes || null,
-        };
-        let caseId: number;
-        if (existingCaseId) {
-          const r = await fetch(`/api/repair-cases/${existingCaseId}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          });
-          const d = await r.json();
-          if (!r.ok) throw new Error((d as { error?: string }).error ?? "Erro ao atualizar.");
-          caseId = (d as { repairCase: { id: number } }).repairCase.id;
-        } else {
-          const r = await fetch("/api/repair-cases", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          });
-          const d = await r.json();
-          if (!r.ok) throw new Error((d as { error?: string }).error ?? "Erro ao criar.");
-          caseId = (d as { repairCase: { id: number } }).repairCase.id;
-          setExistingCaseId(caseId);
-        }
-        // Add parts without finalizing
-        for (const p of partsPayload) {
-          await fetch(`/api/repair-cases/${caseId}/parts`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ description: p.pecaNome || p.chavePeca, chavePeca: p.chavePeca }),
-          });
-        }
+        // Draft save: transactional via /api/analise/save-draft
+        const r = await fetch("/api/analise/save-draft", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            existingCaseId,
+            imei: form.imei || null,
+            os: form.os || null,
+            brand: form.brand || null,
+            model: form.model || null,
+            color: form.color || null,
+            ageDays: form.ageDays ? Number(form.ageDays) : null,
+            cost: form.cost ? Number(form.cost) : null,
+            estimatedSale: form.estimatedSale ? Number(form.estimatedSale) : null,
+            problema: form.problema || null,
+            notes: form.notes || null,
+            fieldOrigins,
+            parts: partsPayload,
+          }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error((d as { error?: string }).error ?? "Erro ao salvar.");
+        const rc = (d as { repairCase: Record<string, unknown> }).repairCase;
+        const caseId = rc["id"] as number;
+        if (!existingCaseId) setExistingCaseId(caseId);
         setParts([]);
         setSavedCase({ id: caseId, analysisStatus: "DRAFT", workflowStatus: "EM_ANALISE" });
       }

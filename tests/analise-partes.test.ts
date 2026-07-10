@@ -116,7 +116,7 @@ describe("analise-routes.ts: validação de partes", () => {
   );
 
   it("rejeita partes vazias com status 400", () => {
-    expect(src).toContain("parts.length === 0");
+    expect(src).toContain("validParts.length === 0");
     expect(src).toContain("Ao menos uma peça é obrigatória.");
     expect(src).toContain("status(400)");
   });
