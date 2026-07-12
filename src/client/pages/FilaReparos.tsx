@@ -139,7 +139,10 @@ function RepairCard({ item, onClick }: { item: QueueItem; onClick: () => void })
     <button
       className="repair-card"
       onClick={onClick}
-      style={{ textAlign: "left", width: "100%", background: "none", font: "inherit" }}
+      style={{
+        textAlign: "left", width: "100%", background: "none", font: "inherit",
+        borderTop: `3px solid ${meta.color}`,
+      }}
     >
       <div className="repair-card-header">
         <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", flex: 1, minWidth: 0 }}>
@@ -171,17 +174,22 @@ function RepairCard({ item, onClick }: { item: QueueItem; onClick: () => void })
       </div>
 
       {item.totalParts > 0 && (
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <div style={{ flex: 1, height: 3, background: "var(--elevated)", borderRadius: 2, overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.625rem" }}>
+          <div style={{ flex: 1, height: 4, background: "rgba(255,255,255,0.06)", borderRadius: 4, overflow: "hidden" }}>
             <div style={{
               height: "100%", width: `${matchPct}%`,
-              background: matchPct === 100 ? "var(--ok)" : matchPct > 50 ? "var(--warn)" : "var(--accent)",
-              borderRadius: 2, transition: "width 0.3s ease",
+              background: matchPct === 100
+                ? "linear-gradient(90deg, var(--ok), #34d399)"
+                : matchPct > 50
+                  ? "linear-gradient(90deg, var(--warn), #fbbf24)"
+                  : "linear-gradient(90deg, var(--accent), #8b5cf6)",
+              borderRadius: 4, transition: "width 0.4s ease",
+              boxShadow: matchPct === 100 ? "0 0 6px rgba(16,185,129,0.5)" : undefined,
             }} />
           </div>
-          <span style={{ fontSize: "0.68rem", color: "var(--text-muted)", whiteSpace: "nowrap" }}>
-            {item.matchedParts}/{item.totalParts} peças
-            {item.reservedCount > 0 && ` · ${item.reservedCount}↓`}
+          <span style={{ fontSize: "0.68rem", color: "var(--text-muted)", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+            {item.matchedParts}/{item.totalParts}
+            {item.reservedCount > 0 && <span style={{ color: "var(--purple-text)" }}> · {item.reservedCount}↓</span>}
           </span>
         </div>
       )}
@@ -364,13 +372,12 @@ export function FilaReparos() {
       )}
 
       {/* Busca */}
-      <div className="search-bar" style={{ marginBottom: "0.75rem" }}>
+      <div className="search-bar" style={{ marginBottom: "0.875rem" }}>
         <input
           type="search"
           placeholder="Buscar por IMEI, OS, marca, modelo, peça, depósito…"
           value={searchInput}
           onChange={e => setSearchInput(e.target.value)}
-          style={{ width: "100%", padding: "0.5rem 0.75rem", borderRadius: "var(--radius)", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: "0.875rem" }}
         />
       </div>
 

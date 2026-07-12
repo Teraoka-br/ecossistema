@@ -47,15 +47,41 @@ function BetaBanner() {
   if (!info || info.mode !== "BETA") return null;
   return (
     <span style={{
-      display: "inline-flex", alignItems: "center", gap: "0.3rem",
-      fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.06em",
-      background: "rgba(245,158,11,0.15)", color: "var(--warn-text)",
-      border: "1px solid rgba(245,158,11,0.35)",
-      borderRadius: "var(--r-sm)", padding: "0.15rem 0.5rem",
+      display: "inline-flex", alignItems: "center", gap: "0.35rem",
+      fontSize: "0.7rem", fontWeight: 800, letterSpacing: "0.07em",
+      background: "linear-gradient(135deg, rgba(245,158,11,0.2), rgba(245,158,11,0.12))",
+      color: "var(--warn-text)",
+      border: "1px solid rgba(245,158,11,0.4)",
+      borderRadius: "var(--r-sm)", padding: "0.2rem 0.65rem",
       userSelect: "none",
+      boxShadow: "0 0 8px rgba(245,158,11,0.15)",
     }}>
       BETA · {info.databaseFile} · :{info.apiPort}
     </span>
+  );
+}
+
+function UIVersionMarker() {
+  const [info, setInfo] = useState<RuntimeInfo | null>(null);
+  useEffect(() => {
+    fetch("/api/runtime-info")
+      .then((r) => r.ok ? r.json() as Promise<RuntimeInfo> : Promise.reject())
+      .then(setInfo)
+      .catch(() => {});
+  }, []);
+  if (!info || info.mode !== "BETA") return null;
+  return (
+    <div style={{
+      position: "fixed", bottom: "1rem", right: "1rem", zIndex: 9999,
+      fontSize: "0.62rem", fontWeight: 700, letterSpacing: "0.08em",
+      color: "rgba(124,58,237,0.5)",
+      background: "rgba(124,58,237,0.06)",
+      border: "1px solid rgba(124,58,237,0.18)",
+      borderRadius: "var(--r-sm)", padding: "0.2rem 0.5rem",
+      userSelect: "none", pointerEvents: "none",
+    }}>
+      UI premium v1
+    </div>
   );
 }
 
@@ -75,6 +101,7 @@ function AuthenticatedShell() {
 
   return (
     <div className="app-shell">
+      <UIVersionMarker />
       <header className="topbar">
         <button className="topbar-btn" onClick={() => setSidebarOpen((v) => !v)} title="Recolher menu">
           {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
