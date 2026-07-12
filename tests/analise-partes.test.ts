@@ -2,9 +2,11 @@
  * Testes para a validação de peças na tela Analisar aparelho.
  *
  * Cobre:
- * - linha preenchida conta como válida (computeBlockers filtra vazias)
- * - linha vazia não bloqueia quando há outra peça válida
- * - linha com incluirCor=true mas sem cor gera erro específico
+ * - buildValidPartsPayload usada em computeBlockers e handleSave
+ * - linha preenchida conta como válida
+ * - linha vazia é ignorada (não é erro por si só)
+ * - incluirCor=true sem cor gera erro específico
+ * - buildChavePeca("", model) não aparece como preview válido
  * - navegação por teclado presente no código-fonte
  * - backend valida parts.length === 0 (rota analise-routes.ts)
  * - estado vazio da fila após beta limpo (FilaReparos.tsx)
@@ -18,54 +20,92 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 
 // ---------------------------------------------------------------------------
-// 1. Analise.tsx — validação de peças (computeBlockers)
+// 1. Analise.tsx — buildValidPartsPayload e computeBlockers
 // ---------------------------------------------------------------------------
 
-describe("Analise.tsx: computeBlockers — peças", () => {
+describe("Analise.tsx: buildValidPartsPayload — peças", () => {
   const src = fs.readFileSync(
     path.join(ROOT, "src", "client", "pages", "Analise.tsx"),
     "utf8",
   );
 
-  it("filtra partes vazias antes de validar (pecaNome.trim() !== '')", () => {
-    // validParts = parts.filter(...) aparece em computeBlockers
+  it("função buildValidPartsPayload existe no código", () => {
+    expect(src).toContain("buildValidPartsPayload");
+  });
+
+  it("filtra linhas vazias antes de validar (pecaNome.trim() !== '')", () => {
     expect(src).toContain('p.pecaNome.trim() !== ""');
-    expect(src).toContain("validParts");
   });
 
-  it("bloqueia finalização apenas quando não há peça preenchida (validParts.length === 0)", () => {
-    expect(src).toContain("validParts.length === 0");
-    expect(src).toContain("Ao menos uma peça obrigatória.");
+  it("retorna erro quando não há peças (Adicione pelo menos uma peça necessária.)", () => {
+    expect(src).toContain("Adicione pelo menos uma peça necessária.");
   });
 
-  it("erro de cor é checado em validParts, não em todas as partes", () => {
-    const lines = src.split("\n");
-    const missingCorLine = lines.find((l) => l.includes("missingCor") && l.includes("find"));
-    expect(missingCorLine).toBeDefined();
-    expect(missingCorLine).toContain("validParts");
+  it("retorna erro de cor quando incluirCor=true e cor ausente", () => {
+    expect(src).toContain(
+      "A cor do aparelho é obrigatória quando 'Incluir cor' estiver marcado.",
+    );
   });
 
-  it("linhas vazias são removidas do payload antes de enviar ao backend", () => {
-    // .filter deve aparecer antes do .map no trecho de partsPayload
-    const payloadIdx  = src.indexOf("partsPayload");
-    const filterAfter = src.indexOf('.filter((p) => p.pecaNome.trim() !== "")', payloadIdx);
-    expect(filterAfter).toBeGreaterThan(payloadIdx - 1);
-    expect(filterAfter).toBeLessThan(payloadIdx + 200);
+  it("retorna erro quando chavePeca não pode ser gerada", () => {
+    expect(src).toContain("Não foi possível gerar a CHAVEPECA da peça.");
+  });
+
+  it("computeBlockers usa buildValidPartsPayload para o blocker de peças", () => {
+    // buildValidPartsPayload deve aparecer dentro de computeBlockers
+    const computeStart = src.indexOf("function computeBlockers");
+    const computeEnd = src.indexOf("\n}", computeStart);
+    const computeBody = src.slice(computeStart, computeEnd);
+    expect(computeBody).toContain("buildValidPartsPayload");
+  });
+
+  it("handleSave usa buildValidPartsPayload para finalizar", () => {
+    // buildValidPartsPayload deve aparecer dentro de handleSave
+    const saveStart = src.indexOf("async function handleSave");
+    const saveEnd = src.indexOf("\n  }", saveStart + 100);
+    const saveBody = src.slice(saveStart, saveEnd + 50);
+    expect(saveBody).toContain("buildValidPartsPayload");
+  });
+
+  it("commitPartInput só adiciona peças com nome não-vazio (prevenindo peça presa na busca)", () => {
+    // commitPartInput valida name = partInput.trim() antes de adicionar
+    expect(src).toContain("commitPartInput");
+    expect(src).toContain("const name = partInput.trim()");
+    expect(src).toContain("if (!name) return;");
+  });
+
+  it("linha preenchida (pecaNome não vazio) gera payload sem exigir seleção de sugestão", () => {
+    // O payload é construído diretamente a partir de pecaNome, sem checar selectedSuggestion
+    expect(src).not.toContain("selectedSuggestion");
+  });
+
+  it("incluirCor=false não inclui cor no payload mesmo que haja cor no form", () => {
+    // corUsada é atribuído condicional: p.incluirCor && corTrim ? corTrim : ""
+    expect(src).toContain('(p.incluirCor && corTrim) ? corTrim : ""');
+  });
+
+  it("isChavePecaExistente=true usa pecaNome diretamente sem concatenar modelo", () => {
+    // Deve existir o branch isChavePecaExistente dentro de buildValidPartsPayload
+    const fnStart = src.indexOf("function buildValidPartsPayload");
+    const fnEnd = src.indexOf("\n}", fnStart);
+    const fnBody = src.slice(fnStart, fnEnd);
+    expect(fnBody).toContain("isChavePecaExistente");
+    expect(fnBody).toContain("p.pecaNome.trim().toUpperCase()");
   });
 });
 
 // ---------------------------------------------------------------------------
-// 2. Analise.tsx — autocomplete com navegação por teclado
+// 2. Analise.tsx — autocomplete da barra de busca de peças
 // ---------------------------------------------------------------------------
 
-describe("Analise.tsx: autocomplete — navegação por teclado", () => {
+describe("Analise.tsx: autocomplete da barra de busca de peças", () => {
   const src = fs.readFileSync(
     path.join(ROOT, "src", "client", "pages", "Analise.tsx"),
     "utf8",
   );
 
-  it("estado highlightedSuggIdx existe", () => {
-    expect(src).toContain("highlightedSuggIdx");
+  it("estado partInputHighlighted existe (índice do autocomplete)", () => {
+    expect(src).toContain("partInputHighlighted");
   });
 
   it("onKeyDown trata ArrowDown (incrementa índice)", () => {
@@ -80,7 +120,7 @@ describe("Analise.tsx: autocomplete — navegação por teclado", () => {
 
   it("onKeyDown Enter seleciona sugestão destacada quando índice ≥ 0", () => {
     expect(src).toContain('"Enter"');
-    expect(src).toContain("highlightedSuggIdx >= 0");
+    expect(src).toContain("partInputHighlighted >= 0");
   });
 
   it("onKeyDown Escape fecha a lista de sugestões", () => {
@@ -88,19 +128,18 @@ describe("Analise.tsx: autocomplete — navegação por teclado", () => {
   });
 
   it("sugestão destacada recebe fundo diferente (var(--elevated))", () => {
-    expect(src).toContain("idx === highlightedSuggIdx");
+    expect(src).toContain("idx === partInputHighlighted");
     expect(src).toContain("var(--elevated)");
   });
 
   it("onMouseEnter sincroniza o índice com o hover do mouse", () => {
     expect(src).toContain("onMouseEnter");
-    expect(src).toContain("setHighlightedSuggIdx(idx)");
+    expect(src).toContain("setPartInputHighlighted(idx)");
   });
 
-  it("fetchSuggestions reseta highlightedSuggIdx ao receber novas sugestões", () => {
-    // Deve aparecer setHighlightedSuggIdx(-1) dentro de fetchSuggestions
-    const fetchIdx = src.indexOf("fetchSuggestions");
-    const resetIdx = src.indexOf("setHighlightedSuggIdx(-1)", fetchIdx);
+  it("fetchPartSuggestions reseta partInputHighlighted ao receber novas sugestões", () => {
+    const fetchIdx = src.indexOf("fetchPartSuggestions");
+    const resetIdx = src.indexOf("setPartInputHighlighted(-1)", fetchIdx);
     expect(resetIdx).toBeGreaterThan(fetchIdx);
   });
 });
@@ -151,10 +190,8 @@ describe("FilaReparos.tsx: estado vazio quando kpiTotal === 0", () => {
 
   it("não exibe mais 'em outros filtros' quando não há aparelhos (kpiTotal === 0 branch)", () => {
     // A mensagem "em outros filtros" só aparece quando kpiTotal > 0
-    // Após a fix, a branch kpiTotal===0 não deve ter essa mensagem
     const lines = src.split("\n");
     const zeroLineIdx = lines.findIndex((l) => l.includes("kpiTotal === 0"));
-    // Dentro das próximas 5 linhas não deve ter "em outros filtros"
     const block = lines.slice(zeroLineIdx, zeroLineIdx + 8).join("\n");
     expect(block).not.toContain("em outros filtros");
   });

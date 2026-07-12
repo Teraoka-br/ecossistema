@@ -64,6 +64,64 @@ function SourceBadge({ src }: { src: FieldSource | undefined }) {
 }
 
 // ---------------------------------------------------------------------------
+// Parts payload — validação unificada (mesma lógica para preview, blocker e submit)
+// ---------------------------------------------------------------------------
+
+interface PartPayload {
+  pecaNome: string;
+  incluirCor: boolean;
+  corUsada: string;
+  chavePeca: string;
+}
+
+type ValidPartsResult =
+  | { ok: true; parts: PartPayload[] }
+  | { ok: false; error: string };
+
+function buildValidPartsPayload(parts: PartDraft[], form: FormState): ValidPartsResult {
+  // Linhas sem nome são ignoradas silenciosamente
+  const nonEmpty = parts.filter((p) => p.pecaNome.trim() !== "");
+
+  if (nonEmpty.length === 0) {
+    return { ok: false, error: "Adicione pelo menos uma peça necessária." };
+  }
+
+  const corTrim = form.color.trim();
+  const result: PartPayload[] = [];
+
+  for (const p of nonEmpty) {
+    if (p.incluirCor && !corTrim) {
+      return {
+        ok: false,
+        error: "A cor do aparelho é obrigatória quando 'Incluir cor' estiver marcado.",
+      };
+    }
+
+    let chavePeca: string;
+    if (p.isChavePecaExistente) {
+      chavePeca = (p.incluirCor && corTrim)
+        ? (p.pecaNome.trim() + " " + corTrim).toUpperCase()
+        : p.pecaNome.trim().toUpperCase();
+    } else {
+      chavePeca = buildChavePeca(p.pecaNome, form.model, p.incluirCor, form.color);
+    }
+
+    if (!chavePeca) {
+      return { ok: false, error: "Não foi possível gerar a CHAVEPECA da peça." };
+    }
+
+    result.push({
+      pecaNome: p.pecaNome.trim(),
+      incluirCor: p.incluirCor,
+      corUsada: (p.incluirCor && corTrim) ? corTrim : "",
+      chavePeca,
+    });
+  }
+
+  return { ok: true, parts: result };
+}
+
+// ---------------------------------------------------------------------------
 // Blockers
 // ---------------------------------------------------------------------------
 
@@ -73,7 +131,6 @@ interface Blockers {
   cost?: string;
   estimatedSale?: string;
   parts?: string;
-  partCor?: string;
 }
 
 function computeBlockers(form: FormState, parts: PartDraft[]): Blockers {
@@ -82,11 +139,8 @@ function computeBlockers(form: FormState, parts: PartDraft[]): Blockers {
   if (!form.model) b.model = "Modelo obrigatório.";
   if (!form.cost || Number(form.cost) <= 0) b.cost = "Custo deve ser maior que zero.";
   if (!form.estimatedSale || Number(form.estimatedSale) <= 0) b.estimatedSale = "Venda estimada deve ser maior que zero.";
-  // Linhas vazias (sem nome) são ignoradas; só as preenchidas contam
-  const validParts = parts.filter((p) => p.pecaNome.trim() !== "");
-  if (validParts.length === 0) b.parts = "Ao menos uma peça obrigatória.";
-  const missingCor = validParts.find((p) => p.incluirCor && !form.color.trim());
-  if (missingCor) b.partCor = `Cor do aparelho obrigatória para "${missingCor.pecaNome}" (checkbox marcada).`;
+  const partsResult = buildValidPartsPayload(parts, form);
+  if (!partsResult.ok) b.parts = partsResult.error;
   return b;
 }
 
@@ -142,10 +196,11 @@ export function Analise() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedCase, setSavedCase] = useState<SavedCase | null>(null);
 
-  // Part suggestions
-  const [partSuggestions, setPartSuggestions] = useState<PartSuggestion[]>([]);
-  const [activeSuggestKey, setActiveSuggestKey] = useState<string | null>(null);
-  const [highlightedSuggIdx, setHighlightedSuggIdx] = useState(-1);
+  // Barra de busca de peça (search-and-add)
+  const [partInput, setPartInput] = useState("");
+  const [partInputIsExistente, setPartInputIsExistente] = useState(false);
+  const [partInputSuggs, setPartInputSuggs] = useState<PartSuggestion[]>([]);
+  const [partInputHighlighted, setPartInputHighlighted] = useState(-1);
 
   // ---------------------------------------------------------------------------
   // Search → prefill
@@ -244,10 +299,6 @@ export function Analise() {
   // Parts helpers
   // ---------------------------------------------------------------------------
 
-  function addPart() {
-    setParts((p) => [...p, { key: String(Date.now()), pecaNome: "", incluirCor: false }]);
-  }
-
   function removePart(key: string) {
     setParts((p) => p.filter((x) => x.key !== key));
   }
@@ -256,79 +307,70 @@ export function Analise() {
     setParts((p) => p.map((x) => (x.key === key ? { ...x, [field]: value } : x)));
   }
 
-  const fetchSuggestions = useCallback(async (pecaNome: string, partKey: string) => {
-    if (pecaNome.length < 2) {
-      setPartSuggestions([]);
-      setActiveSuggestKey(null);
-      setHighlightedSuggIdx(-1);
-      return;
-    }
-    const r = await fetch(`/api/analise/part-suggestions?q=${encodeURIComponent(pecaNome)}`).catch(() => null);
+  // Busca de sugestões para a barra de adição
+  const fetchPartSuggestions = useCallback(async (q: string) => {
+    if (q.length < 2) { setPartInputSuggs([]); setPartInputHighlighted(-1); return; }
+    const r = await fetch(`/api/analise/part-suggestions?q=${encodeURIComponent(q)}`).catch(() => null);
     if (!r?.ok) return;
     const d = await r.json() as { suggestions: PartSuggestion[] };
-    setPartSuggestions(d.suggestions);
-    setActiveSuggestKey(partKey);
-    setHighlightedSuggIdx(-1);
+    setPartInputSuggs(d.suggestions);
+    setPartInputHighlighted(-1);
   }, []);
+
+  // Confirma adição da peça digitada/selecionada
+  function commitPartInput() {
+    const name = partInput.trim();
+    if (!name) return;
+    setParts((p) => [...p, { key: String(Date.now()), pecaNome: name, incluirCor: false, isChavePecaExistente: partInputIsExistente }]);
+    setPartInput("");
+    setPartInputIsExistente(false);
+    setPartInputSuggs([]);
+    setPartInputHighlighted(-1);
+  }
 
   // ---------------------------------------------------------------------------
   // Save
   // ---------------------------------------------------------------------------
 
   async function handleSave(finalize: boolean) {
-    if (finalize) {
-      const blockers = computeBlockers(form, parts);
-      if (Object.keys(blockers).length > 0) {
-        setSaveError("Pendências: " + Object.values(blockers).join(" | "));
-        return;
-      }
-    }
-
     setSaving(true);
     setSaveError(null);
 
     try {
-      // modelo sempre vem dos dados do aparelho — nunca da peça individualmente
-      // se isChavePecaExistente, pecaNome já é o CHAVEPECA completo (não concatenar modelo)
-      // linhas sem nome são ignoradas (não enviadas ao backend)
-      const partsPayload = parts.filter((p) => p.pecaNome.trim() !== "").map((p) => {
-        const corTrim = form.color.trim();
-        let chavePeca: string;
-        if (p.isChavePecaExistente) {
-          chavePeca = (p.incluirCor && corTrim)
-            ? (p.pecaNome.trim() + " " + corTrim).toUpperCase()
-            : p.pecaNome.trim().toUpperCase();
-        } else {
-          chavePeca = buildChavePeca(p.pecaNome, form.model, p.incluirCor, form.color);
-        }
-        return {
-          pecaNome: p.pecaNome,
-          incluirCor: p.incluirCor,
-          corUsada: (p.incluirCor && corTrim) ? corTrim : "",
-          chavePeca,
-        };
-      });
+      const caseBody = {
+        existingCaseId,
+        imei: form.imei || null,
+        os: form.os || null,
+        brand: form.brand || null,
+        model: form.model || null,
+        color: form.color || null,
+        ageDays: form.ageDays ? Number(form.ageDays) : null,
+        cost: form.cost ? Number(form.cost) : null,
+        estimatedSale: form.estimatedSale ? Number(form.estimatedSale) : null,
+        problema: form.problema || null,
+        notes: form.notes || null,
+        fieldOrigins,
+      };
 
       if (finalize) {
-        // Full atomic save via new endpoint
+        // Validação unificada — mesma lógica do computeBlockers/preview
+        const blockers = computeBlockers(form, parts);
+        if (Object.keys(blockers).length > 0) {
+          setSaveError("Pendências: " + Object.values(blockers).join(" | "));
+          setSaving(false);
+          return;
+        }
+        const partsResult = buildValidPartsPayload(parts, form);
+        if (!partsResult.ok) {
+          setSaveError(partsResult.error);
+          setSaving(false);
+          return;
+        }
+
         const r = await fetch("/api/analise/complete", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            existingCaseId,
-            imei: form.imei || null,
-            os: form.os || null,
-            brand: form.brand || null,
-            model: form.model || null,
-            color: form.color || null,
-            ageDays: form.ageDays ? Number(form.ageDays) : null,
-            cost: form.cost ? Number(form.cost) : null,
-            estimatedSale: form.estimatedSale ? Number(form.estimatedSale) : null,
-            problema: form.problema || null,
-            notes: form.notes || null,
-            fieldOrigins,
-            parts: partsPayload,
-          }),
+          body: JSON.stringify({ ...caseBody, parts: partsResult.parts }),
         });
         const d = await r.json();
         if (!r.ok) throw new Error((d as { error?: string }).error ?? "Erro ao finalizar.");
@@ -340,32 +382,36 @@ export function Analise() {
         });
         setParts([]);
       } else {
-        // Draft save: transactional via /api/analise/save-draft
+        // Draft: envia o que houver (pode ser zero peças); sem validação de mínimo
+        const draftPartsResult = buildValidPartsPayload(parts, form);
+        const draftParts = draftPartsResult.ok ? draftPartsResult.parts
+          : parts
+              .filter((p) => p.pecaNome.trim() !== "")
+              .map((p) => {
+                const corTrim = form.color.trim();
+                const chavePeca = p.isChavePecaExistente
+                  ? (p.incluirCor && corTrim
+                      ? (p.pecaNome.trim() + " " + corTrim).toUpperCase()
+                      : p.pecaNome.trim().toUpperCase())
+                  : buildChavePeca(p.pecaNome, form.model, p.incluirCor, form.color);
+                return {
+                  pecaNome: p.pecaNome.trim(),
+                  incluirCor: p.incluirCor,
+                  corUsada: (p.incluirCor && corTrim) ? corTrim : "",
+                  chavePeca,
+                };
+              });
+
         const r = await fetch("/api/analise/save-draft", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            existingCaseId,
-            imei: form.imei || null,
-            os: form.os || null,
-            brand: form.brand || null,
-            model: form.model || null,
-            color: form.color || null,
-            ageDays: form.ageDays ? Number(form.ageDays) : null,
-            cost: form.cost ? Number(form.cost) : null,
-            estimatedSale: form.estimatedSale ? Number(form.estimatedSale) : null,
-            problema: form.problema || null,
-            notes: form.notes || null,
-            fieldOrigins,
-            parts: partsPayload,
-          }),
+          body: JSON.stringify({ ...caseBody, parts: draftParts }),
         });
         const d = await r.json();
         if (!r.ok) throw new Error((d as { error?: string }).error ?? "Erro ao salvar.");
         const rc = (d as { repairCase: Record<string, unknown> }).repairCase;
         const caseId = rc["id"] as number;
         if (!existingCaseId) setExistingCaseId(caseId);
-        setParts([]);
         setSavedCase({ id: caseId, analysisStatus: "DRAFT", workflowStatus: "EM_ANALISE" });
       }
     } catch (err) {
@@ -383,6 +429,10 @@ export function Analise() {
     setForm(EMPTY_FORM);
     setFieldOrigins({});
     setParts([]);
+    setPartInput("");
+    setPartInputIsExistente(false);
+    setPartInputSuggs([]);
+    setPartInputHighlighted(-1);
     setSavedCase(null);
     setSaveError(null);
   }
@@ -518,121 +568,132 @@ export function Analise() {
 
           {/* Peças necessárias */}
           <div className="card" style={{ marginTop: "1rem" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
-              <h2 style={{ margin: 0 }}>Peças necessárias *</h2>
-              <span style={{ flex: 1 }} />
-              <button className="btn btn-secondary btn-sm" onClick={addPart}>
-                <Plus size={13} /> Adicionar peça
+            <h2 style={{ marginBottom: "0.75rem" }}>Peças necessárias *</h2>
+
+            {/* Barra de busca + botão Adicionar */}
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+              <div style={{ flex: 1, position: "relative" }}>
+                <input
+                  value={partInput}
+                  onChange={(e) => {
+                    setPartInput(e.target.value);
+                    setPartInputIsExistente(false);
+                    fetchPartSuggestions(e.target.value);
+                  }}
+                  onBlur={() => setTimeout(() => setPartInputSuggs([]), 150)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      if (partInputHighlighted >= 0 && partInputSuggs[partInputHighlighted]) {
+                        const s = partInputSuggs[partInputHighlighted];
+                        setPartInput(s.text);
+                        setPartInputIsExistente(s.type === "chave");
+                        setPartInputSuggs([]);
+                        setPartInputHighlighted(-1);
+                      } else {
+                        commitPartInput();
+                      }
+                    } else if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setPartInputHighlighted((i) => Math.min(i + 1, partInputSuggs.length - 1));
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setPartInputHighlighted((i) => Math.max(i - 1, 0));
+                    } else if (e.key === "Escape") {
+                      setPartInputSuggs([]);
+                      setPartInputHighlighted(-1);
+                    }
+                  }}
+                  placeholder="Buscar peça (ex.: TELA, BATERIA)…"
+                  autoComplete="off"
+                />
+                {partInputSuggs.length > 0 && (
+                  <div style={{
+                    position: "absolute", zIndex: 10, top: "100%", left: 0, right: 0,
+                    background: "var(--color-surface)", border: "1px solid var(--color-border)",
+                    borderRadius: 4, maxHeight: 180, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                  }}>
+                    {partInputSuggs.map((s, idx) => (
+                      <div key={s.text + s.type}
+                        style={{
+                          padding: "6px 10px", cursor: "pointer", fontSize: 12,
+                          display: "flex", justifyContent: "space-between", alignItems: "center",
+                          background: idx === partInputHighlighted ? "var(--elevated)" : "transparent",
+                        }}
+                        onMouseEnter={() => setPartInputHighlighted(idx)}
+                        onMouseDown={() => {
+                          setPartInput(s.text);
+                          setPartInputIsExistente(s.type === "chave");
+                          setPartInputSuggs([]);
+                          setPartInputHighlighted(-1);
+                        }}>
+                        <span>{s.text}</span>
+                        {s.type === "chave" && (
+                          <span style={{ fontSize: 10, color: "var(--color-text-muted)", marginLeft: 6, flexShrink: 0 }}>chave</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button
+                className="btn btn-secondary"
+                onClick={commitPartInput}
+                disabled={!partInput.trim()}
+                type="button"
+              >
+                <Plus size={14} /> Adicionar
               </button>
             </div>
+
+            {/* Erro de peças */}
             {blockers.parts && <p style={{ color: "var(--color-danger)", fontSize: 12, margin: "0 0 8px" }}>{blockers.parts}</p>}
-            {blockers.partCor && <p style={{ color: "var(--color-danger)", fontSize: 12, margin: "0 0 8px" }}>{blockers.partCor}</p>}
-            {parts.length === 0 && (
-              <p className="muted text-sm">Nenhuma peça adicionada. Adicione ao menos uma para finalizar a análise.</p>
-            )}
-            {parts.map((part) => {
-              const preview = part.isChavePecaExistente
-                ? (part.incluirCor && form.color.trim()
-                    ? (part.pecaNome.trim() + " " + form.color.trim()).toUpperCase()
-                    : part.pecaNome.trim().toUpperCase())
-                : buildChavePeca(part.pecaNome, form.model, part.incluirCor, form.color);
-              return (
-                <div key={part.key} style={{ borderBottom: "1px solid var(--color-border)", paddingBottom: "0.75rem", marginBottom: "0.75rem" }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "0.5rem", alignItems: "end" }}>
-                    <div className="form-group" style={{ margin: 0, position: "relative" }}>
-                      <label>Nome da peça</label>
-                      <input
-                        value={part.pecaNome}
-                        onChange={(e) => {
-                          setPart(part.key, "pecaNome", e.target.value);
-                          setPart(part.key, "isChavePecaExistente", false);
-                          fetchSuggestions(e.target.value, part.key);
-                        }}
-                        onBlur={() => setTimeout(() => {
-                          if (activeSuggestKey === part.key) {
-                            setActiveSuggestKey(null);
-                            setHighlightedSuggIdx(-1);
-                          }
-                        }, 150)}
-                        onKeyDown={(e) => {
-                          if (activeSuggestKey !== part.key || partSuggestions.length === 0) return;
-                          if (e.key === "ArrowDown") {
-                            e.preventDefault();
-                            setHighlightedSuggIdx((i) => Math.min(i + 1, partSuggestions.length - 1));
-                          } else if (e.key === "ArrowUp") {
-                            e.preventDefault();
-                            setHighlightedSuggIdx((i) => Math.max(i - 1, 0));
-                          } else if (e.key === "Enter" && highlightedSuggIdx >= 0) {
-                            e.preventDefault();
-                            const s = partSuggestions[highlightedSuggIdx];
-                            setPart(part.key, "pecaNome", s.text);
-                            setPart(part.key, "isChavePecaExistente", s.type === "chave");
-                            setActiveSuggestKey(null);
-                            setPartSuggestions([]);
-                            setHighlightedSuggIdx(-1);
-                          } else if (e.key === "Escape") {
-                            setActiveSuggestKey(null);
-                            setPartSuggestions([]);
-                            setHighlightedSuggIdx(-1);
-                          }
-                        }}
-                        placeholder="Ex.: TELA, BATERIA, TAMPA TRASEIRA"
-                      />
-                      {activeSuggestKey === part.key && partSuggestions.length > 0 && (
-                        <div style={{
-                          position: "absolute", zIndex: 10, top: "100%", left: 0, right: 0,
-                          background: "var(--color-surface)", border: "1px solid var(--color-border)",
-                          borderRadius: 4, maxHeight: 150, overflowY: "auto",
-                        }}>
-                          {partSuggestions.map((s, idx) => (
-                            <div key={s.text + s.type}
-                              style={{
-                                padding: "4px 8px", cursor: "pointer", fontSize: 12,
-                                display: "flex", justifyContent: "space-between", alignItems: "center",
-                                background: idx === highlightedSuggIdx ? "var(--elevated)" : "transparent",
-                              }}
-                              onMouseEnter={() => setHighlightedSuggIdx(idx)}
-                              onMouseDown={() => {
-                                setPart(part.key, "pecaNome", s.text);
-                                setPart(part.key, "isChavePecaExistente", s.type === "chave");
-                                setActiveSuggestKey(null);
-                                setPartSuggestions([]);
-                                setHighlightedSuggIdx(-1);
-                              }}>
-                              <span>{s.text}</span>
-                              {s.type === "chave" && (
-                                <span style={{ fontSize: 10, color: "var(--color-text-muted)", marginLeft: 6, flexShrink: 0 }}>chave</span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <button className="btn btn-ghost btn-sm" style={{ alignSelf: "end" }} onClick={() => removePart(part.key)} title="Remover">
-                      <X size={13} />
-                    </button>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "1rem", marginTop: "0.4rem" }}>
-                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
-                      <input
-                        type="checkbox"
-                        checked={part.incluirCor}
-                        onChange={(e) => setPart(part.key, "incluirCor", e.target.checked)}
-                      />
-                      Incluir cor do aparelho
-                    </label>
-                    {part.incluirCor && !form.color.trim() && (
-                      <span style={{ color: "var(--color-danger)", fontSize: 11 }}>
-                        Preencha a cor do aparelho acima
+
+            {/* Lista de peças adicionadas */}
+            {parts.length === 0 ? (
+              <p className="muted text-sm">Nenhuma peça adicionada. Use a busca acima para adicionar.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                {parts.map((part) => {
+                  const preview = part.isChavePecaExistente
+                    ? (part.incluirCor && form.color.trim()
+                        ? (part.pecaNome.trim() + " " + form.color.trim()).toUpperCase()
+                        : part.pecaNome.trim().toUpperCase())
+                    : buildChavePeca(part.pecaNome, form.model, part.incluirCor, form.color);
+                  return (
+                    <div key={part.key} style={{
+                      display: "flex", alignItems: "center", gap: "0.5rem",
+                      padding: "0.4rem 0.6rem", borderRadius: 6,
+                      background: "var(--color-surface-alt)", border: "1px solid var(--color-border)",
+                    }}>
+                      <span style={{ flex: 1, fontWeight: 500, fontSize: 13 }}>{part.pecaNome}</span>
+                      <span style={{ fontSize: 11, color: "var(--color-text-muted)", fontFamily: "monospace", flexShrink: 0 }}>
+                        → {preview}
                       </span>
-                    )}
-                    <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)", fontFamily: "monospace" }}>
-                      → {preview || "(preencha o nome)"}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
+                      <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, cursor: "pointer", flexShrink: 0 }}>
+                        <input
+                          type="checkbox"
+                          checked={part.incluirCor}
+                          onChange={(e) => setPart(part.key, "incluirCor", e.target.checked)}
+                        />
+                        +cor
+                      </label>
+                      {part.incluirCor && !form.color.trim() && (
+                        <span style={{ color: "var(--color-danger)", fontSize: 11, flexShrink: 0 }}>preencha a cor acima</span>
+                      )}
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => removePart(part.key)}
+                        title="Remover"
+                        style={{ flexShrink: 0 }}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Pendências */}
