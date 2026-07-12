@@ -437,8 +437,10 @@ export function Analise() {
     setSaveError(null);
   }
 
-  // margem calculada internamente (não exibida — usada pelo motor)
-  const blockers = computeBlockers(form, parts);
+  // Suprimir validação se análise foi finalizada com sucesso nesta sessão —
+  // setParts([]) após finalização esvaziaria parts e geraria blocker fantasma.
+  const isJustFinalized = savedCase?.analysisStatus === "COMPLETED";
+  const blockers = isJustFinalized ? ({} as Blockers) : computeBlockers(form, parts);
   const hasBlockers = Object.keys(blockers).length > 0;
 
   // ---------------------------------------------------------------------------
@@ -570,134 +572,143 @@ export function Analise() {
           <div className="card" style={{ marginTop: "1rem" }}>
             <h2 style={{ marginBottom: "0.75rem" }}>Peças necessárias *</h2>
 
-            {/* Barra de busca + botão Adicionar */}
-            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
-              <div style={{ flex: 1, position: "relative" }}>
-                <input
-                  value={partInput}
-                  onChange={(e) => {
-                    setPartInput(e.target.value);
-                    setPartInputIsExistente(false);
-                    fetchPartSuggestions(e.target.value);
-                  }}
-                  onBlur={() => setTimeout(() => setPartInputSuggs([]), 150)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      if (partInputHighlighted >= 0 && partInputSuggs[partInputHighlighted]) {
-                        const s = partInputSuggs[partInputHighlighted];
-                        setPartInput(s.text);
-                        setPartInputIsExistente(s.type === "chave");
-                        setPartInputSuggs([]);
-                        setPartInputHighlighted(-1);
-                      } else {
-                        commitPartInput();
-                      }
-                    } else if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      setPartInputHighlighted((i) => Math.min(i + 1, partInputSuggs.length - 1));
-                    } else if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setPartInputHighlighted((i) => Math.max(i - 1, 0));
-                    } else if (e.key === "Escape") {
-                      setPartInputSuggs([]);
-                      setPartInputHighlighted(-1);
-                    }
-                  }}
-                  placeholder="Buscar peça (ex.: TELA, BATERIA)…"
-                  autoComplete="off"
-                />
-                {partInputSuggs.length > 0 && (
-                  <div style={{
-                    position: "absolute", zIndex: 10, top: "100%", left: 0, right: 0,
-                    background: "var(--color-surface)", border: "1px solid var(--color-border)",
-                    borderRadius: 4, maxHeight: 180, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-                  }}>
-                    {partInputSuggs.map((s, idx) => (
-                      <div key={s.text + s.type}
-                        style={{
-                          padding: "6px 10px", cursor: "pointer", fontSize: 12,
-                          display: "flex", justifyContent: "space-between", alignItems: "center",
-                          background: idx === partInputHighlighted ? "var(--elevated)" : "transparent",
-                        }}
-                        onMouseEnter={() => setPartInputHighlighted(idx)}
-                        onMouseDown={() => {
-                          setPartInput(s.text);
-                          setPartInputIsExistente(s.type === "chave");
+            {isJustFinalized ? (
+              /* Estado pós-finalização: não editar peças, não mostrar erros */
+              <p style={{ fontSize: 13, color: "var(--color-success)", display: "flex", alignItems: "center", gap: 6 }}>
+                <CheckCircle size={14} /> Análise finalizada e salva. Use "Nova busca" para reabrir o caso.
+              </p>
+            ) : (
+              <>
+                {/* Barra de busca + botão Adicionar */}
+                <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                  <div style={{ flex: 1, position: "relative" }}>
+                    <input
+                      value={partInput}
+                      onChange={(e) => {
+                        setPartInput(e.target.value);
+                        setPartInputIsExistente(false);
+                        fetchPartSuggestions(e.target.value);
+                      }}
+                      onBlur={() => setTimeout(() => setPartInputSuggs([]), 150)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          if (partInputHighlighted >= 0 && partInputSuggs[partInputHighlighted]) {
+                            const s = partInputSuggs[partInputHighlighted];
+                            setPartInput(s.text);
+                            setPartInputIsExistente(s.type === "chave");
+                            setPartInputSuggs([]);
+                            setPartInputHighlighted(-1);
+                          } else {
+                            commitPartInput();
+                          }
+                        } else if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          setPartInputHighlighted((i) => Math.min(i + 1, partInputSuggs.length - 1));
+                        } else if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          setPartInputHighlighted((i) => Math.max(i - 1, 0));
+                        } else if (e.key === "Escape") {
                           setPartInputSuggs([]);
                           setPartInputHighlighted(-1);
-                        }}>
-                        <span>{s.text}</span>
-                        {s.type === "chave" && (
-                          <span style={{ fontSize: 10, color: "var(--color-text-muted)", marginLeft: 6, flexShrink: 0 }}>chave</span>
-                        )}
+                        }
+                      }}
+                      placeholder="Buscar peça (ex.: TELA, BATERIA)…"
+                      autoComplete="off"
+                    />
+                    {partInputSuggs.length > 0 && (
+                      <div style={{
+                        position: "absolute", zIndex: 10, top: "100%", left: 0, right: 0,
+                        background: "var(--color-surface)", border: "1px solid var(--color-border)",
+                        borderRadius: 4, maxHeight: 180, overflowY: "auto", boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                      }}>
+                        {partInputSuggs.map((s, idx) => (
+                          <div key={s.text + s.type}
+                            style={{
+                              padding: "6px 10px", cursor: "pointer", fontSize: 12,
+                              display: "flex", justifyContent: "space-between", alignItems: "center",
+                              background: idx === partInputHighlighted ? "var(--elevated)" : "transparent",
+                            }}
+                            onMouseEnter={() => setPartInputHighlighted(idx)}
+                            onMouseDown={() => {
+                              setPartInput(s.text);
+                              setPartInputIsExistente(s.type === "chave");
+                              setPartInputSuggs([]);
+                              setPartInputHighlighted(-1);
+                            }}>
+                            <span>{s.text}</span>
+                            {s.type === "chave" && (
+                              <span style={{ fontSize: 10, color: "var(--color-text-muted)", marginLeft: 6, flexShrink: 0 }}>chave</span>
+                            )}
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
+                  </div>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={commitPartInput}
+                    disabled={!partInput.trim()}
+                    type="button"
+                  >
+                    <Plus size={14} /> Adicionar
+                  </button>
+                </div>
+
+                {/* Erro de peças (só quando não finalizado) */}
+                {blockers.parts && <p style={{ color: "var(--color-danger)", fontSize: 12, margin: "0 0 8px" }}>{blockers.parts}</p>}
+
+                {/* Lista de peças adicionadas */}
+                {parts.length === 0 ? (
+                  <p className="muted text-sm">Nenhuma peça adicionada. Use a busca acima para adicionar.</p>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                    {parts.map((part) => {
+                      const preview = part.isChavePecaExistente
+                        ? (part.incluirCor && form.color.trim()
+                            ? (part.pecaNome.trim() + " " + form.color.trim()).toUpperCase()
+                            : part.pecaNome.trim().toUpperCase())
+                        : buildChavePeca(part.pecaNome, form.model, part.incluirCor, form.color);
+                      return (
+                        <div key={part.key} style={{
+                          display: "flex", alignItems: "center", gap: "0.5rem",
+                          padding: "0.4rem 0.6rem", borderRadius: 6,
+                          background: "var(--color-surface-alt)", border: "1px solid var(--color-border)",
+                        }}>
+                          <span style={{ flex: 1, fontWeight: 500, fontSize: 13 }}>{part.pecaNome}</span>
+                          <span style={{ fontSize: 11, color: "var(--color-text-muted)", fontFamily: "monospace", flexShrink: 0 }}>
+                            → {preview}
+                          </span>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, cursor: "pointer", flexShrink: 0 }}>
+                            <input
+                              type="checkbox"
+                              checked={part.incluirCor}
+                              onChange={(e) => setPart(part.key, "incluirCor", e.target.checked)}
+                            />
+                            +cor
+                          </label>
+                          {part.incluirCor && !form.color.trim() && (
+                            <span style={{ color: "var(--color-danger)", fontSize: 11, flexShrink: 0 }}>preencha a cor acima</span>
+                          )}
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => removePart(part.key)}
+                            title="Remover"
+                            style={{ flexShrink: 0 }}
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
-              </div>
-              <button
-                className="btn btn-secondary"
-                onClick={commitPartInput}
-                disabled={!partInput.trim()}
-                type="button"
-              >
-                <Plus size={14} /> Adicionar
-              </button>
-            </div>
-
-            {/* Erro de peças */}
-            {blockers.parts && <p style={{ color: "var(--color-danger)", fontSize: 12, margin: "0 0 8px" }}>{blockers.parts}</p>}
-
-            {/* Lista de peças adicionadas */}
-            {parts.length === 0 ? (
-              <p className="muted text-sm">Nenhuma peça adicionada. Use a busca acima para adicionar.</p>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-                {parts.map((part) => {
-                  const preview = part.isChavePecaExistente
-                    ? (part.incluirCor && form.color.trim()
-                        ? (part.pecaNome.trim() + " " + form.color.trim()).toUpperCase()
-                        : part.pecaNome.trim().toUpperCase())
-                    : buildChavePeca(part.pecaNome, form.model, part.incluirCor, form.color);
-                  return (
-                    <div key={part.key} style={{
-                      display: "flex", alignItems: "center", gap: "0.5rem",
-                      padding: "0.4rem 0.6rem", borderRadius: 6,
-                      background: "var(--color-surface-alt)", border: "1px solid var(--color-border)",
-                    }}>
-                      <span style={{ flex: 1, fontWeight: 500, fontSize: 13 }}>{part.pecaNome}</span>
-                      <span style={{ fontSize: 11, color: "var(--color-text-muted)", fontFamily: "monospace", flexShrink: 0 }}>
-                        → {preview}
-                      </span>
-                      <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, cursor: "pointer", flexShrink: 0 }}>
-                        <input
-                          type="checkbox"
-                          checked={part.incluirCor}
-                          onChange={(e) => setPart(part.key, "incluirCor", e.target.checked)}
-                        />
-                        +cor
-                      </label>
-                      {part.incluirCor && !form.color.trim() && (
-                        <span style={{ color: "var(--color-danger)", fontSize: 11, flexShrink: 0 }}>preencha a cor acima</span>
-                      )}
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => removePart(part.key)}
-                        title="Remover"
-                        style={{ flexShrink: 0 }}
-                      >
-                        <X size={13} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
+              </>
             )}
           </div>
 
-          {/* Pendências */}
-          {hasBlockers && (
+          {/* Pendências (nunca exibir quando análise já finalizada nesta sessão) */}
+          {!isJustFinalized && hasBlockers && (
             <div style={{ background: "var(--color-warning-subtle, rgba(234,179,8,0.08))", border: "1px solid var(--color-warning)", borderRadius: 6, padding: "8px 12px", marginTop: "1rem", fontSize: 12 }}>
               <strong style={{ color: "var(--color-warning)" }}>Pendências para finalizar:</strong>
               <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
@@ -708,18 +719,20 @@ export function Analise() {
 
           {/* Ações */}
           <div style={{ display: "flex", gap: "0.75rem", marginTop: "1rem" }}>
-            <button className="btn btn-secondary" onClick={() => handleSave(false)} disabled={saving}>
-              <Save size={14} />
-              {saving ? "Salvando…" : "Salvar em análise"}
-            </button>
+            {!isJustFinalized && (
+              <button className="btn btn-secondary" onClick={() => handleSave(false)} disabled={saving}>
+                <Save size={14} />
+                {saving ? "Salvando…" : "Salvar em análise"}
+              </button>
+            )}
             <button
               className="btn btn-primary"
-              onClick={() => handleSave(true)}
-              disabled={saving || hasBlockers}
-              title={hasBlockers ? Object.values(blockers).join(" | ") : undefined}
+              onClick={() => !isJustFinalized && handleSave(true)}
+              disabled={saving || hasBlockers || isJustFinalized}
+              title={isJustFinalized ? "Análise já finalizada" : hasBlockers ? Object.values(blockers).join(" | ") : undefined}
             >
               <CheckCircle size={14} />
-              {saving ? "Salvando…" : "Finalizar análise"}
+              {saving ? "Salvando…" : isJustFinalized ? "Análise finalizada" : "Finalizar análise"}
             </button>
           </div>
         </div>
