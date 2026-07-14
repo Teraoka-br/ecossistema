@@ -5,7 +5,7 @@ interface User {
   id: number;
   username: string;
   displayName: string;
-  role: "ADMIN" | "OPERATOR";
+  role: "ADMIN" | "OPERATOR" | "TECHNICIAN";
   active: number;
 }
 
@@ -14,7 +14,7 @@ export function AdminUsuarios() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState({ username: "", displayName: "", pin: "", role: "OPERATOR" as "ADMIN" | "OPERATOR" });
+  const [form, setForm] = useState({ username: "", displayName: "", pin: "", role: "OPERATOR" as "ADMIN" | "OPERATOR" | "TECHNICIAN" });
   const [resetPinUser, setResetPinUser] = useState<number | null>(null);
   const [newPin, setNewPin] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
@@ -35,7 +35,7 @@ export function AdminUsuarios() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
     });
-    if (r.ok) { setMsg("Usuário criado."); setShowCreate(false); setForm({ username: "", displayName: "", pin: "", role: "OPERATOR" }); load(); }
+    if (r.ok) { setMsg("Usuário criado."); setShowCreate(false); setForm({ username: "", displayName: "", pin: "", role: "OPERATOR" as const }); load(); }
     else { const d = await r.json(); setError(d.error); }
   }
 
@@ -84,6 +84,7 @@ export function AdminUsuarios() {
             <select value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value as any }))}>
               <option value="OPERATOR">Operador</option>
               <option value="ADMIN">Administrador</option>
+              <option value="TECHNICIAN">Técnico</option>
             </select>
           </div>
           <div className="gap-row">
@@ -114,7 +115,7 @@ export function AdminUsuarios() {
                 <tr key={u.id}>
                   <td>{u.displayName}</td>
                   <td className="mono">{u.username}</td>
-                  <td><span className={`badge ${u.role === "ADMIN" ? "badge-warn" : "badge-muted"}`}>{u.role}</span></td>
+                  <td><span className={`badge ${u.role === "ADMIN" ? "badge-warn" : u.role === "TECHNICIAN" ? "badge-info" : "badge-muted"}`}>{u.role === "TECHNICIAN" ? "TÉCNICO" : u.role}</span></td>
                   <td><span className={`badge ${u.active ? "badge-ok" : "badge-err"}`}>{u.active ? "Ativo" : "Inativo"}</span></td>
                   <td>
                     <div className="gap-row">

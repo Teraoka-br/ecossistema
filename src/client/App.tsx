@@ -25,6 +25,7 @@ import { AdminDatasys } from "./pages/AdminDatasys.js";
 import { FilaReparos } from "./pages/FilaReparos.js";
 import { AdminMatchRules } from "./pages/AdminMatchRules.js";
 import { AdminDados } from "./pages/AdminDados.js";
+import { TecnicoFila } from "./pages/TecnicoFila.js";
 
 function LoadingScreen() {
   return (
@@ -98,6 +99,8 @@ function AuthenticatedShell() {
 
   if (!user) return null;
   const isAdmin = user.role === "ADMIN";
+  const isTechnician = user.role === "TECHNICIAN";
+  const roleLabel = isAdmin ? "Admin" : isTechnician ? "Técnico" : "Operador";
 
   return (
     <div className="app-shell">
@@ -113,7 +116,7 @@ function AuthenticatedShell() {
         <BetaBanner />
         <span className="topbar-user">
           <span>{user.displayName}</span>
-          <span className="topbar-role">{isAdmin ? "Admin" : "Operador"}</span>
+          <span className="topbar-role">{roleLabel}</span>
           <button className="topbar-btn" onClick={logout} title="Sair">
             <LogOut size={14} />
             Sair
@@ -123,57 +126,69 @@ function AuthenticatedShell() {
 
       <div className={`layout ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
         <nav className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
-          <div className="sidebar-section">
-            <div className="sidebar-label">Operação</div>
-            <NavLink to="/fila-reparos" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-              <List size={15} /> Fila de reparos
-            </NavLink>
-            <NavLink to="/analise" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-              <Wrench size={15} /> Analisar aparelho
-            </NavLink>
-          </div>
-
-          <div className="sidebar-section">
-            <div className="sidebar-label">Suprimentos</div>
-            <NavLink to="/compras" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-              <ShoppingCart size={15} /> Pedidos de peças
-            </NavLink>
-            <NavLink to="/estoque" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-              <Boxes size={15} /> Estoque
-            </NavLink>
-            <NavLink to="/bipagem" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-              <ScanBarcode size={15} /> Contagem
-            </NavLink>
-          </div>
-
-          {isAdmin && (
+          {isTechnician ? (
             <div className="sidebar-section">
-              <div className="sidebar-label">Administração</div>
-              <NavLink to="/admin/dados" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <Database size={15} /> Dados
-              </NavLink>
-              <NavLink to="/admin/pessoas" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <Users size={15} /> Pessoas
-              </NavLink>
-              <NavLink to="/admin/regras-match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <Sliders size={15} /> Regras do Match
-              </NavLink>
-              <NavLink to="/diagnostico" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <Stethoscope size={15} /> Diagnóstico
-              </NavLink>
-              <NavLink to="/match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <Activity size={15} /> Auditoria do motor
-              </NavLink>
-              <NavLink to="/importar" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <FileInput size={15} /> Importação inicial
+              <div className="sidebar-label">Meu trabalho</div>
+              <NavLink to="/minha-fila" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <Wrench size={15} /> Minha fila
               </NavLink>
             </div>
+          ) : (
+            <>
+              <div className="sidebar-section">
+                <div className="sidebar-label">Operação</div>
+                <NavLink to="/fila-reparos" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <List size={15} /> Fila de reparos
+                </NavLink>
+                <NavLink to="/analise" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <Wrench size={15} /> Analisar aparelho
+                </NavLink>
+              </div>
+
+              <div className="sidebar-section">
+                <div className="sidebar-label">Suprimentos</div>
+                <NavLink to="/compras" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <ShoppingCart size={15} /> Pedidos de peças
+                </NavLink>
+                <NavLink to="/estoque" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <Boxes size={15} /> Estoque
+                </NavLink>
+                <NavLink to="/bipagem" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <ScanBarcode size={15} /> Contagem
+                </NavLink>
+              </div>
+
+              {isAdmin && (
+                <div className="sidebar-section">
+                  <div className="sidebar-label">Administração</div>
+                  <NavLink to="/admin/dados" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Database size={15} /> Dados
+                  </NavLink>
+                  <NavLink to="/admin/pessoas" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Users size={15} /> Pessoas
+                  </NavLink>
+                  <NavLink to="/admin/regras-match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Sliders size={15} /> Regras do Match
+                  </NavLink>
+                  <NavLink to="/diagnostico" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Stethoscope size={15} /> Diagnóstico
+                  </NavLink>
+                  <NavLink to="/match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Activity size={15} /> Auditoria do motor
+                  </NavLink>
+                  <NavLink to="/importar" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <FileInput size={15} /> Importação inicial
+                  </NavLink>
+                </div>
+              )}
+            </>
           )}
         </nav>
 
         <main className="main-content">
           <Routes>
-            <Route path="/" element={<Navigate to="/fila-reparos" replace />} />
+            <Route path="/" element={<Navigate to={isTechnician ? "/minha-fila" : "/fila-reparos"} replace />} />
+            <Route path="/minha-fila" element={<TecnicoFila />} />
             <Route path="/fila-reparos" element={<FilaReparos />} />
             <Route path="/analise" element={<Analise />} />
             <Route path="/importar" element={<Importar />} />
@@ -193,7 +208,7 @@ function AuthenticatedShell() {
             <Route path="/admin/datasys" element={<AdminDatasys />} />
             <Route path="/admin/dados" element={<AdminDados />} />
             <Route path="/admin/regras-match" element={<AdminMatchRules />} />
-            <Route path="*" element={<Navigate to="/fila-reparos" replace />} />
+            <Route path="*" element={<Navigate to={isTechnician ? "/minha-fila" : "/fila-reparos"} replace />} />
           </Routes>
         </main>
       </div>

@@ -8,11 +8,13 @@ const SESSION_BYTES = 48;
 // Expiração padrão: 12 horas em milissegundos
 const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
+export type UserRole = "ADMIN" | "OPERATOR" | "TECHNICIAN";
+
 export interface AuthUser {
   id: number;
   username: string;
   displayName: string;
-  role: "ADMIN" | "OPERATOR";
+  role: UserRole;
   active: number;
 }
 
@@ -86,7 +88,7 @@ export function findUserByUsername(db: Db, username: string): (AuthUser & { pinH
     username: row.username,
     displayName: row.display_name,
     pinHash: row.pin_hash,
-    role: row.role as "ADMIN" | "OPERATOR",
+    role: row.role as UserRole,
     active: row.active,
   };
 }
@@ -100,7 +102,7 @@ export function getUserById(db: Db, id: number): AuthUser | null {
     id: row.id,
     username: row.username,
     displayName: row.display_name,
-    role: row.role as "ADMIN" | "OPERATOR",
+    role: row.role as UserRole,
     active: row.active,
   };
 }
@@ -113,7 +115,7 @@ export function listUsers(db: Db): AuthUser[] {
     id: r.id,
     username: r.username,
     displayName: r.display_name,
-    role: r.role as "ADMIN" | "OPERATOR",
+    role: r.role as UserRole,
     active: r.active,
   }));
 }
@@ -218,7 +220,7 @@ export function validateSession(db: Db, token: string): SessionUser | null {
     id: row.id,
     username: row.username,
     displayName: row.display_name,
-    role: row.role as "ADMIN" | "OPERATOR",
+    role: row.role as UserRole,
     active: row.active,
   };
 }
@@ -229,7 +231,7 @@ export function validateSession(db: Db, token: string): SessionUser | null {
 
 export async function createUser(
   db: Db,
-  params: { username: string; displayName: string; pin: string; role: "ADMIN" | "OPERATOR" },
+  params: { username: string; displayName: string; pin: string; role: UserRole },
 ): Promise<AuthUser> {
   validatePin(params.pin);
   validateUsername(params.username);
@@ -266,7 +268,7 @@ export async function resetUserPin(
 export function updateUser(
   db: Db,
   userId: number,
-  params: { displayName?: string; role?: "ADMIN" | "OPERATOR"; active?: boolean },
+  params: { displayName?: string; role?: UserRole; active?: boolean },
 ): AuthUser {
   const user = getUserById(db, userId);
   if (!user) throw new AuthError("NOT_FOUND", "Usuário não encontrado.");
@@ -276,7 +278,7 @@ export function updateUser(
     const r = db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'ADMIN' AND active = 1").get() as { c: number };
     return r.c <= 1;
   };
-  if ((params.active === false || params.role === "OPERATOR") && user.role === "ADMIN") {
+  if ((params.active === false || (params.role && params.role !== "ADMIN")) && user.role === "ADMIN") {
     if (isLastAdmin()) {
       const action = params.active === false ? "desativar" : "rebaixar";
       throw new AuthError("LAST_ADMIN", `Não é possível ${action} o último administrador ativo.`);

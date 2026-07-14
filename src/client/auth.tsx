@@ -4,7 +4,7 @@ export interface User {
   id: number;
   username: string;
   displayName: string;
-  role: "ADMIN" | "OPERATOR";
+  role: "ADMIN" | "OPERATOR" | "TECHNICIAN";
   active: number;
   sessionId?: number;
 }

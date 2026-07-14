@@ -41,6 +41,18 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
   next();
 }
 
+export function requireOperator(req: Request, res: Response, next: NextFunction): void {
+  if (!req.sessionUser) {
+    res.status(401).json({ error: "Não autenticado." });
+    return;
+  }
+  if (req.sessionUser.role === "TECHNICIAN") {
+    res.status(403).json({ error: "Acesso restrito a operadores e administradores." });
+    return;
+  }
+  next();
+}
+
 export function optionalAuth(req: Request, _res: Response, next: NextFunction): void {
   const token = req.cookies?.[SESSION_COOKIE] as string | undefined;
   if (token) {

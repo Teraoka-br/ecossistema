@@ -1,6 +1,7 @@
 import { Router, type Request } from "express";
 import { getDb } from "../../db/database.js";
-import { requireAuth, requireAdmin } from "../middleware/auth-middleware.js";
+import { requireAuth, requireAdmin, requireOperator } from "../middleware/auth-middleware.js";
+import { getStaffByUserId } from "../../staff/staff-service.js";
 import {
   getRepairCaseWithParts,
   type WorkflowStatus,
@@ -23,6 +24,39 @@ import {
 import { getCurrentOperationalStock } from "../../operational/stock-service.js";
 
 export const repairQueueRouter = Router();
+
+// ─── Fila do técnico logado ───────────────────────────────────────────────
+
+repairQueueRouter.get("/fila-reparos/minha-fila", requireAuth, (req, res) => {
+  const db = getDb();
+  const userId = (req as Request).sessionUser!.id;
+  const staff = getStaffByUserId(db, userId);
+  if (!staff) {
+    res.json({ cases: [], staffMember: null });
+    return;
+  }
+
+  const rows = db.prepare(`
+    SELECT rc.*,
+           (SELECT COUNT(*) FROM part_requests WHERE repair_case_id = rc.id AND cancelled_at IS NULL) AS total_parts,
+           (SELECT COUNT(*) FROM part_requests WHERE repair_case_id = rc.id AND cancelled_at IS NULL AND status IN ('INDICADA','RESERVADA','SEPARADA','CONSUMIDA')) AS matched_parts
+    FROM repair_cases rc
+    WHERE rc.directed_technician_id = ?
+      AND rc.workflow_status IN ('DIRECIONADO_TECNICO','EM_REPARO','REPARO_EXECUTADO','TRIAGEM_FINAL','RETORNO_TECNICO')
+    ORDER BY
+      CASE rc.workflow_status
+        WHEN 'EM_REPARO' THEN 1
+        WHEN 'DIRECIONADO_TECNICO' THEN 2
+        WHEN 'REPARO_EXECUTADO' THEN 3
+        WHEN 'TRIAGEM_FINAL' THEN 4
+        WHEN 'RETORNO_TECNICO' THEN 5
+        ELSE 9
+      END,
+      rc.updated_at DESC
+  `).all(staff.id);
+
+  res.json({ cases: rows, staffMember: staff });
+});
 
 // ─── Engine state ─────────────────────────────────────────────────────────
 
@@ -49,7 +83,7 @@ repairQueueRouter.post("/engine/run", requireAuth, requireAdmin, async (req, res
 
 // ─── Fila de reparos ──────────────────────────────────────────────────────
 
-repairQueueRouter.get("/fila-reparos", requireAuth, (req, res) => {
+repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) => {
   const db = getDb();
   const filter = (req.query.filter as QueueFilter) || "DO_NOW";
   const page = Math.max(1, parseInt(req.query.page as string) || 1);

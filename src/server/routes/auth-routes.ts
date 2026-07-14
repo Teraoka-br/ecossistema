@@ -114,7 +114,7 @@ const CreateUserSchema = z.object({
   username: z.string().min(2),
   displayName: z.string().min(1),
   pin: z.string().regex(/^\d{4,8}$/),
-  role: z.enum(["ADMIN", "OPERATOR"]).default("OPERATOR"),
+  role: z.enum(["ADMIN", "OPERATOR", "TECHNICIAN"]).default("OPERATOR"),
 });
 
 authRouter.post("/users", requireAuth, requireAdmin, async (req, res, next) => {
@@ -132,7 +132,7 @@ authRouter.post("/users", requireAuth, requireAdmin, async (req, res, next) => {
 
 const UpdateUserSchema = z.object({
   displayName: z.string().min(1).optional(),
-  role: z.enum(["ADMIN", "OPERATOR"]).optional(),
+  role: z.enum(["ADMIN", "OPERATOR", "TECHNICIAN"]).optional(),
   active: z.boolean().optional(),
 });
 
