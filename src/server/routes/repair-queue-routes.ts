@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
 import { getDb } from "../../db/database.js";
-import { requireAuth, requireAdmin, requireOperator } from "../middleware/auth-middleware.js";
+import { requireAuth, requireAdmin, requireOperator, requirePermissionOrAdmin } from "../middleware/auth-middleware.js";
 import { getStaffByUserId } from "../../staff/staff-service.js";
 import {
   getRepairCaseWithParts,
@@ -11,6 +11,7 @@ import {
 } from "../../match/next-action-service.js";
 import {
   reserveKitFromEngine, reservePartial, releaseReservation, directToTechnician,
+  redirectTechnician,
   startRepair, completeRepair, RepairFlowError,
   listReservationsByCase,
 } from "../../operational/reservation-service.js";
@@ -175,6 +176,7 @@ repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) 
       matchedParts: r.matched_parts,
       reservedCount: r.reserved_count,
       depositoAtual: r.deposito_atual,
+      problema: r.problema ?? null,
       nextAction,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
@@ -383,6 +385,145 @@ repairQueueRouter.post("/fila-reparos/:id/direct-technician", requireAuth, (req,
   } catch (err) {
     next(err);
   }
+});
+
+// Redirecionar técnico — aceita APTO_REPARO e DIRECIONADO_TECNICO (alterar técnico após direcionamento)
+repairQueueRouter.post("/fila-reparos/:id/redirect-technician", requireAuth, (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const { technicianId, notes } = req.body as { technicianId: number; notes?: string };
+    if (!technicianId) return res.status(400).json({ error: "technicianId obrigatório." });
+    redirectTechnician(db, repairCaseId, { technicianId, userId, notes });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Direcionamento em lote — APTO_REPARO → DIRECIONADO_TECNICO para múltiplos casos
+repairQueueRouter.post("/fila-reparos/direct-technician-batch", requireAuth, (req, res, next) => {
+  try {
+    const db = getDb();
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const { caseIds, technicianId, notes } = req.body as { caseIds: number[]; technicianId: number; notes?: string };
+    if (!technicianId) return res.status(400).json({ error: "technicianId obrigatório." });
+    if (!Array.isArray(caseIds) || caseIds.length === 0) return res.status(400).json({ error: "caseIds obrigatório." });
+
+    const results: Array<{ id: number; ok: boolean; error?: string }> = [];
+    for (const id of caseIds) {
+      try {
+        redirectTechnician(db, id, { technicianId, userId, notes });
+        results.push({ id, ok: true });
+      } catch (err) {
+        results.push({ id, ok: false, error: (err as Error).message });
+      }
+    }
+    const succeeded = results.filter(r => r.ok).length;
+    res.json({ ok: true, succeeded, failed: results.length - succeeded, results });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Fechar caso (VERIFICAR → CONCLUIDO / CANCELADO / VENDA_ESTADO) ───────
+
+repairQueueRouter.post("/fila-reparos/:id/close", requireAuth, requirePermissionOrAdmin("OVERRIDE_REPAIR_STATUS"), (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+    const { status, notes } = req.body as { status?: string; notes?: string };
+    const VALID_CLOSE = ["CONCLUIDO", "CANCELADO", "VENDA_ESTADO"];
+    if (!status || !VALID_CLOSE.includes(status)) {
+      return res.status(400).json({ error: `Status deve ser um de: ${VALID_CLOSE.join(", ")}.` });
+    }
+    const rc = db.prepare("SELECT id FROM repair_cases WHERE id = ?").get(repairCaseId);
+    if (!rc) return res.status(404).json({ error: "Caso não encontrado." });
+    db.prepare(
+      `UPDATE repair_cases SET workflow_status = ?, closed_at = datetime('now'),
+         updated_by_user_id = ?, updated_at = datetime('now') WHERE id = ?`,
+    ).run(status, (req as Request).sessionUser?.id ?? null, repairCaseId);
+    if (notes?.trim()) {
+      recordOperationalEvent(db, {
+        repairCaseId,
+        eventType: "NOTE_ADDED",
+        responsibleName: (req as Request).sessionUser?.displayName ?? null,
+        notes: notes.trim(),
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ─── Override manual de fase ──────────────────────────────────────────────
+
+repairQueueRouter.post("/fila-reparos/:id/override-status", requireAuth, requirePermissionOrAdmin("OVERRIDE_REPAIR_STATUS"), (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+    const { toStatus, notes } = req.body as { toStatus?: string; notes?: string };
+    const VALID_STATUSES = [
+      "EM_ANALISE", "PEDIR_PECA", "AGUARDANDO_RECEBIMENTO",
+      "MATCH_PARCIAL", "MATCH", "EM_SEPARACAO", "APTO_REPARO",
+      "DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO",
+      "TRIAGEM_FINAL", "RETORNO_TECNICO",
+      "CONCLUIDO", "VENDA_ESTADO", "CANCELADO", "VERIFICAR",
+    ];
+    if (!toStatus || !VALID_STATUSES.includes(toStatus)) {
+      return res.status(400).json({ error: "Status inválido." });
+    }
+    if (!notes?.trim()) {
+      return res.status(400).json({ error: "Justificativa obrigatória." });
+    }
+    const rc = db.prepare("SELECT id, workflow_status FROM repair_cases WHERE id = ?").get(repairCaseId) as { id: number; workflow_status: string } | undefined;
+    if (!rc) return res.status(404).json({ error: "Caso não encontrado." });
+    const fromStatus = rc.workflow_status;
+    const userId = (req as Request).sessionUser!.id;
+    const userName = (req as Request).sessionUser!.displayName;
+
+    db.prepare(
+      `UPDATE repair_cases SET workflow_status = ?, updated_by_user_id = ?, updated_at = datetime('now') WHERE id = ?`,
+    ).run(toStatus, userId, repairCaseId);
+
+    recordOperationalEvent(db, {
+      repairCaseId,
+      eventType: "STATUS_OVERRIDE",
+      previousStatus: fromStatus,
+      newStatus: toStatus,
+      responsibleName: userName,
+      notes: notes.trim(),
+    });
+
+    db.prepare(
+      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata_json) VALUES (?, 'OVERRIDE_REPAIR_STATUS', 'repair_case', ?, ?)`,
+    ).run(userId, String(repairCaseId), JSON.stringify({ fromStatus, toStatus, notes: notes.trim() }));
+
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ─── Editar campos do caso ────────────────────────────────────────────────
+
+repairQueueRouter.patch("/fila-reparos/:id/info", requireAuth, requireAdmin, (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+    const allowed = ["problema", "notes", "brand", "model", "color", "capacity"] as const;
+    const body = req.body as Partial<Record<typeof allowed[number], string | null>>;
+    const sets: string[] = [];
+    const vals: (string | number | null)[] = [];
+    for (const col of allowed) {
+      if (col in body) { sets.push(`${col} = ?`); vals.push((body[col] ?? null) as string | number | null); }
+    }
+    if (sets.length === 0) return res.json({ ok: true });
+    sets.push("updated_at = datetime('now')");
+    db.prepare(`UPDATE repair_cases SET ${sets.join(", ")} WHERE id = ?`).run(...vals, repairCaseId);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 });
 
 // ─── Observação ───────────────────────────────────────────────────────────

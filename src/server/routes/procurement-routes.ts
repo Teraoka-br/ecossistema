@@ -6,6 +6,7 @@ import * as proc from "../../operational/procurement-service.js";
 import { ProcurementError } from "../../operational/procurement-service.js";
 import * as recv from "../../operational/receiving-service.js";
 import { getCurrentOperationalStock, listMovements, StockError } from "../../operational/stock-service.js";
+import * as cotacaoSvc from "../../operational/cotacao-service.js";
 
 export const procurementRouter = Router();
 
@@ -233,4 +234,105 @@ procurementRouter.get("/stock/movements", (req, res) => {
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
   const limit = req.query.limit ? Number(req.query.limit) : undefined;
   res.json({ movements: listMovements(getDb(), { type, search, limit }) });
+});
+
+// ===========================================================================
+// Necessidades de compra (derivadas dos casos PEDIR_PECA)
+// ===========================================================================
+
+procurementRouter.get("/necessidades", (_req, res) => {
+  try {
+    res.json({ items: cotacaoSvc.listNecessidades(getDb()) });
+  } catch (err) { handleError(err, res); }
+});
+
+// Export CSV template para cotação
+procurementRouter.get("/necessidades/export.csv", (req, res) => {
+  try {
+    const items = cotacaoSvc.listNecessidades(getDb());
+    const selected = typeof req.query.pecas === "string"
+      ? new Set(req.query.pecas.split(",").map(s => s.trim()).filter(Boolean))
+      : null;
+    const rows = selected ? items.filter(i => selected.has(i.chavePeca)) : items;
+    const header = "PECA,QTDE,VALOR UN,VALOR TOTAL";
+    const lines = rows.map(r => `"${r.chavePeca.replace(/"/g, '""')}",${r.qtdeNecessaria},,`);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="cotacao_${new Date().toISOString().slice(0,10)}.csv"`);
+    res.send("﻿" + [header, ...lines].join("\r\n"));
+  } catch (err) { handleError(err, res); }
+});
+
+// ===========================================================================
+// Cotações
+// ===========================================================================
+
+const createCotacaoSchema = z.object({
+  supplier: z.string().min(1),
+  notes: z.string().optional().nullable(),
+  items: z.array(z.object({
+    chavePeca: z.string().min(1),
+    qtde: z.number().int().positive(),
+    valorUnitario: z.number().nonnegative(),
+  })).min(1),
+});
+
+procurementRouter.post("/cotacoes", (req, res) => {
+  const parsed = createCotacaoSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Corpo inválido.", details: parsed.error.flatten() });
+  try {
+    const createdBy = req.sessionUser?.displayName;
+    const cotacao = cotacaoSvc.createCotacao(getDb(), { ...parsed.data, createdBy });
+    res.status(201).json({ cotacao });
+  } catch (err) { handleError(err, res); }
+});
+
+procurementRouter.get("/cotacoes", (_req, res) => {
+  try {
+    res.json({ cotacoes: cotacaoSvc.listCotacoes(getDb()) });
+  } catch (err) { handleError(err, res); }
+});
+
+procurementRouter.get("/cotacoes/:id", (req, res) => {
+  try {
+    res.json({ cotacao: cotacaoSvc.getCotacao(getDb(), idParam(req.params.id)) });
+  } catch (err) { handleError(err, res); }
+});
+
+const aprovaCotacaoSchema = z.object({
+  aprovados: z.array(z.number().int().positive()).min(1),
+});
+
+procurementRouter.post("/cotacoes/:id/aprovar", (req, res) => {
+  const parsed = aprovaCotacaoSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Corpo inválido.", details: parsed.error.flatten() });
+  try {
+    const approvedBy = req.sessionUser?.displayName ?? "Sistema";
+    const result = cotacaoSvc.aprovaCotacao(getDb(), idParam(req.params.id), { ...parsed.data, approvedBy });
+    res.json(result);
+  } catch (err) { handleError(err, res); }
+});
+
+procurementRouter.post("/cotacoes/:id/cancelar", (req, res) => {
+  try {
+    cotacaoSvc.cancelCotacao(getDb(), idParam(req.params.id));
+    res.json({ ok: true });
+  } catch (err) { handleError(err, res); }
+});
+
+// Export CSV do pedido aprovado
+procurementRouter.get("/cotacoes/:id/pedido.csv", (req, res) => {
+  try {
+    const cotacao = cotacaoSvc.getCotacao(getDb(), idParam(req.params.id));
+    if (cotacao.status !== "APPROVED") return res.status(400).json({ error: "Cotação não aprovada." });
+    const aprovados = cotacao.items.filter(i => i.aprovado);
+    const total = aprovados.reduce((s, i) => s + i.qtde * i.valorUnitario, 0);
+    const header = "PECA,QTDE,VALOR UN,VALOR TOTAL";
+    const lines = aprovados.map(i =>
+      `"${i.chavePeca.replace(/"/g, '""')}",${i.qtde},${i.valorUnitario.toFixed(2)},${(i.qtde * i.valorUnitario).toFixed(2)}`
+    );
+    lines.push(`,,TOTAL,${total.toFixed(2)}`);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="pedido_${cotacao.id}_${cotacao.supplier.replace(/[^a-z0-9]/gi,'_')}.csv"`);
+    res.send("﻿" + [header, ...lines].join("\r\n"));
+  } catch (err) { handleError(err, res); }
 });

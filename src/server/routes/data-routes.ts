@@ -27,6 +27,39 @@ dataRouter.get("/diagnostico", (req, res) => {
   res.json(report);
 });
 
+// Casos elegíveis ao motor de match com age_days ou margin ausentes
+dataRouter.get("/diagnostico/score-gaps", (_req, res) => {
+  const db = getDb();
+  const TERMINAL = ["CONCLUIDO", "VENDA_ESTADO", "CANCELADO"];
+  const rows = db.prepare(`
+    SELECT rc.id, rc.imei, rc.brand, rc.model, rc.color, rc.os,
+           rc.workflow_status, rc.age_days, rc.cost, rc.estimated_sale, rc.margin, rc.deposito_atual,
+           (SELECT COUNT(*) FROM part_requests pr
+            WHERE pr.repair_case_id = rc.id AND pr.cancelled_at IS NULL
+              AND pr.status NOT IN ('CANCELADA','SEPARADA','CONSUMIDA','RESERVADA')) AS open_parts
+    FROM repair_cases rc
+    WHERE rc.analysis_status = 'COMPLETED'
+      AND rc.workflow_status NOT IN (${TERMINAL.map(() => "?").join(",")})
+      AND (rc.age_days IS NULL OR rc.margin IS NULL)
+    ORDER BY rc.id ASC
+  `).all(...TERMINAL) as Array<{
+    id: number; imei: string | null; brand: string | null; model: string | null;
+    color: string | null; os: string | null; workflow_status: string;
+    age_days: number | null; cost: number | null; estimated_sale: number | null;
+    margin: number | null; open_parts: number; deposito_atual: string | null;
+  }>;
+
+  res.json({
+    total: rows.length,
+    cases: rows.map(r => ({
+      id: r.id, imei: r.imei, brand: r.brand, model: r.model, color: r.color, os: r.os,
+      workflowStatus: r.workflow_status, ageDays: r.age_days, cost: r.cost,
+      estimatedSale: r.estimated_sale, margin: r.margin, openParts: r.open_parts,
+      depositoAtual: r.deposito_atual,
+    })),
+  });
+});
+
 dataRouter.get("/pedidos", (req, res) => {
   const db = getDb();
   const batchId = activeBatchId(db);

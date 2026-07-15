@@ -5,6 +5,7 @@ import { getActiveBatch } from "../../db/repository.js";
 import * as svc from "../../counting/counting-service.js";
 import { CountingError } from "../../counting/counting-service.js";
 import * as q from "../../db/counting-queries.js";
+import * as partKeysSvc from "../../operational/part-keys-service.js";
 import type { CountScanRow, CountSessionRow, StockSnapshotRow } from "../../db/counting-repository.js";
 import type { CountScan, CountSession, StockSnapshot, StockSnapshotItem } from "../../shared/types.js";
 
@@ -260,6 +261,7 @@ const resolveSchema = z.object({
   chavePeca: z.string().min(1),
   responsibleName: z.string().min(1),
   notes: z.string().optional().nullable(),
+  createIfMissing: z.boolean().optional(),
 });
 
 countingRouter.post("/count-sessions/:id/references/resolve", (req, res) => {
@@ -344,5 +346,107 @@ countingRouter.get("/stock-snapshots/:id", (req, res) => {
     res.json({ snapshot: toSnapshot(snapshot), items: q.listSnapshotItems(db, snapshot.id).map(toSnapshotItem) });
   } catch (err) {
     handleError(err, res);
+  }
+});
+
+// ===========================================================================
+// Catálogo de chaves personalizadas (custom_part_keys)
+// ===========================================================================
+
+countingRouter.get("/part-keys", (req, res) => {
+  const search = typeof req.query.search === "string" ? req.query.search : undefined;
+  res.json({ keys: partKeysSvc.listPartKeys(getDb(), search) });
+});
+
+countingRouter.get("/part-keys/all", (req, res) => {
+  const search = typeof req.query.search === "string" ? req.query.search : undefined;
+  const db = getDb();
+  const batch = getActiveBatch(db);
+  res.json({ keys: partKeysSvc.listAllPartKeys(db, batch?.id ?? null, search) });
+});
+
+const partKeyCreateSchema = z.object({
+  chavePeca: z.string().min(1),
+  descricao: z.string().optional(),
+  createdBy: z.string().optional(),
+});
+
+countingRouter.post("/part-keys", (req, res, next) => {
+  try {
+    const body = partKeyCreateSchema.parse(req.body);
+    const key = partKeysSvc.createPartKey(getDb(), body);
+    res.status(201).json({ key });
+  } catch (err) {
+    if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
+    if ((err as NodeJS.ErrnoException).message?.includes("UNIQUE")) {
+      res.status(409).json({ error: "CHAVEPECA já existe no catálogo." }); return;
+    }
+    next(err);
+  }
+});
+
+const partKeyUpdateSchema = z.object({
+  chavePeca: z.string().min(1).optional(),
+  descricao: z.string().nullable().optional(),
+  editedBy: z.string().optional(),
+  notes: z.string().optional(),
+});
+
+countingRouter.patch("/part-keys/:id", (req, res, next) => {
+  try {
+    const id = idParam(req.params.id);
+    const body = partKeyUpdateSchema.parse(req.body);
+    const key = partKeysSvc.updatePartKey(getDb(), id, body);
+    res.json({ key });
+  } catch (err) {
+    if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
+    if ((err as Error).message === "Chave não encontrada.") { res.status(404).json({ error: "Chave não encontrada." }); return; }
+    if ((err as NodeJS.ErrnoException).message?.includes("UNIQUE")) {
+      res.status(409).json({ error: "CHAVEPECA já existe no catálogo." }); return;
+    }
+    next(err);
+  }
+});
+
+// Editar chave importada (por chave_peca_norm) — cria/atualiza entrada custom
+const partKeyImportedEditSchema = z.object({
+  chavePeca: z.string().min(1).optional(),
+  descricao: z.string().nullable().optional(),
+  editedBy: z.string().optional(),
+  notes: z.string().optional(),
+});
+
+countingRouter.patch("/part-keys/imported/:norm", (req, res, next) => {
+  try {
+    const norm = req.params.norm;
+    const body = partKeyImportedEditSchema.parse(req.body);
+    const db = getDb();
+    const batch = getActiveBatch(db);
+    const key = partKeysSvc.editImportedKey(db, norm, body, batch?.id ?? null);
+    res.json({ key });
+  } catch (err) {
+    if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
+    if ((err as NodeJS.ErrnoException).message?.includes("UNIQUE")) {
+      res.status(409).json({ error: "CHAVEPECA já existe no catálogo." }); return;
+    }
+    next(err);
+  }
+});
+
+// Histórico de edições de uma chave (por norm)
+countingRouter.get("/part-keys/history/:norm", (req, res) => {
+  const norm = req.params.norm;
+  const history = partKeysSvc.getPartKeyHistory(getDb(), norm);
+  res.json({ history });
+});
+
+countingRouter.delete("/part-keys/:id", (req, res, next) => {
+  try {
+    const id = idParam(req.params.id);
+    partKeysSvc.deletePartKey(getDb(), id);
+    res.json({ ok: true });
+  } catch (err) {
+    if ((err as Error).message === "Chave não encontrada.") { res.status(404).json({ error: "Chave não encontrada." }); return; }
+    next(err);
   }
 });

@@ -27,6 +27,8 @@ export interface RelSeriaisSyncResult {
   atualizados: number;
   semVinculo: number;
   marcaModeloEnriquecidos: number;
+  concluidos: number;
+  direcionados: number;
 }
 
 export interface AnaliseMiSyncResult {
@@ -133,15 +135,77 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
     descricao: string | null;
   }[];
 
-  const result: RelSeriaisSyncResult = { processados: 0, atualizados: 0, semVinculo: 0, marcaModeloEnriquecidos: 0 };
+  // Mapa depósito (uppercase) → staff_id para direcionamento automático
+  const techRows = db.prepare(
+    `SELECT id, datasys_deposito FROM staff_members WHERE type = 'TECHNICIAN' AND active = 1 AND datasys_deposito IS NOT NULL`,
+  ).all() as { id: number; datasys_deposito: string }[];
+  const depositoToTech = new Map<string, number>(
+    techRows.map(t => [t.datasys_deposito.toUpperCase().trim(), t.id]),
+  );
 
-  const findCase = db.prepare(`SELECT id, brand, model FROM repair_cases WHERE imei_norm = ? LIMIT 1`);
+  const result: RelSeriaisSyncResult = {
+    processados: 0, atualizados: 0, semVinculo: 0,
+    marcaModeloEnriquecidos: 0, concluidos: 0, direcionados: 0,
+  };
+
+  const findCase = db.prepare(
+    `SELECT id, brand, model, workflow_status FROM repair_cases WHERE imei_norm = ? LIMIT 1`,
+  );
   const updateLocation = db.prepare(
     `UPDATE repair_cases SET deposito_atual = ?, filial_atual = ?, source_disponivel = ?,
        last_seen_in_source_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`,
   );
   const enrichBrandModel = db.prepare(
     `UPDATE repair_cases SET brand = COALESCE(brand, ?), model = COALESCE(model, ?),
+       updated_at = datetime('now') WHERE id = ?`,
+  );
+  const markVerificar = db.prepare(
+    `UPDATE repair_cases SET workflow_status = 'VERIFICAR',
+       updated_at = datetime('now') WHERE id = ?`,
+  );
+  const directTech = db.prepare(
+    `UPDATE repair_cases SET workflow_status = 'DIRECIONADO_TECNICO',
+       directed_technician_id = ?, directed_at = datetime('now'),
+       updated_at = datetime('now') WHERE id = ?`,
+  );
+
+  // Mapeamento completo depósito Datasys → ação no sistema
+  // FLUXO_NORMAL = mantém status atual (case está no pipeline de match/peças)
+  // APTO_REPARO  = está com técnico → DIRECIONADO_TECNICO se técnico configurado, senão APTO_REPARO
+  // CONCLUIDO    = aparelho fora do fluxo de reparo
+  // EM_ANALISE   = revisão manual necessária
+  type DepositAction = "FLUXO_NORMAL" | "APTO_REPARO" | "CONCLUIDO" | "EM_ANALISE";
+  const DEPOSIT_MAP: Record<string, DepositAction> = {
+    "MANUTENCAO INTERNA":       "FLUXO_NORMAL",
+    "AGUARDANDO PECA":          "FLUXO_NORMAL",
+    "TECNICO 1":                "APTO_REPARO",
+    "TECNICO 2":                "APTO_REPARO",
+    "TECNICO 3":                "APTO_REPARO",
+    "REPARO DE PLACA":          "EM_ANALISE",
+    "TRIAGEM":                  "EM_ANALISE",
+    "AGUARDANDO RECEBIMENTO":   "EM_ANALISE",
+    "VENDA NO ESTADO":          "CONCLUIDO",
+    "APARELHO DE EMPRESTIMO":   "CONCLUIDO",
+    "APARELHOS BLOQUEADOS":     "CONCLUIDO",
+    "PARCIALMENTE FUNCIONAL":   "CONCLUIDO",
+    "RETIRADA DE PECAS":        "CONCLUIDO",
+    "MANUTENCAO EXTERNA":       "CONCLUIDO",
+    "DISPONIVEIS PARA SITE":    "CONCLUIDO",
+    "DISPONIVEIS PARA QUIOSQUE":"CONCLUIDO",
+    "DEVOLVIDOS E DEFEITO":     "CONCLUIDO",
+    "NOVOS DISPONIVEIS":        "CONCLUIDO",
+  };
+
+  const markConcluido = db.prepare(
+    `UPDATE repair_cases SET workflow_status = 'CONCLUIDO',
+       updated_at = datetime('now') WHERE id = ?`,
+  );
+  const markAptoReparo = db.prepare(
+    `UPDATE repair_cases SET workflow_status = 'APTO_REPARO',
+       updated_at = datetime('now') WHERE id = ?`,
+  );
+  const markEmAnalise = db.prepare(
+    `UPDATE repair_cases SET workflow_status = 'EM_ANALISE',
        updated_at = datetime('now') WHERE id = ?`,
   );
 
@@ -151,7 +215,9 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
       result.processados++;
       if (!row.imei_norm) { result.semVinculo++; continue; }
 
-      const rc = findCase.get(row.imei_norm) as { id: number; brand: string | null; model: string | null } | undefined;
+      const rc = findCase.get(row.imei_norm) as {
+        id: number; brand: string | null; model: string | null; workflow_status: string;
+      } | undefined;
       if (!rc) { result.semVinculo++; continue; }
 
       updateLocation.run(row.deposito_atual, row.filial_atual, row.disponivel, rc.id);
@@ -163,6 +229,50 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
       if ((sourceBrand && !rc.brand) || (sourceModel && !rc.model)) {
         enrichBrandModel.run(sourceBrand, sourceModel, rc.id);
         result.marcaModeloEnriquecidos++;
+      }
+
+
+      const deposito = row.deposito_atual?.trim().toUpperCase() ?? "";
+      const action: DepositAction | undefined = deposito ? DEPOSIT_MAP[deposito] : undefined;
+
+      if (!action) {
+        // Depósito desconhecido — disponível=NAO envia pra VERIFICAR, senão ignora
+        if (row.disponivel?.toUpperCase() === "NAO" && rc.workflow_status !== "VERIFICAR") {
+          markVerificar.run(rc.id);
+          result.concluidos++;
+        }
+        continue;
+      }
+
+      switch (action) {
+        case "FLUXO_NORMAL":
+          // Mantém status atual — case segue no pipeline de match/peças
+          break;
+
+        case "CONCLUIDO":
+          if (rc.workflow_status !== "CONCLUIDO") {
+            markConcluido.run(rc.id);
+            result.concluidos++;
+          }
+          break;
+
+        case "EM_ANALISE":
+          if (rc.workflow_status !== "EM_ANALISE") {
+            markEmAnalise.run(rc.id);
+          }
+          break;
+
+        case "APTO_REPARO": {
+          // Se técnico configurado para esse depósito → direcionar
+          const techId = depositoToTech.get(deposito);
+          if (techId !== undefined) {
+            directTech.run(techId, rc.id);
+            result.direcionados++;
+          } else if (rc.workflow_status !== "APTO_REPARO" && rc.workflow_status !== "DIRECIONADO_TECNICO") {
+            markAptoReparo.run(rc.id);
+          }
+          break;
+        }
       }
     }
     db.prepare("COMMIT").run();
@@ -219,11 +329,16 @@ export function applyAnaliseMiToRepairCases(db: Db, importId: number): AnaliseMi
   const findCaseByImei = db.prepare(
     `SELECT id, workflow_status, analysis_status FROM repair_cases WHERE imei_norm = ? LIMIT 1`,
   );
+  const findScoreFromLegacy = db.prepare(
+    `SELECT idade, custo, venda, margem_legada FROM source_order_parts WHERE imei = ? ORDER BY rowid LIMIT 1`,
+  );
   // workflow_status e analysis_status são parametrizados (? ?)
   const createCase = db.prepare(
     `INSERT INTO repair_cases (imei, imei_norm, os, brand, model, color,
-       repair_date, repair_date_source, workflow_status, analysis_status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'ANALISE_MI', ?, 'COMPLETED', datetime('now'), datetime('now'))`,
+       repair_date, repair_date_source, workflow_status, analysis_status,
+       age_days, cost, estimated_sale, margin,
+       created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'ANALISE_MI', ?, 'COMPLETED', ?, ?, ?, ?, datetime('now'), datetime('now'))`,
   );
   const updateCaseMeta = db.prepare(
     `UPDATE repair_cases SET brand = COALESCE(brand, ?), model = COALESCE(model, ?),
@@ -307,11 +422,18 @@ export function applyAnaliseMiToRepairCases(db: Db, importId: number): AnaliseMi
       } else {
         // Novo caso: criar já com analysis_status=COMPLETED e workflow baseado na chave
         const newWorkflow = hasValidChave ? "PEDIR_PECA" : "VERIFICAR";
+        const legacyScore = row.imei_norm
+          ? (findScoreFromLegacy.get(row.imei_norm) as { idade: number | null; custo: number | null; venda: number | null; margem_legada: number | null } | undefined)
+          : undefined;
         const cr = createCase.run(
           row.imei, row.imei_norm, row.os,
           row.brand, row.model, row.color,
           row.data_pedido,
           newWorkflow,
+          legacyScore?.idade ?? null,
+          legacyScore?.custo ?? null,
+          legacyScore?.venda ?? null,
+          legacyScore?.margem_legada ?? null,
         );
         caseId = Number(cr.lastInsertRowid);
         result.aparelhosCriados++;

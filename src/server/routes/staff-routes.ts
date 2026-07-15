@@ -32,6 +32,7 @@ staffRouter.post("/staff", requireAuth, requireAdmin, (req, res, next) => {
 const UpdateSchema = z.object({
   name: z.string().min(1).optional(),
   active: z.boolean().optional(),
+  datasysDeposito: z.string().nullable().optional(),
 });
 
 staffRouter.patch("/staff/:id", requireAuth, requireAdmin, (req, res, next) => {

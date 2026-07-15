@@ -7,6 +7,7 @@ export interface User {
   role: "ADMIN" | "OPERATOR" | "TECHNICIAN";
   active: number;
   sessionId?: number;
+  permissions?: string[];
 }
 
 interface AuthState {

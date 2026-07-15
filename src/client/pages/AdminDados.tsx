@@ -18,11 +18,12 @@ interface SourceStatus {
   pendingStaging: number;
 }
 
-type SourceKey = "his" | "rel-seriais" | "analise-mi" | "pedidos" | "bkp" | "triagem-saida" | "sh" | "peacs" | "demonstrativo";
+type SourceKey = "his" | "rel-seriais" | "rel-seriais-saldo" | "analise-mi" | "pedidos" | "bkp" | "triagem-saida" | "sh" | "peacs" | "demonstrativo";
 
 interface AllStatus {
   his: SourceStatus;
   "rel-seriais": SourceStatus;
+  "rel-seriais-saldo": SourceStatus;
   "analise-mi": SourceStatus;
   pedidos: SourceStatus;
   bkp: SourceStatus;
@@ -115,9 +116,24 @@ const SOURCES: SourceDefinition[] = [
     },
   },
   {
+    key: "rel-seriais-saldo",
+    label: "Rel. Estoque de Seriais — Com Saldo",
+    description: "Filtro 'Com saldo' do Datasys: uma linha por aparelho com depósito atual. Fonte principal de deposito_atual.",
+    sourceType: "Snapshot",
+    accept: ".csv",
+    config: {
+      arquivo: "Rel_Estoque_de_Seriais_ComSaldo (...).csv",
+      aba: "CSV (separado por ;)",
+      chave: "Serial",
+      camposPrincipais: ["Serial", "Produto", "Descrição", "Depósito Atual", "Filial Atual", "Disponível"],
+      destino: "rel_seriais_current",
+      observacoes: "Uma linha por IMEI — estado atual do aparelho. Use o filtro 'Com Saldo' no Datasys ao exportar.",
+    },
+  },
+  {
     key: "rel-seriais",
-    label: "Rel. Estoque de Seriais",
-    description: "CSV do Datasys com localização, depósito e filial de cada aparelho. Chave: Serial.",
+    label: "Rel. Estoque de Seriais — Todos (histórico)",
+    description: "Filtro 'Todos' do Datasys: histórico completo de eventos por aparelho. Secundário — prefira o 'Com Saldo'.",
     sourceType: "Snapshot",
     accept: ".csv",
     config: {
@@ -125,8 +141,8 @@ const SOURCES: SourceDefinition[] = [
       aba: "CSV (separado por ;)",
       chave: "Serial",
       camposPrincipais: ["Serial", "Produto", "Descrição", "Depósito Atual", "Filial Atual", "Disponível", "Dias em Estoque"],
-      destino: "rel_seriais_rows",
-      observacoes: "Lido em streaming linha a linha. Não exige IMEI válido.",
+      destino: "rel_seriais_current",
+      observacoes: "Múltiplas linhas por IMEI. A última linha de cada IMEI define o estado atual.",
     },
   },
   {

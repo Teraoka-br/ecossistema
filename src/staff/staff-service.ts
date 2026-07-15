@@ -6,6 +6,7 @@ export interface StaffMember {
   type: "TECHNICIAN";
   active: boolean;
   userId: number | null;
+  datasysDeposito: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -23,21 +24,21 @@ export class StaffError extends Error {
 export function listStaff(db: Db, opts: { activeOnly?: boolean } = {}): StaffMember[] {
   const where = opts.activeOnly ? "WHERE active = 1" : "";
   const rows = db
-    .prepare(`SELECT id, name, type, active, user_id, created_at, updated_at FROM staff_members ${where} ORDER BY name`)
+    .prepare(`SELECT id, name, type, active, user_id, datasys_deposito, created_at, updated_at FROM staff_members ${where} ORDER BY name`)
     .all() as unknown as StaffRow[];
   return rows.map(toStaffMember);
 }
 
 export function getStaffById(db: Db, id: number): StaffMember | null {
   const row = db
-    .prepare("SELECT id, name, type, active, user_id, created_at, updated_at FROM staff_members WHERE id = ?")
+    .prepare("SELECT id, name, type, active, user_id, datasys_deposito, created_at, updated_at FROM staff_members WHERE id = ?")
     .get(id) as StaffRow | undefined;
   return row ? toStaffMember(row) : null;
 }
 
 export function getStaffByUserId(db: Db, userId: number): StaffMember | null {
   const row = db
-    .prepare("SELECT id, name, type, active, user_id, created_at, updated_at FROM staff_members WHERE user_id = ?")
+    .prepare("SELECT id, name, type, active, user_id, datasys_deposito, created_at, updated_at FROM staff_members WHERE user_id = ?")
     .get(userId) as StaffRow | undefined;
   return row ? toStaffMember(row) : null;
 }
@@ -53,7 +54,7 @@ export function createStaff(db: Db, params: { name: string; type?: "TECHNICIAN" 
 export function updateStaff(
   db: Db,
   id: number,
-  params: { name?: string; active?: boolean },
+  params: { name?: string; active?: boolean; datasysDeposito?: string | null },
 ): StaffMember {
   const member = getStaffById(db, id);
   if (!member) throw new StaffError("NOT_FOUND", "Técnico não encontrado.");
@@ -67,6 +68,13 @@ export function updateStaff(
   if (params.active !== undefined) {
     db.prepare("UPDATE staff_members SET active = ?, updated_at = datetime('now') WHERE id = ?").run(
       params.active ? 1 : 0,
+      id,
+    );
+  }
+  if (params.datasysDeposito !== undefined) {
+    const val = params.datasysDeposito?.trim().toUpperCase() || null;
+    db.prepare("UPDATE staff_members SET datasys_deposito = ?, updated_at = datetime('now') WHERE id = ?").run(
+      val,
       id,
     );
   }
@@ -96,6 +104,7 @@ interface StaffRow {
   type: string;
   active: number;
   user_id: number | null;
+  datasys_deposito: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -107,6 +116,7 @@ function toStaffMember(r: StaffRow): StaffMember {
     type: r.type as "TECHNICIAN",
     active: r.active === 1,
     userId: r.user_id ?? null,
+    datasysDeposito: r.datasys_deposito ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

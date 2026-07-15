@@ -307,6 +307,40 @@ export function updateUser(
 }
 
 // ---------------------------------------------------------------------------
+// User permissions
+// ---------------------------------------------------------------------------
+
+export function getUserPermissions(db: Db, userId: number): string[] {
+  const rows = db
+    .prepare("SELECT permission FROM user_permissions WHERE user_id = ?")
+    .all(userId) as { permission: string }[];
+  return rows.map((r) => r.permission);
+}
+
+export function grantPermission(db: Db, userId: number, permission: string, grantedBy: number): void {
+  const user = getUserById(db, userId);
+  if (!user) throw new AuthError("NOT_FOUND", "Usuário não encontrado.");
+  db.prepare(
+    "INSERT OR IGNORE INTO user_permissions (user_id, permission, granted_by) VALUES (?, ?, ?)",
+  ).run(userId, permission, grantedBy);
+}
+
+export function revokePermission(db: Db, userId: number, permission: string): void {
+  db.prepare("DELETE FROM user_permissions WHERE user_id = ? AND permission = ?").run(userId, permission);
+}
+
+export function deleteUser(db: Db, userId: number): void {
+  const user = getUserById(db, userId);
+  if (!user) throw new AuthError("NOT_FOUND", "Usuário não encontrado.");
+  if (user.role === "ADMIN") {
+    const r = db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'ADMIN' AND active = 1").get() as { c: number };
+    if (r.c <= 1) throw new AuthError("LAST_ADMIN", "Não é possível excluir o último administrador ativo.");
+  }
+  db.prepare("UPDATE staff_members SET user_id = NULL WHERE user_id = ?").run(userId);
+  db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+}
+
+// ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
 

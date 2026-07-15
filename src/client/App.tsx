@@ -3,7 +3,7 @@ import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom"
 import {
   Wrench, List, ShoppingCart, Boxes, ScanBarcode,
   Users, Database, Activity, FileInput, LogOut,
-  PanelLeftClose, PanelLeftOpen, Stethoscope, Sliders,
+  PanelLeftClose, PanelLeftOpen, Stethoscope, Sliders, LayoutDashboard,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "./auth.js";
 import { Login } from "./pages/Login.js";
@@ -26,6 +26,8 @@ import { FilaReparos } from "./pages/FilaReparos.js";
 import { AdminMatchRules } from "./pages/AdminMatchRules.js";
 import { AdminDados } from "./pages/AdminDados.js";
 import { TecnicoFila } from "./pages/TecnicoFila.js";
+import { AdminDashboards } from "./pages/AdminDashboards.js";
+import { Referencias } from "./pages/Referencias.js";
 
 function LoadingScreen() {
   return (
@@ -150,8 +152,11 @@ function AuthenticatedShell() {
                 <NavLink to="/compras" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                   <ShoppingCart size={15} /> Pedidos de peças
                 </NavLink>
-                <NavLink to="/estoque" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <NavLink to="/estoque" end className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                   <Boxes size={15} /> Estoque
+                </NavLink>
+                <NavLink to="/estoque/referencias" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`} style={{ paddingLeft: "2rem", fontSize: "0.85rem" }}>
+                  Referências de peças
                 </NavLink>
                 <NavLink to="/bipagem" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                   <ScanBarcode size={15} /> Contagem
@@ -161,6 +166,9 @@ function AuthenticatedShell() {
               {isAdmin && (
                 <div className="sidebar-section">
                   <div className="sidebar-label">Administração</div>
+                  <NavLink to="/admin/dashboards" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <LayoutDashboard size={15} /> Dashboards
+                  </NavLink>
                   <NavLink to="/admin/dados" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                     <Database size={15} /> Dados
                   </NavLink>
@@ -198,6 +206,7 @@ function AuthenticatedShell() {
             <Route path="/bipagem" element={<Bipagem />} />
             <Route path="/estoque" element={<Estoque />} />
             <Route path="/estoque/movimentacoes" element={<Movimentacoes />} />
+            <Route path="/estoque/referencias" element={<Referencias />} />
             <Route path="/cotacoes" element={<Cotacoes />} />
             <Route path="/match" element={<Match />} />
             {/* Compatibilidade — /separacao redireciona para a fila */}
@@ -207,6 +216,7 @@ function AuthenticatedShell() {
             <Route path="/admin/pessoas" element={<AdminPessoas />} />
             <Route path="/admin/datasys" element={<AdminDatasys />} />
             <Route path="/admin/dados" element={<AdminDados />} />
+            <Route path="/admin/dashboards" element={<AdminDashboards />} />
             <Route path="/admin/regras-match" element={<AdminMatchRules />} />
             <Route path="*" element={<Navigate to={isTechnician ? "/minha-fila" : "/fila-reparos"} replace />} />
           </Routes>

@@ -80,20 +80,21 @@ export function activeScanCountsByReference(db: Db, sessionId: number): Referenc
     .all(sessionId) as unknown as ReferenceTotalRow[];
 }
 
-/** A CHAVEPECA normalizada existe no catálogo do lote ou em part_requests ativos? */
+/** A CHAVEPECA normalizada existe no catálogo do lote, em part_requests ativos ou em custom_part_keys? */
 export function catalogHasKey(db: Db, importBatchId: number, chavePecaNorm: string): boolean {
   // Catálogo legado (source_inventory_items)
   const inLegacy = db
-    .prepare(
-      "SELECT 1 FROM source_inventory_items WHERE import_batch_id = ? AND chave_peca_norm = ? LIMIT 1",
-    )
+    .prepare("SELECT 1 FROM source_inventory_items WHERE import_batch_id = ? AND chave_peca_norm = ? LIMIT 1")
     .get(importBatchId, chavePecaNorm);
   if (inLegacy !== undefined) return true;
-  // Fallback: part_requests ativos (novo sistema — chave pode não existir no legado)
+  // Chaves criadas manualmente via bipagem ou tela de referências
+  const inCustom = db
+    .prepare("SELECT 1 FROM custom_part_keys WHERE chave_peca_norm = ? LIMIT 1")
+    .get(chavePecaNorm);
+  if (inCustom !== undefined) return true;
+  // Fallback: part_requests ativos
   const inParts = db
-    .prepare(
-      "SELECT 1 FROM part_requests WHERE chave_peca_norm = ? AND status != 'CANCELADO' LIMIT 1",
-    )
+    .prepare("SELECT 1 FROM part_requests WHERE chave_peca_norm = ? AND status != 'CANCELADO' LIMIT 1")
     .get(chavePecaNorm);
   return inParts !== undefined;
 }
@@ -132,40 +133,39 @@ export function catalogLookup(db: Db, importBatchId: number, referenceNorm: stri
   return { foundInCatalog: existsRow !== undefined, distinctKeys };
 }
 
-/** Chaves distintas do catálogo: legado (source_inventory_items) + part_requests ativos. */
+/** Chaves distintas do catálogo: legado + custom_part_keys + part_requests ativos. */
 export function distinctCatalogKeys(db: Db, importBatchId: number, search?: string): { chavePeca: string; referencia: string }[] {
-  const likeClause = search && search.trim() !== "" ? "AND chave_peca LIKE ?" : "";
-  const likeParam  = search && search.trim() !== "" ? [`%${search.trim()}%`] : [];
+  const like = search?.trim();
+  const likeParam = like ? [`%${like}%`] : [];
 
-  const legacyRows = db
-    .prepare(
-      `SELECT chave_peca, MIN(referencia) AS referencia
-       FROM source_inventory_items
-       WHERE import_batch_id = ? AND chave_peca_norm IS NOT NULL AND chave_peca_norm != ''
-         ${likeClause}
-       GROUP BY chave_peca_norm
-       ORDER BY chave_peca
-       LIMIT 200`,
-    )
-    .all(importBatchId, ...likeParam) as { chave_peca: string; referencia: string }[];
+  const legacyRows = db.prepare(
+    `SELECT chave_peca, MIN(referencia) AS referencia
+     FROM source_inventory_items
+     WHERE import_batch_id = ? AND chave_peca_norm IS NOT NULL AND chave_peca_norm != ''
+       ${like ? "AND chave_peca LIKE ?" : ""}
+     GROUP BY chave_peca_norm ORDER BY chave_peca LIMIT 200`,
+  ).all(importBatchId, ...likeParam) as { chave_peca: string; referencia: string }[];
 
-  // Complementar com part_requests ativos (novo sistema)
-  const partRows = db
-    .prepare(
-      `SELECT chave_peca, '' AS referencia
-       FROM part_requests
-       WHERE chave_peca_norm IS NOT NULL AND chave_peca_norm != ''
-         AND status != 'CANCELADO' ${likeClause}
-       GROUP BY chave_peca_norm
-       ORDER BY chave_peca
-       LIMIT 200`,
-    )
-    .all(...likeParam) as { chave_peca: string; referencia: string }[];
+  const customRows = db.prepare(
+    `SELECT chave_peca, COALESCE(descricao, '') AS referencia
+     FROM custom_part_keys
+     WHERE chave_peca_norm IS NOT NULL
+       ${like ? "AND chave_peca LIKE ?" : ""}
+     ORDER BY chave_peca LIMIT 200`,
+  ).all(...likeParam) as { chave_peca: string; referencia: string }[];
 
-  // Unir sem duplicar (por chave)
+  const partRows = db.prepare(
+    `SELECT chave_peca, '' AS referencia
+     FROM part_requests
+     WHERE chave_peca_norm IS NOT NULL AND chave_peca_norm != ''
+       AND status != 'CANCELADO'
+       ${like ? "AND chave_peca LIKE ?" : ""}
+     GROUP BY chave_peca_norm ORDER BY chave_peca LIMIT 200`,
+  ).all(...likeParam) as { chave_peca: string; referencia: string }[];
+
   const seen = new Set(legacyRows.map((r) => r.chave_peca?.toLowerCase()));
   const merged = [...legacyRows];
-  for (const r of partRows) {
+  for (const r of [...customRows, ...partRows]) {
     if (!seen.has(r.chave_peca?.toLowerCase())) {
       merged.push(r);
       seen.add(r.chave_peca?.toLowerCase());

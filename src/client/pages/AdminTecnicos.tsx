@@ -7,6 +7,7 @@ interface Staff {
   type: string;
   active: boolean;
   userId: number | null;
+  datasysDeposito: string | null;
 }
 
 interface User {
@@ -27,6 +28,8 @@ export function AdminTecnicos() {
   const [error, setError] = useState<string | null>(null);
   const [linking, setLinking] = useState<Staff | null>(null);
   const [linkUserId, setLinkUserId] = useState<string>("");
+  const [editingDeposito, setEditingDeposito] = useState<Staff | null>(null);
+  const [depositoValue, setDepositoValue] = useState("");
   const [createWithUser, setCreateWithUser] = useState(false);
   const [newUsername, setNewUsername] = useState("");
   const [newPin, setNewPin] = useState("");
@@ -78,6 +81,18 @@ export function AdminTecnicos() {
       body: JSON.stringify({ active: !s.active }),
     });
     if (r.ok) load();
+    else { const d = await r.json(); setError(d.error); }
+  }
+
+  async function saveDeposito() {
+    if (!editingDeposito) return;
+    setError(null);
+    const r = await fetch(`/api/staff/${editingDeposito.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ datasysDeposito: depositoValue.trim() || null }),
+    });
+    if (r.ok) { setMsg("Depósito atualizado."); setEditingDeposito(null); setDepositoValue(""); load(); }
     else { const d = await r.json(); setError(d.error); }
   }
 
@@ -141,6 +156,28 @@ export function AdminTecnicos() {
         </div>
       )}
 
+      {editingDeposito && (
+        <div className="card" style={{ maxWidth: 420, marginBottom: "1rem" }}>
+          <div style={{ fontWeight: 600, marginBottom: "0.75rem" }}>Depósito Datasys — {editingDeposito.name}</div>
+          <div className="form-group">
+            <label>Nome do depósito no Datasys</label>
+            <input
+              value={depositoValue}
+              onChange={e => setDepositoValue(e.target.value)}
+              placeholder="ex: TECNICO 1"
+              autoFocus
+            />
+            <span className="muted" style={{ fontSize: "0.78rem" }}>
+              Exatamente como aparece no campo "Depósito Atual" do Rel. Estoque de Seriais. Deixe em branco para remover.
+            </span>
+          </div>
+          <div className="gap-row">
+            <button className="btn btn-primary btn-sm" onClick={saveDeposito}>Salvar</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setEditingDeposito(null); setDepositoValue(""); }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
       {linking && (
         <div className="card" style={{ maxWidth: 420, marginBottom: "1rem" }}>
           <div style={{ fontWeight: 600, marginBottom: "0.75rem" }}>Vincular conta — {linking.name}</div>
@@ -171,13 +208,19 @@ export function AdminTecnicos() {
       <div className="card">
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Nome</th><th>Status</th><th>Conta de acesso</th><th>Ações</th></tr></thead>
+            <thead><tr><th>Nome</th><th>Status</th><th>Depósito Datasys</th><th>Conta de acesso</th><th>Ações</th></tr></thead>
             <tbody>
-              {loading && <tr><td colSpan={4} className="muted">Carregando…</td></tr>}
+              {loading && <tr><td colSpan={5} className="muted">Carregando…</td></tr>}
               {staff.map((s) => (
                 <tr key={s.id}>
                   <td style={{ fontWeight: 500 }}>{s.name}</td>
                   <td><span className={`badge ${s.active ? "badge-ok" : "badge-err"}`}>{s.active ? "Ativo" : "Inativo"}</span></td>
+                  <td>
+                    {s.datasysDeposito
+                      ? <code style={{ fontSize: "0.8rem" }}>{s.datasysDeposito}</code>
+                      : <span className="muted" style={{ fontSize: "0.78rem", fontStyle: "italic" }}>Não configurado</span>
+                    }
+                  </td>
                   <td>
                     {s.userId
                       ? <span className="muted" style={{ fontSize: "0.82rem" }}>{getUserName(s.userId)}</span>
@@ -193,6 +236,9 @@ export function AdminTecnicos() {
                       <button className="btn btn-ghost btn-sm" onClick={() => { setLinking(s); setLinkUserId(s.userId ? String(s.userId) : ""); }} title="Vincular conta">
                         {s.userId ? <Unlink size={12} /> : <Link size={12} />}
                         {s.userId ? "Trocar conta" : "Vincular conta"}
+                      </button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => { setEditingDeposito(s); setDepositoValue(s.datasysDeposito ?? ""); }} title="Configurar depósito Datasys">
+                        Depósito
                       </button>
                     </div>
                   </td>
