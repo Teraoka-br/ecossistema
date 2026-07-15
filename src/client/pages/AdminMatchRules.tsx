@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { Plus, Check, ChevronDown, ChevronUp, Loader2, AlertTriangle } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Plus, Check, ChevronDown, ChevronUp, Loader2, AlertTriangle, Play, RefreshCw } from "lucide-react";
 
 interface MatchRuleSet {
   id: number;
@@ -16,12 +16,288 @@ interface MatchRuleSet {
   activatedAt: string | null;
 }
 
+interface BackfillResponse {
+  backfillResult: {
+    casesEligible: number;
+    ageDaysUpdated: number;
+    costUpdated: number;
+    estimatedSaleUpdated: number;
+    marginUpdated: number;
+    skipped: number;
+  };
+  recomputeResult: {
+    runId: number;
+    casesEvaluated: number;
+    fullKitsFound: number;
+    partialKitsFound: number;
+    casesChanged: number;
+    durationMs: number;
+  } | null;
+}
+
+interface PriorityCoverage {
+  totalCompleted: number;
+  withAgeDays: number;
+  withCost: number;
+  withEstimatedSale: number;
+  withMargin: number;
+  pctAgeDays: number;
+  pctMargin: number;
+  lowCoverageAlert: boolean;
+}
+
+interface SimulateResult {
+  ruleId: number;
+  casesEvaluated: number;
+  fullKitsFound: number;
+  partialKitsFound: number;
+  pedirPecaCount: number;
+  aguardandoCount: number;
+  changedComparedToActive: number | null;
+  changedFullMatchMembership: number | null;
+  changedPartialMembership: number | null;
+  topChangedCases: Array<{
+    caseId: number;
+    prevStatusActive: string;
+    newStatusSimulated: string;
+    scoreActive: number;
+    scoreSimulated: number;
+  }>;
+}
+
 interface ActivateStats { casesEvaluated: number; casesChanged: number; runId: number | null }
+
+// ---------------------------------------------------------------------------
+// Painel de diagnóstico de cobertura
+// ---------------------------------------------------------------------------
+
+function CoverageBanner({ coverage, onBackfill }: { coverage: PriorityCoverage; onBackfill: () => void }) {
+  const [running, setRunning] = useState(false);
+  const [lastBackfill, setLastBackfill] = useState<BackfillResponse | null>(null);
+
+  async function doBackfill() {
+    setRunning(true);
+    setLastBackfill(null);
+    try {
+      const r = await fetch("/api/match-rules/backfill-priority", { method: "POST" });
+      if (r.ok) setLastBackfill(await r.json() as BackfillResponse);
+      onBackfill();
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const bar = (pct: number) => (
+    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+      <div style={{
+        flex: 1, height: "6px", background: "var(--surface-2)", borderRadius: "3px", overflow: "hidden",
+      }}>
+        <div style={{
+          width: `${pct}%`, height: "100%",
+          background: pct >= 80 ? "var(--accent)" : pct >= 50 ? "var(--warn-text)" : "var(--err)",
+          borderRadius: "3px", transition: "width 0.4s",
+        }} />
+      </div>
+      <span style={{ fontSize: "0.75rem", fontVariantNumeric: "tabular-nums", minWidth: "2.5rem", textAlign: "right" }}>
+        {pct}%
+      </span>
+    </div>
+  );
+
+  return (
+    <div style={{
+      border: `1px solid ${coverage.lowCoverageAlert ? "var(--warn-border, rgba(245,158,11,0.35))" : "var(--border)"}`,
+      borderRadius: "var(--r-md)",
+      padding: "1rem 1.25rem",
+      background: coverage.lowCoverageAlert
+        ? "rgba(245,158,11,0.07)"
+        : "var(--surface-1)",
+      marginBottom: "1.25rem",
+    }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "1rem", marginBottom: "0.75rem" }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.25rem" }}>
+            {coverage.lowCoverageAlert && <AlertTriangle size={14} style={{ color: "var(--warn-text)" }} />}
+            <span style={{ fontWeight: 600, fontSize: "0.875rem" }}>
+              Cobertura de dados de prioridade — {coverage.totalCompleted} casos analisados
+            </span>
+          </div>
+          {coverage.lowCoverageAlert && (
+            <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0 }}>
+              As regras de match podem não ter efeito porque idade/margem estão ausentes nos casos.
+              Execute o backfill para preencher a partir das fontes legadas.
+            </p>
+          )}
+        </div>
+        <button
+          className="btn-ghost"
+          style={{ fontSize: "0.78rem", whiteSpace: "nowrap", flexShrink: 0 }}
+          onClick={() => void doBackfill()}
+          disabled={running}
+        >
+          {running ? <Loader2 size={12} className="spin" /> : <RefreshCw size={12} />}
+          Executar backfill
+        </button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem 1.5rem" }}>
+        {[
+          { label: "Idade (age_days)", pct: coverage.pctAgeDays, n: coverage.withAgeDays },
+          { label: "Margem", pct: coverage.pctMargin, n: coverage.withMargin },
+          { label: "Custo", pct: coverage.totalCompleted > 0 ? Math.round(coverage.withCost / coverage.totalCompleted * 100) : 0, n: coverage.withCost },
+          { label: "Venda estimada", pct: coverage.totalCompleted > 0 ? Math.round(coverage.withEstimatedSale / coverage.totalCompleted * 100) : 0, n: coverage.withEstimatedSale },
+        ].map(({ label, pct, n }) => (
+          <div key={label}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "var(--muted)", marginBottom: "0.2rem" }}>
+              <span>{label}</span>
+              <span style={{ fontVariantNumeric: "tabular-nums" }}>{n} / {coverage.totalCompleted}</span>
+            </div>
+            {bar(pct)}
+          </div>
+        ))}
+      </div>
+
+      {lastBackfill && (
+        <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.75rem" }}>
+          <div style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.4rem" }}>Resultado do backfill</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.4rem", marginBottom: lastBackfill.recomputeResult ? "0.75rem" : 0 }}>
+            {[
+              { label: "Idade preenchida", value: lastBackfill.backfillResult.ageDaysUpdated },
+              { label: "Margem preenchida", value: lastBackfill.backfillResult.marginUpdated },
+              { label: "Casos elegíveis", value: lastBackfill.backfillResult.casesEligible },
+            ].map(({ label, value }) => (
+              <div key={label} style={{ textAlign: "center", padding: "0.4rem", background: "var(--surface-1)", borderRadius: "var(--r-sm)", border: "1px solid var(--border)" }}>
+                <div style={{ fontSize: "1.1rem", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+                <div style={{ fontSize: "0.68rem", color: "var(--muted)" }}>{label}</div>
+              </div>
+            ))}
+          </div>
+          {lastBackfill.recomputeResult && (
+            <>
+              <div style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.4rem" }}>Motor executado após backfill</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem" }}>
+                {[
+                  { label: "Avaliados", value: lastBackfill.recomputeResult.casesEvaluated },
+                  { label: "Match completo", value: lastBackfill.recomputeResult.fullKitsFound },
+                  { label: "Match parcial", value: lastBackfill.recomputeResult.partialKitsFound },
+                  { label: "Status alterados", value: lastBackfill.recomputeResult.casesChanged },
+                ].map(({ label, value }) => (
+                  <div key={label} style={{ textAlign: "center", padding: "0.4rem", background: "var(--surface-1)", borderRadius: "var(--r-sm)", border: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: "1.1rem", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+                    <div style={{ fontSize: "0.68rem", color: "var(--muted)" }}>{label}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {!lastBackfill.recomputeResult && (
+            <p style={{ fontSize: "0.75rem", color: "var(--muted)", margin: 0 }}>Nenhum recompute pendente executado.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Resultado de simulação inline
+// ---------------------------------------------------------------------------
+
+function SimResult({ result, onClose }: { result: SimulateResult; onClose: () => void }) {
+  return (
+    <div style={{
+      border: "1px solid var(--accent-border, rgba(124,58,237,0.3))",
+      borderRadius: "var(--r-md)",
+      padding: "1rem 1.25rem",
+      background: "rgba(124,58,237,0.05)",
+      marginTop: "0.75rem",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+        <span style={{ fontWeight: 600, fontSize: "0.85rem" }}>Resultado da simulação (dry-run)</span>
+        <button className="btn-ghost" style={{ fontSize: "0.75rem", padding: "0.1rem 0.4rem" }} onClick={onClose}>✕</button>
+      </div>
+
+      <p style={{ fontSize: "0.75rem", color: "var(--muted)", margin: "0 0 0.75rem" }}>
+        A quantidade total de matches pode permanecer igual. A regra pode alterar principalmente
+        <strong> quem recebe peça primeiro</strong>, não necessariamente quantos recebem.
+      </p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.5rem", marginBottom: "0.75rem" }}>
+        {[
+          { label: "Match completo", value: result.fullKitsFound },
+          { label: "Match parcial", value: result.partialKitsFound },
+          { label: "Pedir peça", value: result.pedirPecaCount },
+        ].map(({ label, value }) => (
+          <div key={label} style={{
+            textAlign: "center", padding: "0.5rem",
+            background: "var(--surface-1)", borderRadius: "var(--r-sm)",
+            border: "1px solid var(--border)",
+          }}>
+            <div style={{ fontSize: "1.25rem", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+            <div style={{ fontSize: "0.7rem", color: "var(--muted)" }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {result.changedComparedToActive !== null && (
+        <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
+          <div style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.4rem" }}>
+            Comparação com a regra ativa
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.4rem", marginBottom: "0.5rem" }}>
+            {[
+              { label: "Casos com status diferente", value: result.changedComparedToActive },
+              { label: "Mudança em MATCH completo", value: result.changedFullMatchMembership ?? 0 },
+              { label: "Mudança em MATCH parcial", value: result.changedPartialMembership ?? 0 },
+            ].map(({ label, value }) => (
+              <div key={label} style={{ textAlign: "center", padding: "0.4rem", background: "var(--surface-1)", borderRadius: "var(--r-sm)", border: "1px solid var(--border)" }}>
+                <div style={{ fontSize: "1.1rem", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: value > 0 ? "var(--accent)" : undefined }}>{value}</div>
+                <div style={{ fontSize: "0.68rem", color: "var(--muted)" }}>{label}</div>
+              </div>
+            ))}
+          </div>
+
+          {result.topChangedCases.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", fontSize: "0.75rem", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    {["Caso", "Status ativo", "Status simulado", "Score ativo", "Score simulado"].map(h => (
+                      <th key={h} style={{ textAlign: "left", padding: "0.2rem 0.4rem", color: "var(--muted)", fontWeight: 600, borderBottom: "1px solid var(--border)" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.topChangedCases.map(c => (
+                    <tr key={c.caseId}>
+                      <td style={{ padding: "0.2rem 0.4rem", fontVariantNumeric: "tabular-nums" }}>#{c.caseId}</td>
+                      <td style={{ padding: "0.2rem 0.4rem", color: "var(--muted)" }}>{c.prevStatusActive}</td>
+                      <td style={{ padding: "0.2rem 0.4rem", fontWeight: 600 }}>{c.newStatusSimulated}</td>
+                      <td style={{ padding: "0.2rem 0.4rem", fontVariantNumeric: "tabular-nums" }}>{c.scoreActive}</td>
+                      <td style={{ padding: "0.2rem 0.4rem", fontVariantNumeric: "tabular-nums" }}>{c.scoreSimulated}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RuleCard
+// ---------------------------------------------------------------------------
+
 function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: number, stats: ActivateStats) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [activating, setActivating] = useState(false);
   const [reason, setReason] = useState("");
   const [confirm, setConfirm] = useState(false);
+  const [simulating, setSimulating] = useState(false);
+  const [simResult, setSimResult] = useState<SimulateResult | null>(null);
 
   async function handleActivate() {
     if (!reason || reason.trim().length < 5) return;
@@ -45,14 +321,29 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
     }
   }
 
+  async function handleSimulate() {
+    setSimulating(true);
+    setSimResult(null);
+    try {
+      const r = await fetch("/api/match-rules/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ruleSetId: rule.id, compareWithActive: true }),
+      });
+      if (r.ok) {
+        setSimResult(await r.json() as SimulateResult);
+      }
+    } finally {
+      setSimulating(false);
+    }
+  }
+
   return (
     <div className={`rule-card ${rule.active ? "active" : ""}`}>
       <div className="rule-card-header" onClick={() => setExpanded(e => !e)}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
           <span className="rule-version">v{rule.version}</span>
-          {rule.active && (
-            <span className="rule-badge active"><Check size={11} /> Ativa</span>
-          )}
+          {rule.active && <span className="rule-badge active"><Check size={11} /> Ativa</span>}
           {!rule.active && <span className="rule-badge draft">Rascunho</span>}
           <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>{rule.reason ?? "Sem justificativa"}</span>
         </div>
@@ -62,26 +353,11 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
       {expanded && (
         <div className="rule-details">
           <div className="rule-params">
-            <div className="param-row">
-              <span>Margem / ponto</span>
-              <span>R$ {rule.marginAmountPerPoint.toFixed(0)}</span>
-            </div>
-            <div className="param-row">
-              <span>Dias / ponto de idade</span>
-              <span>{rule.ageDaysPerPoint}d</span>
-            </div>
-            <div className="param-row">
-              <span>Máx. pontos de idade</span>
-              <span>{rule.ageMaxPoints}</span>
-            </div>
-            <div className="param-row">
-              <span>Margem negativa pune</span>
-              <span>{rule.allowNegativeMarginScore ? "Sim" : "Não"}</span>
-            </div>
-            <div className="param-row">
-              <span>Peso margem / idade</span>
-              <span>{rule.marginWeight} / {rule.ageWeight}</span>
-            </div>
+            <div className="param-row"><span>Margem / ponto</span><span>R$ {rule.marginAmountPerPoint.toFixed(0)}</span></div>
+            <div className="param-row"><span>Dias / ponto de idade</span><span>{rule.ageDaysPerPoint}d</span></div>
+            <div className="param-row"><span>Máx. pontos de idade</span><span>{rule.ageMaxPoints}</span></div>
+            <div className="param-row"><span>Margem negativa pune</span><span>{rule.allowNegativeMarginScore ? "Sim" : "Não"}</span></div>
+            <div className="param-row"><span>Peso margem / idade</span><span>{rule.marginWeight} / {rule.ageWeight}</span></div>
           </div>
 
           <div className="rule-formula">
@@ -91,12 +367,25 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
             </code>
           </div>
 
+          {/* Botão simular impacto */}
+          <div style={{ marginTop: "0.75rem" }}>
+            <button
+              className="btn-ghost"
+              style={{ fontSize: "0.82rem" }}
+              onClick={() => void handleSimulate()}
+              disabled={simulating}
+            >
+              {simulating ? <Loader2 size={13} className="spin" /> : <Play size={13} />}
+              Simular impacto
+            </button>
+          </div>
+
+          {simResult && <SimResult result={simResult} onClose={() => setSimResult(null)} />}
+
           {!rule.active && (
             <div className="rule-activate">
               {!confirm ? (
-                <button className="btn-primary" onClick={() => setConfirm(true)}>
-                  Ativar esta versão
-                </button>
+                <button className="btn-primary" onClick={() => setConfirm(true)}>Ativar esta versão</button>
               ) : (
                 <div className="activate-form">
                   <AlertTriangle size={14} style={{ color: "var(--warning)" }} />
@@ -111,7 +400,7 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
                     <button className="btn-ghost" onClick={() => setConfirm(false)}>Cancelar</button>
                     <button
                       className="btn-primary"
-                      onClick={handleActivate}
+                      onClick={() => void handleActivate()}
                       disabled={reason.trim().length < 5 || activating}
                     >
                       {activating ? <Loader2 size={13} className="spin" /> : <Check size={13} />}
@@ -133,6 +422,10 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// NewRuleForm
+// ---------------------------------------------------------------------------
 
 function NewRuleForm({ onCreated }: { onCreated: () => void }) {
   const [form, setForm] = useState({
@@ -196,7 +489,7 @@ function NewRuleForm({ onCreated }: { onCreated: () => void }) {
         <input className="input" value={form.reason} onChange={e => setForm(p => ({ ...p, reason: e.target.value }))} placeholder="Por que esta versão foi criada…" />
       </label>
       <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", marginTop: "1rem" }}>
-        <button className="btn-primary" onClick={handleCreate} disabled={saving}>
+        <button className="btn-primary" onClick={() => void handleCreate()} disabled={saving}>
           {saving ? <Loader2 size={13} className="spin" /> : <Plus size={13} />}
           Criar rascunho
         </button>
@@ -205,26 +498,32 @@ function NewRuleForm({ onCreated }: { onCreated: () => void }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// AdminMatchRules
+// ---------------------------------------------------------------------------
+
 export function AdminMatchRules() {
   const [rules, setRules] = useState<MatchRuleSet[]>([]);
   const [loading, setLoading] = useState(true);
   const [showNewForm, setShowNewForm] = useState(false);
   const [activateMsg, setActivateMsg] = useState<string | null>(null);
+  const [coverage, setCoverage] = useState<PriorityCoverage | null>(null);
 
-  async function load() {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch("/api/match-rules");
-      if (r.ok) {
-        const d = await r.json() as { rules: MatchRuleSet[] };
-        setRules(d.rules);
-      }
+      const [rRes, cRes] = await Promise.all([
+        fetch("/api/match-rules"),
+        fetch("/api/match-rules/priority-coverage"),
+      ]);
+      if (rRes.ok) setRules((await rRes.json() as { rules: MatchRuleSet[] }).rules);
+      if (cRes.ok) setCoverage(await cRes.json() as PriorityCoverage);
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); }, [load]);
 
   return (
     <div className="page-container">
@@ -238,6 +537,8 @@ export function AdminMatchRules() {
           Nova versão
         </button>
       </div>
+
+      {coverage && <CoverageBanner coverage={coverage} onBackfill={() => void load()} />}
 
       {showNewForm && (
         <NewRuleForm onCreated={() => { setShowNewForm(false); void load(); }} />

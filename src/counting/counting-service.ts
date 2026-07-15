@@ -476,7 +476,7 @@ export interface SessionState {
   session: CountSessionRow;
   summary: FinalizeSummary;
   recentScans: CountScanRow[];
-  totalsByReference: { referenceNorm: string; reference: string; total: number }[];
+  totalsByReference: { referenceNorm: string; reference: string; total: number; chavePeca: string | null; chavePecaNorm: string | null }[];
   pending: PendingReferenceGroup[];
 }
 
@@ -492,7 +492,10 @@ export function getSessionState(db: Db, sessionId: number, recentLimit = 30): Se
   const recentScans = q.listScansBySession(db, sessionId, { limit: recentLimit });
   const totalsByReference = q
     .activeScanCountsByReference(db, sessionId)
-    .map((r) => ({ referenceNorm: r.reference_norm, reference: r.reference, total: r.active_count }))
+    .map((r) => {
+      const mapping = q.getActiveMapping(db, r.reference_norm);
+      return { referenceNorm: r.reference_norm, reference: r.reference, total: r.active_count, chavePeca: mapping?.chavePeca ?? null, chavePecaNorm: mapping?.chavePecaNorm ?? null };
+    })
     .sort((a, b) => b.total - a.total);
   const pending = getPending(db, sessionId);
   return { session, summary, recentScans, totalsByReference, pending };

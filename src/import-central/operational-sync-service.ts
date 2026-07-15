@@ -24,6 +24,7 @@ export interface HisSyncResult {
 
 export interface RelSeriaisSyncResult {
   processados: number;
+  criados: number;
   atualizados: number;
   semVinculo: number;
   marcaModeloEnriquecidos: number;
@@ -124,10 +125,11 @@ export function applyHisToRepairCases(db: Db, _importId?: number): HisSyncResult
 
 export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSeriaisSyncResult {
   const rows = db.prepare(
-    `SELECT imei_norm, deposito_atual, filial_atual, disponivel, fabricante, descricao
+    `SELECT imei_norm, serial, deposito_atual, filial_atual, disponivel, fabricante, descricao
      FROM rel_seriais_current`,
   ).all() as {
     imei_norm: string | null;
+    serial: string | null;
     deposito_atual: string | null;
     filial_atual: string | null;
     disponivel: string | null;
@@ -144,7 +146,7 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
   );
 
   const result: RelSeriaisSyncResult = {
-    processados: 0, atualizados: 0, semVinculo: 0,
+    processados: 0, criados: 0, atualizados: 0, semVinculo: 0,
     marcaModeloEnriquecidos: 0, concluidos: 0, direcionados: 0,
   };
 
@@ -159,42 +161,51 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
     `UPDATE repair_cases SET brand = COALESCE(brand, ?), model = COALESCE(model, ?),
        updated_at = datetime('now') WHERE id = ?`,
   );
-  const markVerificar = db.prepare(
-    `UPDATE repair_cases SET workflow_status = 'VERIFICAR',
-       updated_at = datetime('now') WHERE id = ?`,
-  );
   const directTech = db.prepare(
     `UPDATE repair_cases SET workflow_status = 'DIRECIONADO_TECNICO',
        directed_technician_id = ?, directed_at = datetime('now'),
        updated_at = datetime('now') WHERE id = ?`,
   );
 
-  // Mapeamento completo depósito Datasys → ação no sistema
-  // FLUXO_NORMAL = mantém status atual (case está no pipeline de match/peças)
-  // APTO_REPARO  = está com técnico → DIRECIONADO_TECNICO se técnico configurado, senão APTO_REPARO
-  // CONCLUIDO    = aparelho fora do fluxo de reparo
-  // EM_ANALISE   = revisão manual necessária
-  type DepositAction = "FLUXO_NORMAL" | "APTO_REPARO" | "CONCLUIDO" | "EM_ANALISE";
+  // Depósitos que criam repair_case automaticamente quando o IMEI ainda não está no sistema.
+  // Apenas esses dois significam "aparelho aguardando reparo" sem análise prévia.
+  const DEPOSITOS_ENTRADA = new Set(["AGUARDANDO PECA", "MANUTENCAO INTERNA"]);
+
+  // Mapeamento depósito Datasys → ação para cases JÁ existentes no sistema.
+  // FLUXO_NORMAL = mantém status atual do sistema (Datasys não sobrescreve)
+  // APTO_REPARO  = está com técnico → DIRECIONADO_TECNICO se configurado, senão APTO_REPARO
+  // CONCLUIDO    = aparelho fora do fluxo de reparo (terminal — Datasys é autoritativo)
+  // TRIAGEM/REPARO DE PLACA/AGUARDANDO RECEBIMENTO → FLUXO_NORMAL: o sistema já sabe o status
+  //   real desses aparelhos; o Datasys não deve sobrescrever o pipeline de reparo em andamento.
+  type DepositAction = "FLUXO_NORMAL" | "APTO_REPARO" | "CONCLUIDO";
   const DEPOSIT_MAP: Record<string, DepositAction> = {
-    "MANUTENCAO INTERNA":       "FLUXO_NORMAL",
-    "AGUARDANDO PECA":          "FLUXO_NORMAL",
-    "TECNICO 1":                "APTO_REPARO",
-    "TECNICO 2":                "APTO_REPARO",
-    "TECNICO 3":                "APTO_REPARO",
-    "REPARO DE PLACA":          "EM_ANALISE",
-    "TRIAGEM":                  "EM_ANALISE",
-    "AGUARDANDO RECEBIMENTO":   "EM_ANALISE",
-    "VENDA NO ESTADO":          "CONCLUIDO",
-    "APARELHO DE EMPRESTIMO":   "CONCLUIDO",
-    "APARELHOS BLOQUEADOS":     "CONCLUIDO",
-    "PARCIALMENTE FUNCIONAL":   "CONCLUIDO",
-    "RETIRADA DE PECAS":        "CONCLUIDO",
-    "MANUTENCAO EXTERNA":       "CONCLUIDO",
-    "DISPONIVEIS PARA SITE":    "CONCLUIDO",
-    "DISPONIVEIS PARA QUIOSQUE":"CONCLUIDO",
-    "DEVOLVIDOS E DEFEITO":     "CONCLUIDO",
-    "NOVOS DISPONIVEIS":        "CONCLUIDO",
+    "MANUTENCAO INTERNA":        "FLUXO_NORMAL",
+    "AGUARDANDO PECA":           "FLUXO_NORMAL",
+    "TECNICO 1":                 "APTO_REPARO",
+    "TECNICO 2":                 "APTO_REPARO",
+    "TECNICO 3":                 "APTO_REPARO",
+    "REPARO DE PLACA":           "FLUXO_NORMAL",
+    "TRIAGEM":                   "FLUXO_NORMAL",
+    "AGUARDANDO RECEBIMENTO":    "FLUXO_NORMAL",
+    "VENDA NO ESTADO":           "CONCLUIDO",
+    "APARELHO DE EMPRESTIMO":    "CONCLUIDO",
+    "APARELHOS BLOQUEADOS":      "CONCLUIDO",
+    "PARCIALMENTE FUNCIONAL":    "CONCLUIDO",
+    "RETIRADA DE PECAS":         "CONCLUIDO",
+    "MANUTENCAO EXTERNA":        "CONCLUIDO",
+    "DISPONIVEIS PARA SITE":     "CONCLUIDO",
+    "DISPONIVEIS PARA QUIOSQUE": "CONCLUIDO",
+    "DEVOLVIDOS E DEFEITO":      "CONCLUIDO",
+    "NOVOS DISPONIVEIS":         "CONCLUIDO",
   };
+
+  // Estados que não devem ser regredidos por EM_ANALISE ou APTO_REPARO via Datasys.
+  // CONCLUIDO é sempre aplicado (Datasys é autoritativo para aparelhos fora do fluxo).
+  const LOCKED_FROM_DEMOTION = new Set([
+    "EM_SEPARACAO", "EM_REPARO", "REPARO_EXECUTADO",
+    "TRIAGEM_FINAL", "RETORNO_TECNICO",
+    "CONCLUIDO", "VENDA_ESTADO", "CANCELADO",
+  ]);
 
   const markConcluido = db.prepare(
     `UPDATE repair_cases SET workflow_status = 'CONCLUIDO',
@@ -204,9 +215,11 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
     `UPDATE repair_cases SET workflow_status = 'APTO_REPARO',
        updated_at = datetime('now') WHERE id = ?`,
   );
-  const markEmAnalise = db.prepare(
-    `UPDATE repair_cases SET workflow_status = 'EM_ANALISE',
-       updated_at = datetime('now') WHERE id = ?`,
+  const createCase = db.prepare(
+    `INSERT INTO repair_cases
+       (imei, imei_norm, brand, model, deposito_atual, filial_atual, source_disponivel,
+        last_seen_in_source_at, workflow_status, analysis_status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), 'EM_ANALISE', 'DRAFT', datetime('now'), datetime('now'))`,
   );
 
   db.prepare("BEGIN").run();
@@ -218,7 +231,26 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
       const rc = findCase.get(row.imei_norm) as {
         id: number; brand: string | null; model: string | null; workflow_status: string;
       } | undefined;
-      if (!rc) { result.semVinculo++; continue; }
+
+      if (!rc) {
+        // Criar repair_case apenas para depósitos de entrada (aparelhos aguardando reparo)
+        const deposito = row.deposito_atual?.trim().toUpperCase() ?? "";
+        if (DEPOSITOS_ENTRADA.has(deposito)) {
+          createCase.run(
+            row.serial ?? row.imei_norm,
+            row.imei_norm,
+            row.fabricante ?? null,
+            row.descricao ?? null,
+            row.deposito_atual,
+            row.filial_atual,
+            row.disponivel,
+          );
+          result.criados++;
+        } else {
+          result.semVinculo++;
+        }
+        continue;
+      }
 
       updateLocation.run(row.deposito_atual, row.filial_atual, row.disponivel, rc.id);
       result.atualizados++;
@@ -231,16 +263,11 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
         result.marcaModeloEnriquecidos++;
       }
 
-
       const deposito = row.deposito_atual?.trim().toUpperCase() ?? "";
       const action: DepositAction | undefined = deposito ? DEPOSIT_MAP[deposito] : undefined;
 
       if (!action) {
-        // Depósito desconhecido — disponível=NAO envia pra VERIFICAR, senão ignora
-        if (row.disponivel?.toUpperCase() === "NAO" && rc.workflow_status !== "VERIFICAR") {
-          markVerificar.run(rc.id);
-          result.concluidos++;
-        }
+        // Depósito desconhecido — ignora (não altera status do sistema)
         continue;
       }
 
@@ -250,20 +277,17 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
           break;
 
         case "CONCLUIDO":
+          // Terminal: Datasys é autoritativo — aparelho saiu do fluxo de reparo
           if (rc.workflow_status !== "CONCLUIDO") {
             markConcluido.run(rc.id);
             result.concluidos++;
           }
           break;
 
-        case "EM_ANALISE":
-          if (rc.workflow_status !== "EM_ANALISE") {
-            markEmAnalise.run(rc.id);
-          }
-          break;
-
         case "APTO_REPARO": {
-          // Se técnico configurado para esse depósito → direcionar
+          // Não regride estados mais avançados que APTO_REPARO/DIRECIONADO
+          if (LOCKED_FROM_DEMOTION.has(rc.workflow_status)) break;
+          // Se técnico configurado para esse depósito → direcionar automaticamente
           const techId = depositoToTech.get(deposito);
           if (techId !== undefined) {
             directTech.run(techId, rc.id);

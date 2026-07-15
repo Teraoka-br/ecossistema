@@ -130,6 +130,13 @@ export function editImportedKey(
   const newNorm = normalizeKey(newChave);
   const newDesc = "descricao" in params ? (params.descricao?.trim() || null) : currentDesc;
 
+  // If target norm already exists (e.g. imported key already promoted, or conflicting custom),
+  // update that entry instead of failing with UNIQUE constraint
+  const existingByNewNorm = getPartKeyByNorm(db, newNorm);
+  if (existingByNewNorm) {
+    return updatePartKey(db, existingByNewNorm.id, params);
+  }
+
   const res = db.prepare(
     `INSERT INTO custom_part_keys (chave_peca, chave_peca_norm, descricao, created_by)
      VALUES (?, ?, ?, ?)`,
@@ -178,7 +185,6 @@ export interface AllPartKeyRow {
 /** Todas as chaves: importadas do legado + criadas manualmente. */
 export function listAllPartKeys(db: Db, importBatchId: number | null, search?: string): AllPartKeyRow[] {
   const like = search?.trim();
-  const likeParam = like ? [`%${like}%`] : [];
 
   const customRows = db.prepare(
     `SELECT id, chave_peca, chave_peca_norm, descricao, created_by, created_at
@@ -195,10 +201,10 @@ export function listAllPartKeys(db: Db, importBatchId: number | null, search?: s
       `SELECT chave_peca, chave_peca_norm, MIN(referencia) AS referencia
        FROM source_inventory_items
        WHERE import_batch_id = ? AND chave_peca_norm IS NOT NULL AND chave_peca_norm != ''
-         ${like ? "AND chave_peca LIKE ?" : ""}
+         ${like ? "AND (chave_peca LIKE ? OR referencia LIKE ?)" : ""}
        GROUP BY chave_peca_norm
        ORDER BY chave_peca`,
-    ).all(importBatchId, ...likeParam) as unknown as { chave_peca: string; chave_peca_norm: string; referencia: string }[];
+    ).all(importBatchId, ...(like ? [`%${like}%`, `%${like}%`] : [])) as unknown as { chave_peca: string; chave_peca_norm: string; referencia: string }[];
   }
 
   const result: AllPartKeyRow[] = [];

@@ -17,7 +17,7 @@ function makeDb(): Db {
 }
 
 let _uid = 0;
-function seedUser(db: Db, role: "ADMIN" | "OPERATOR" = "ADMIN"): number {
+function seedUser(db: Db, role: "ADMIN" | "OPERATOR" | "TECHNICIAN" = "ADMIN"): number {
   const r = db
     .prepare("INSERT INTO users (username, display_name, pin_hash, role) VALUES (?,?,?,?)")
     .run(`user_${++_uid}`, "Usuário Teste", "x", role);
@@ -478,8 +478,10 @@ describe("segurança: existingCaseId", () => {
     ).toThrow("Caso não encontrado");
   });
 
-  it("OPERATOR sem permissão retorna 403", () => {
-    // Criar caso como admin
+  it("OPERATOR pode editar caso criado por outro usuário (ADMIN e OPERATOR têm acesso total; só TECHNICIAN é restrito)", () => {
+    // Regra atual (desde inclusão do role TECHNICIAN): ADMIN e OPERATOR editam qualquer caso;
+    // TECHNICIAN só edita os próprios. O teste anterior esperava restrição de OPERATOR,
+    // que foi removida quando o papel TECHNICIAN foi adicionado ao domínio.
     const row = saveAnalysis(db, {
       userId: adminId, userRole: "ADMIN", responsibleName: "Admin",
       finalize: false,
@@ -488,10 +490,31 @@ describe("segurança: existingCaseId", () => {
     });
     const caseId = row["id"] as number;
 
-    // Tentar editar como outro operador (sem ser o criador)
+    // OPERATOR de outro userId deve conseguir editar sem erro
     expect(() =>
       saveAnalysis(db, {
         userId: operatorId, userRole: "OPERATOR", responsibleName: "Op",
+        existingCaseId: caseId,
+        finalize: false,
+        parts: [PART_TELA],
+        ...BASE_INPUT,
+      }),
+    ).not.toThrow();
+  });
+
+  it("TECHNICIAN sem permissão retorna 403", () => {
+    const row = saveAnalysis(db, {
+      userId: adminId, userRole: "ADMIN", responsibleName: "Admin",
+      finalize: false,
+      parts: [PART_TELA],
+      ...BASE_INPUT,
+    });
+    const caseId = row["id"] as number;
+
+    const techId = seedUser(db, "TECHNICIAN");
+    expect(() =>
+      saveAnalysis(db, {
+        userId: techId, userRole: "TECHNICIAN", responsibleName: "Tech",
         existingCaseId: caseId,
         finalize: false,
         parts: [PART_TELA],

@@ -119,8 +119,8 @@ export function saveAnalysis(db: Db, input: AnaliseInput): Record<string, unknow
         throw new AnaliseError("NOT_FOUND", "Caso não encontrado.", 404);
       }
 
-      // Autorização: ADMIN edita tudo; OPERATOR edita somente o próprio
-      if (userRole !== "ADMIN" && existing.created_by_user_id !== userId) {
+      // Autorização: ADMIN e OPERATOR editam qualquer caso; TECHNICIAN só os próprios
+      if (userRole === "TECHNICIAN" && existing.created_by_user_id !== userId) {
         throw new AnaliseError(
           "FORBIDDEN",
           "Sem permissão para editar este caso.",

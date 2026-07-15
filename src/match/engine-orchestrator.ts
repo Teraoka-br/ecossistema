@@ -376,9 +376,9 @@ function executeEngine(
 
   scoredCases.sort((a, b) => {
     if (a.isManualPriority !== b.isManualPriority) return a.isManualPriority ? -1 : 1;
-    if (a.openParts !== b.openParts) return a.openParts - b.openParts;
     if (b.score !== a.score) return b.score - a.score;
     if ((b.margin ?? -Infinity) !== (a.margin ?? -Infinity)) return (b.margin ?? -Infinity) - (a.margin ?? -Infinity);
+    if (a.openParts !== b.openParts) return a.openParts - b.openParts;
     return a.caseRow.id - b.caseRow.id;
   });
 
@@ -531,6 +531,18 @@ function executeEngine(
         casesChanged++;
       }
     }
+
+    // Pós-processamento: casos com status de match positivo mas em depósito incorreto → VERIFICAR
+    // Depósitos válidos para MATCH/MATCH_PARCIAL/APTO_REPARO são apenas esses dois.
+    // Qualquer outro depósito (incluindo depósitos de técnicos) indica situação fora do fluxo normal.
+    const depositoResult = db.prepare(
+      `UPDATE repair_cases
+       SET workflow_status = 'VERIFICAR', updated_at = datetime('now')
+       WHERE workflow_status IN ('MATCH','MATCH_PARCIAL','APTO_REPARO')
+         AND deposito_atual IS NOT NULL
+         AND deposito_atual NOT IN ('Aguardando peças','Manutencao interna')`,
+    ).run();
+    casesChanged += Number(depositoResult.changes);
 
     db.exec("COMMIT");
   } catch (err) {

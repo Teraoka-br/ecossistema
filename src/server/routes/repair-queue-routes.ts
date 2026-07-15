@@ -359,8 +359,11 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
       ? db.prepare("SELECT * FROM staff_members WHERE id = ?").get(rc.directedTechnicianId)
       : null;
 
+    const rcRow = db.prepare("SELECT deposito_atual, problema FROM repair_cases WHERE id = ?").get(id) as { deposito_atual: string | null; problema: string | null } | undefined;
     res.json({
       ...rc,
+      depositoAtual: rcRow?.deposito_atual ?? null,
+      problema: rcRow?.problema ?? null,
       parts: partsEnriched,
       reservations,
       nextAction,
@@ -575,6 +578,27 @@ repairQueueRouter.patch("/fila-reparos/:id/info", requireAuth, requireAdmin, (re
   } catch (err) { next(err); }
 });
 
+// ─── Mover para depósito ──────────────────────────────────────────────────
+
+repairQueueRouter.patch("/fila-reparos/:id/deposito", requireAuth, requireOperator, (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+    const { deposito } = req.body as { deposito?: string | null };
+    db.prepare(
+      "UPDATE repair_cases SET deposito_atual = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(deposito?.trim() || null, repairCaseId);
+    recordOperationalEvent(db, {
+      repairCaseId,
+      eventType: "NOTE_ADDED",
+      responsibleName: (req as Request).sessionUser?.displayName ?? null,
+      notes: deposito?.trim() ? `Depósito alterado para: ${deposito.trim()}` : "Depósito removido.",
+    });
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 // ─── Observação ───────────────────────────────────────────────────────────
 
 repairQueueRouter.post("/fila-reparos/:id/notes", requireAuth, (req, res, next) => {
@@ -733,4 +757,39 @@ repairQueueRouter.post("/match-rules/:id/activate", requireAuth, requireAdmin, a
   } catch (err) {
     next(err);
   }
+});
+
+// Diagnóstico de cobertura dos campos de prioridade
+repairQueueRouter.get("/match-rules/priority-coverage", requireAuth, async (_req, res, next) => {
+  try {
+    const { getPriorityCoverage } = await import("../../match/priority-backfill-service.js");
+    res.json(getPriorityCoverage(getDb()));
+  } catch (err) { next(err); }
+});
+
+// Backfill dos campos de prioridade (admin only)
+repairQueueRouter.post("/match-rules/backfill-priority", requireAuth, requireAdmin, async (_req, res, next) => {
+  try {
+    const db = getDb();
+    const { backfillRepairCasePriorityFields } = await import("../../match/priority-backfill-service.js");
+    const { requestMatchRecompute, processPendingRecompute } = await import("../../match/engine-orchestrator.js");
+    const backfillResult = backfillRepairCasePriorityFields(db);
+    requestMatchRecompute(db, "PRIORITY_BACKFILL", "system", 0);
+    const recomputeResult = await processPendingRecompute(db);
+    res.json({ backfillResult, recomputeResult });
+  } catch (err) { next(err); }
+});
+
+// Simulação dry-run — não altera banco
+repairQueueRouter.post("/match-rules/simulate", requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const db = getDb();
+    const { ruleSetId, compareWithActive } = req.body as {
+      ruleSetId?: number;
+      compareWithActive?: boolean;
+    };
+    const { simulateMatchRules } = await import("../../match/simulate-service.js");
+    const result = await simulateMatchRules(db, { ruleSetId, compareWithActive });
+    res.json(result);
+  } catch (err) { next(err); }
 });
