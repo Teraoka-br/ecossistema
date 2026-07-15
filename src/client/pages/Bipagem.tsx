@@ -331,12 +331,18 @@ function ActiveSessionView({ session, onChanged }: { session: CountSession; onCh
         <h2>Consolidação por referência</h2>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Referência</th><th className="num">Total</th></tr></thead>
+            <thead><tr><th>Referência</th><th>CHAVEPECA mapeada</th><th className="num">Total</th><th></th></tr></thead>
             <tbody>
               {totalsByReference.map((t) => (
-                <tr key={t.referenceNorm}><td className="mono">{t.reference}</td><td className="num">{fmtInt(t.total)}</td></tr>
+                <ReferenceRow
+                  key={t.referenceNorm}
+                  row={t}
+                  sessionId={session.id}
+                  responsibleName={session.responsibleName}
+                  onEdited={() => void reloadState()}
+                />
               ))}
-              {totalsByReference.length === 0 && <tr><td colSpan={2} className="muted">Nenhum beep ainda.</td></tr>}
+              {totalsByReference.length === 0 && <tr><td colSpan={4} className="muted">Nenhum beep ainda.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -382,6 +388,81 @@ function ActiveSessionView({ session, onChanged }: { session: CountSession; onCh
         />
       )}
     </div>
+  );
+}
+
+function ReferenceRow({
+  row,
+  sessionId,
+  responsibleName,
+  onEdited,
+}: {
+  row: { referenceNorm: string; reference: string; total: number; chavePeca: string | null; chavePecaNorm: string | null };
+  sessionId: number;
+  responsibleName: string;
+  onEdited: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editVal, setEditVal] = useState(row.chavePeca ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function saveEdit() {
+    if (!editVal.trim() || !row.chavePecaNorm) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await fetch(`/api/part-keys/imported/${encodeURIComponent(row.chavePecaNorm)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chavePeca: editVal.trim().toUpperCase(), editedBy: responsibleName }),
+      });
+      if (!r.ok) {
+        const d = await r.json() as { error?: string };
+        setErr(d.error ?? "Erro ao salvar");
+      } else {
+        setEditing(false);
+        onEdited();
+      }
+    } catch {
+      setErr("Erro de rede");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <tr>
+      <td className="mono small">{row.reference}</td>
+      <td>
+        {editing ? (
+          <div style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
+            <input
+              autoFocus
+              value={editVal}
+              onChange={e => setEditVal(e.target.value.toUpperCase())}
+              onKeyDown={e => { if (e.key === "Enter") void saveEdit(); if (e.key === "Escape") setEditing(false); }}
+              style={{ fontSize: "0.82rem", padding: "0.15rem 0.4rem", fontFamily: "monospace", flex: 1 }}
+            />
+            <button onClick={() => void saveEdit()} disabled={busy}>OK</button>
+            <button className="secondary" onClick={() => setEditing(false)}>✕</button>
+          </div>
+        ) : (
+          <span className="mono small" style={{ color: row.chavePeca ? undefined : "var(--muted)" }}>
+            {row.chavePeca ?? "—"}
+          </span>
+        )}
+        {err && <div className="muted small" style={{ color: "var(--err)" }}>{err}</div>}
+      </td>
+      <td className="num">{fmtInt(row.total)}</td>
+      <td>
+        {row.chavePecaNorm && !editing && (
+          <button className="secondary" style={{ fontSize: "0.75rem", padding: "0.1rem 0.4rem" }} onClick={() => { setEditVal(row.chavePeca ?? ""); setEditing(true); }}>
+            Editar
+          </button>
+        )}
+      </td>
+    </tr>
   );
 }
 

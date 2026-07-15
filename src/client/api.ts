@@ -170,7 +170,7 @@ export interface SessionState {
   session: CountSession;
   summary: FinalizeSummary;
   recentScans: CountScan[];
-  totalsByReference: { referenceNorm: string; reference: string; total: number }[];
+  totalsByReference: { referenceNorm: string; reference: string; total: number; chavePeca: string | null; chavePecaNorm: string | null }[];
   pending: PendingReferenceGroup[];
 }
 /** Estado consolidado da sessão — autoridade única (sobrevive a F5/reinício). */

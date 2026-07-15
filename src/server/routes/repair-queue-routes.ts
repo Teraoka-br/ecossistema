@@ -359,8 +359,11 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
       ? db.prepare("SELECT * FROM staff_members WHERE id = ?").get(rc.directedTechnicianId)
       : null;
 
+    const rcRow = db.prepare("SELECT deposito_atual, problema FROM repair_cases WHERE id = ?").get(id) as { deposito_atual: string | null; problema: string | null } | undefined;
     res.json({
       ...rc,
+      depositoAtual: rcRow?.deposito_atual ?? null,
+      problema: rcRow?.problema ?? null,
       parts: partsEnriched,
       reservations,
       nextAction,
@@ -571,6 +574,27 @@ repairQueueRouter.patch("/fila-reparos/:id/info", requireAuth, requireAdmin, (re
     if (sets.length === 0) return res.json({ ok: true });
     sets.push("updated_at = datetime('now')");
     db.prepare(`UPDATE repair_cases SET ${sets.join(", ")} WHERE id = ?`).run(...vals, repairCaseId);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ─── Mover para depósito ──────────────────────────────────────────────────
+
+repairQueueRouter.patch("/fila-reparos/:id/deposito", requireAuth, requireOperator, (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+    const { deposito } = req.body as { deposito?: string | null };
+    db.prepare(
+      "UPDATE repair_cases SET deposito_atual = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(deposito?.trim() || null, repairCaseId);
+    recordOperationalEvent(db, {
+      repairCaseId,
+      eventType: "NOTE_ADDED",
+      responsibleName: (req as Request).sessionUser?.displayName ?? null,
+      notes: deposito?.trim() ? `Depósito alterado para: ${deposito.trim()}` : "Depósito removido.",
+    });
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

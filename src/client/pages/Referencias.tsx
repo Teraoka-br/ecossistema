@@ -361,7 +361,13 @@ export function Referencias() {
               {keys.map((k, i) => (
                 <tr key={k.id ?? `imp-${i}`}>
                   <td className="mono" style={{ fontWeight: 600 }}>{k.chave_peca}</td>
-                  <td style={{ fontSize: "0.85rem", color: k.descricao ? undefined : "var(--muted)" }}>{k.descricao ?? "—"}</td>
+                  <td style={{ fontSize: "0.85rem", color: (k.descricao || decodeReference(k.chave_peca)) ? undefined : "var(--muted)" }}>
+                    {k.descricao ?? (() => {
+                      const d = decodeReference(k.chave_peca);
+                      if (!d) return "—";
+                      return [d.peca, ...d.marcas, ...d.modelos, d.cor].filter(Boolean).join(" · ");
+                    })()}
+                  </td>
                   <td>
                     {k.source === "MANUAL"
                       ? <span className="badge badge-ok">Manual</span>

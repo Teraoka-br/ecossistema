@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   X, Package, Clock, Star, ChevronRight, AlertTriangle, CheckCircle2,
-  UserCheck, History, Info, Loader2, Users, ShoppingCart, MessageSquarePlus, RefreshCw,
+  UserCheck, History, Info, Loader2, Users, ShoppingCart, MessageSquarePlus, RefreshCw, MapPin,
 } from "lucide-react";
 import { addToPurchase } from "../api.js";
 
@@ -48,6 +48,7 @@ interface CaseDetail {
   analysisStatus: string;
   manualPriorityActive: boolean;
   notes: string | null;
+  depositoAtual: string | null;
   parts: PartInfo[];
   nextAction: { code: string; label: string; description: string; enabled: boolean };
   technician: { id: number; name: string } | null;
@@ -127,6 +128,10 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
   const [savingScore, setSavingScore] = useState(false);
   const [scoreMsg, setScoreMsg] = useState<string | null>(null);
 
+  // Mover para depósito
+  const [depositoEdit, setDepositoEdit] = useState<string | null>(null);
+  const [savingDeposito, setSavingDeposito] = useState(false);
+
   // Confirm modal
   const [confirmState, setConfirmState] = useState<ActionConfirmState | null>(null);
 
@@ -174,6 +179,29 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
       setError(e instanceof Error ? e.message : "Erro");
     } finally {
       setSavingNote(false);
+    }
+  }
+
+  async function saveDeposito() {
+    if (depositoEdit === null) return;
+    setSavingDeposito(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/fila-reparos/${repairCaseId}/deposito`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deposito: depositoEdit.trim() || null }),
+      });
+      if (!r.ok) {
+        const j = await r.json() as { error?: string };
+        throw new Error(j.error ?? "Erro ao mover depósito");
+      }
+      setDepositoEdit(null);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Erro");
+    } finally {
+      setSavingDeposito(false);
     }
   }
 
@@ -330,6 +358,33 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
               {data?.ageDays != null && <span>{data.ageDays}d</span>}
               {(data?.technician ?? data?.directedTechnician) && (
                 <span>Técnico: {data.technician?.name ?? data.directedTechnician?.name}</span>
+              )}
+              {depositoEdit !== null ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
+                  <input
+                    value={depositoEdit}
+                    onChange={e => setDepositoEdit(e.target.value)}
+                    placeholder="Nome do depósito…"
+                    style={{ fontSize: "0.78rem", padding: "0.15rem 0.4rem", borderRadius: "var(--r-sm)", border: "1px solid var(--border)", background: "var(--surface-alt)", color: "var(--text)", width: 160 }}
+                    onKeyDown={e => { if (e.key === "Enter") void saveDeposito(); if (e.key === "Escape") setDepositoEdit(null); }}
+                    autoFocus
+                  />
+                  <button className="btn btn-primary btn-sm" style={{ padding: "0.15rem 0.5rem", fontSize: "0.72rem" }} onClick={() => void saveDeposito()} disabled={savingDeposito}>
+                    {savingDeposito ? "…" : "OK"}
+                  </button>
+                  <button className="btn btn-ghost btn-sm" style={{ padding: "0.15rem 0.4rem", fontSize: "0.72rem" }} onClick={() => setDepositoEdit(null)}>
+                    <X size={11} />
+                  </button>
+                </span>
+              ) : (
+                <button
+                  onClick={() => setDepositoEdit(data?.depositoAtual ?? "")}
+                  style={{ background: "none", border: "none", padding: "0.1rem 0.3rem", cursor: "pointer", fontSize: "0.75rem", color: "var(--text-muted)", borderRadius: "var(--r-sm)", display: "inline-flex", alignItems: "center", gap: "0.25rem" }}
+                  title="Mover para depósito"
+                >
+                  <MapPin size={11} />
+                  {data?.depositoAtual ?? "Sem depósito"}
+                </button>
               )}
             </div>
           </div>
