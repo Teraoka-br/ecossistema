@@ -478,7 +478,7 @@ repairQueueRouter.post("/fila-reparos/direct-technician-batch", requireAuth, (re
 
 // ─── Fechar caso (VERIFICAR → CONCLUIDO / CANCELADO / VENDA_ESTADO) ───────
 
-repairQueueRouter.post("/fila-reparos/:id/close", requireAuth, requirePermissionOrAdmin("OVERRIDE_REPAIR_STATUS"), (req, res, next) => {
+repairQueueRouter.post("/fila-reparos/:id/close", requireAuth, requireOperator, (req, res, next) => {
   try {
     const db = getDb();
     const repairCaseId = parseInt(req.params.id);

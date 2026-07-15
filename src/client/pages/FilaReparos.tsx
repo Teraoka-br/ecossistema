@@ -286,6 +286,7 @@ function VerificarList({
   const [saving, setSaving] = useState<Record<number, string>>({});
   const [closing, setClosing] = useState<number | null>(null);
   const [closeNotes, setCloseNotes] = useState("");
+  const [closeError, setCloseError] = useState<string | null>(null);
 
   function setProblema(id: number, val: string) {
     setEditMap(p => ({ ...p, [id]: val }));
@@ -305,13 +306,20 @@ function VerificarList({
   }
 
   async function closeCase(id: number, status: string) {
-    await fetch(`/api/fila-reparos/${id}/close`, {
+    setCloseError(null);
+    const r = await fetch(`/api/fila-reparos/${id}/close`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status, notes: closeNotes.trim() || undefined }),
     });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({})) as { error?: string };
+      setCloseError(body.error ?? `Erro ${r.status}`);
+      return;
+    }
     setClosing(null);
     setCloseNotes("");
+    setCloseError(null);
     onRefresh();
   }
 
@@ -419,24 +427,31 @@ function VerificarList({
                   </td>
                   <td style={{ padding: "0.75rem 0.75rem", verticalAlign: "top", textAlign: "right" }}>
                     {isClosing ? (
-                      <div style={{ display: "flex", gap: "0.35rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
-                        <button className="btn btn-sm" style={{ background: "var(--ok-dim)", color: "var(--ok-text)", border: "1px solid rgba(16,185,129,0.3)", fontSize: "0.72rem" }}
-                          onClick={() => closeCase(item.id, "CONCLUIDO")}>
-                          <CheckCheck size={11} /> Reparado
-                        </button>
-                        <button className="btn btn-sm" style={{ background: "var(--warn-dim)", color: "var(--warn-text)", border: "1px solid rgba(245,158,11,0.3)", fontSize: "0.72rem" }}
-                          onClick={() => closeCase(item.id, "VENDA_ESTADO")}>
-                          <Tag size={11} /> Vendido no estado
-                        </button>
-                        <button className="btn btn-sm" style={{ background: "var(--err-dim)", color: "var(--err-text)", border: "1px solid rgba(239,68,68,0.3)", fontSize: "0.72rem" }}
-                          onClick={() => closeCase(item.id, "CANCELADO")}>
-                          <Ban size={11} /> Cancelado
-                        </button>
-                        <button className="btn btn-ghost btn-sm" style={{ fontSize: "0.72rem" }}
-                          onClick={() => { setClosing(null); setCloseNotes(""); }}>
-                          <X size={11} />
-                        </button>
-                      </div>
+                      <>
+                        <div style={{ display: "flex", gap: "0.35rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
+                          <button className="btn btn-sm" style={{ background: "var(--ok-dim)", color: "var(--ok-text)", border: "1px solid rgba(16,185,129,0.3)", fontSize: "0.72rem" }}
+                            onClick={() => closeCase(item.id, "CONCLUIDO")}>
+                            <CheckCheck size={11} /> Reparado
+                          </button>
+                          <button className="btn btn-sm" style={{ background: "var(--warn-dim)", color: "var(--warn-text)", border: "1px solid rgba(245,158,11,0.3)", fontSize: "0.72rem" }}
+                            onClick={() => closeCase(item.id, "VENDA_ESTADO")}>
+                            <Tag size={11} /> Vendido no estado
+                          </button>
+                          <button className="btn btn-sm" style={{ background: "var(--err-dim)", color: "var(--err-text)", border: "1px solid rgba(239,68,68,0.3)", fontSize: "0.72rem" }}
+                            onClick={() => closeCase(item.id, "CANCELADO")}>
+                            <Ban size={11} /> Cancelado
+                          </button>
+                          <button className="btn btn-ghost btn-sm" style={{ fontSize: "0.72rem" }}
+                            onClick={() => { setClosing(null); setCloseNotes(""); setCloseError(null); }}>
+                            <X size={11} />
+                          </button>
+                        </div>
+                        {closeError && (
+                          <div style={{ marginTop: "0.35rem", fontSize: "0.72rem", color: "var(--err-text)", textAlign: "right" }}>
+                            {closeError}
+                          </div>
+                        )}
+                      </>
                     ) : (
                       <button
                         className="btn btn-primary btn-sm"
@@ -785,16 +800,14 @@ export function FilaReparos() {
   }
 
   const totalPages = Math.ceil(total / LIMIT);
-  const kpiPriority = queueSummary?.priorityCount ?? 0;
   const kpiTotal    = queueSummary?.total ?? total;
   const selectedCount = selectedMap.size;
   const canExportAll  = EXPORTABLE_FILTERS.includes(filter) && total > 0 && !loading;
 
   // Calcula contagens por filtro — usa filterCounts do servidor ou deriva do summary como fallback
   const sumByStatuses = (statuses: string[]) =>
-    statuses.reduce((acc, s) => acc + ((queueSummary?.summary[s] ?? 0)), 0);
+    statuses.reduce((acc, s) => acc + (queueSummary?.summary[s] ?? 0), 0);
   const fc: Record<string, number> = queueSummary?.filterCounts ?? (queueSummary ? {
-    DO_NOW:          sumByStatuses(["MATCH","APTO_REPARO","MATCH_PARCIAL","VERIFICAR"]),
     MATCH:           sumByStatuses(["MATCH"]),
     MATCH_PARCIAL:   sumByStatuses(["MATCH_PARCIAL"]),
     AGUARDANDO_PECAS:sumByStatuses(["PEDIR_PECA","AGUARDANDO_RECEBIMENTO"]),
@@ -805,29 +818,18 @@ export function FilaReparos() {
     TODOS:           kpiTotal,
   } : {});
 
-  type FilterCardDef = { f: QueueFilter; label: string; sub: string; color?: string; borderColor?: string };
+  // Ordem fixa dos cards — sempre visíveis, independente de contagem
+  type FilterCardDef = { f: QueueFilter; label: string; sub: string; color: string; borderColor: string };
   const FILTER_CARDS: FilterCardDef[] = [
-    { f: "TODOS",           label: "Total",            sub: "aparelhos",           color: undefined,            borderColor: undefined },
-    { f: "DO_NOW",          label: "Fazer agora",      sub: "prioritários",        color: "var(--warn-text)",   borderColor: "rgba(245,158,11,0.35)" },
-    { f: "MATCH",           label: "Match completo",   sub: "prontos p/ separar",  color: "var(--ok-text)",     borderColor: "rgba(16,185,129,0.35)" },
-    { f: "MATCH_PARCIAL",   label: "Match parcial",    sub: "incompletos",         color: "var(--warn-text)",   borderColor: "rgba(245,158,11,0.25)" },
-    { f: "AGUARDANDO_PECAS",label: "Aguard. peças",    sub: "em compra",           color: "var(--text-muted)",  borderColor: undefined },
-    { f: "APTO_REPARO",     label: "Apto p/ reparo",   sub: "para direcionar",     color: "var(--accent)",      borderColor: "rgba(124,58,237,0.35)" },
-    { f: "EM_ANALISE",      label: "Em análise",       sub: "em separação",        color: "var(--text-muted)",  borderColor: undefined },
-    { f: "VERIFICAR",       label: "Verificar",        sub: "precisam atenção",    color: "var(--err-text)",    borderColor: "rgba(239,68,68,0.35)" },
-    { f: "FINALIZADOS",     label: "Finalizados",      sub: "concluídos",          color: "var(--ok-text)",     borderColor: "rgba(16,185,129,0.2)" },
+    { f: "MATCH",           label: "Match completo",  sub: "prontos p/ separar", color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.4)" },
+    { f: "APTO_REPARO",     label: "Apto p/ reparo",  sub: "para direcionar",    color: "var(--accent)",     borderColor: "rgba(124,58,237,0.4)" },
+    { f: "VERIFICAR",       label: "Verificar",       sub: "precisam atenção",   color: "var(--err-text)",   borderColor: "rgba(239,68,68,0.4)"  },
+    { f: "EM_ANALISE",      label: "Em análise",      sub: "em separação",       color: "var(--text-muted)", borderColor: "rgba(255,255,255,0.15)"},
+    { f: "AGUARDANDO_PECAS",label: "Aguard. peças",   sub: "em compra",          color: "var(--text-muted)", borderColor: "rgba(255,255,255,0.15)"},
+    { f: "MATCH_PARCIAL",   label: "Match parcial",   sub: "incompletos",        color: "var(--warn-text)",  borderColor: "rgba(245,158,11,0.3)" },
+    { f: "FINALIZADOS",     label: "Finalizados",     sub: "concluídos",         color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.2)" },
+    { f: "TODOS",           label: "Todos",           sub: "aparelhos",          color: "var(--text-muted)", borderColor: "rgba(255,255,255,0.12)"},
   ];
-
-  // Cards grandes: só os que têm contagem > 0, mais o ativo atual e TODOS (sempre)
-  const bigCards = FILTER_CARDS.filter(({ f }) => {
-    const count = f === "TODOS" ? kpiTotal : (fc[f] ?? 0);
-    return count > 0 || f === "TODOS" || f === filter;
-  });
-  // Chips compactos: filtros zerados que não estão nos bigCards
-  const smallChips = FILTER_CARDS.filter(({ f }) => {
-    const count = f === "TODOS" ? kpiTotal : (fc[f] ?? 0);
-    return count === 0 && f !== "TODOS" && f !== filter;
-  });
 
   return (
     <div className="page-container">
@@ -836,7 +838,10 @@ export function FilaReparos() {
         <div>
           <h1 className="page-title">Fila de Reparos</h1>
           <p className="page-subtitle">
-            {total} aparelho{total !== 1 ? "s" : ""} na fila
+            {filter !== "TODOS"
+              ? <>{total} aparelho{total !== 1 ? "s" : ""} neste filtro · <span style={{ opacity: 0.55 }}>{kpiTotal} no total</span></>
+              : <>{kpiTotal} aparelho{kpiTotal !== 1 ? "s" : ""} no total</>
+            }
           </p>
         </div>
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginLeft: "auto" }}>
@@ -851,11 +856,17 @@ export function FilaReparos() {
         </div>
       </div>
 
-      {/* KPI cards clicáveis — só aparecem os com contagem > 0 */}
-      <div className="kpi-bar">
-        {bigCards.map(({ f, label, sub, color, borderColor }) => {
-          const count = f === "TODOS" ? kpiTotal : (fc[f] ?? 0);
+      {/* KPI cards clicáveis — ordem fixa, sempre visíveis, cabe numa linha */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(${FILTER_CARDS.length}, 1fr)`,
+        gap: "0.6rem",
+        marginBottom: "1.5rem",
+      }}>
+        {FILTER_CARDS.map(({ f, label, sub, color, borderColor }) => {
+          const count = fc[f] ?? 0;
           const isActive = filter === f;
+          const hasCount = count > 0;
           return (
             <button
               key={f}
@@ -863,45 +874,22 @@ export function FilaReparos() {
               onClick={() => { setFilter(f); setPage(1); clearSelection(); }}
               style={{
                 cursor: "pointer", font: "inherit", textAlign: "left",
-                "--kpi-color": color ?? "linear-gradient(90deg, var(--accent), #6366f1)",
-                borderColor: isActive ? (borderColor ?? "rgba(124,58,237,0.5)") : undefined,
+                padding: "0.85rem 1rem", minWidth: 0,
+                "--kpi-color": color,
+                borderColor: isActive ? borderColor : undefined,
                 boxShadow: isActive
-                  ? `0 0 0 1px ${borderColor ?? "rgba(124,58,237,0.35)"}, 0 8px 28px rgba(0,0,0,0.55)`
+                  ? `0 0 0 1px ${borderColor}, 0 8px 24px rgba(0,0,0,0.5)`
                   : undefined,
+                opacity: hasCount ? 1 : 0.45,
               } as React.CSSProperties}
             >
-              <div className="kpi-label" style={{ color: color ?? "var(--text-muted)" }}>{label}</div>
-              <div className="kpi-value" style={{ color: color ?? "var(--text)" }}>{count}</div>
+              <div className="kpi-label" style={{ color, marginBottom: "0.35rem" }}>{label}</div>
+              <div className="kpi-value" style={{ color, fontSize: "1.85rem" }}>{count}</div>
               <div className="kpi-sub">{sub}</div>
             </button>
           );
         })}
-
-        {kpiPriority > 0 && (
-          <div className="kpi-card" style={{ "--kpi-color": "var(--warn-text)" } as React.CSSProperties}>
-            <div className="kpi-label" style={{ color: "var(--warn-text)", display: "flex", alignItems: "center", gap: "0.3rem" }}>
-              <Star size={9} fill="currentColor" /> Prioritários
-            </div>
-            <div className="kpi-value" style={{ color: "var(--warn-text)" }}>{kpiPriority}</div>
-            <div className="kpi-sub">prioridade manual</div>
-          </div>
-        )}
       </div>
-
-      {/* Chips secundários — filtros zerados (navegação) */}
-      {smallChips.length > 0 && (
-        <div className="filter-bar" style={{ marginBottom: "0.5rem" }}>
-          {smallChips.map(({ f, label }) => (
-            <button
-              key={f}
-              className={`filter-chip${filter === f ? " active" : ""}`}
-              onClick={() => { setFilter(f); setPage(1); clearSelection(); }}
-            >
-              {label} <span style={{ opacity: 0.45, marginLeft: "0.2rem" }}>0</span>
-            </button>
-          ))}
-        </div>
-      )}
 
       {/* Busca + exportar todos */}
       <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.875rem", alignItems: "center" }}>
