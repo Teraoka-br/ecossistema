@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { validateSession } from "../../auth/auth-service.js";
+import { validateSession, getUserPermissions } from "../../auth/auth-service.js";
 import { getDb } from "../../db/database.js";
 import type { SessionUser } from "../../auth/auth-service.js";
 
@@ -39,6 +39,34 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
     return;
   }
   next();
+}
+
+export function requireOperator(req: Request, res: Response, next: NextFunction): void {
+  if (!req.sessionUser) {
+    res.status(401).json({ error: "Não autenticado." });
+    return;
+  }
+  if (req.sessionUser.role === "TECHNICIAN") {
+    res.status(403).json({ error: "Acesso restrito a operadores e administradores." });
+    return;
+  }
+  next();
+}
+
+export function requirePermissionOrAdmin(permission: string) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.sessionUser) {
+      res.status(401).json({ error: "Não autenticado." });
+      return;
+    }
+    if (req.sessionUser.role === "ADMIN") { next(); return; }
+    const perms = getUserPermissions(getDb(), req.sessionUser.id);
+    if (!perms.includes(permission)) {
+      res.status(403).json({ error: "Acesso restrito. Permissão necessária: " + permission });
+      return;
+    }
+    next();
+  };
 }
 
 export function optionalAuth(req: Request, _res: Response, next: NextFunction): void {

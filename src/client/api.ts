@@ -204,12 +204,14 @@ export async function resolveReference(
   chavePeca: string,
   responsibleName: string,
   notes?: string,
+  createIfMissing?: boolean,
 ): Promise<void> {
   await postJson(`/api/count-sessions/${sessionId}/references/resolve`, {
     referenceNorm,
     chavePeca,
     responsibleName,
     notes,
+    createIfMissing,
   });
 }
 

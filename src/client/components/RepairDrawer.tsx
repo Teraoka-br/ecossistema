@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   X, Package, Clock, Star, ChevronRight, AlertTriangle, CheckCircle2,
-  UserCheck, History, Info, Loader2, Users, ShoppingCart, MessageSquarePlus,
+  UserCheck, History, Info, Loader2, Users, ShoppingCart, MessageSquarePlus, RefreshCw,
 } from "lucide-react";
 import { addToPurchase } from "../api.js";
 
@@ -60,7 +60,8 @@ interface CaseDetail {
 interface RepairDrawerProps {
   repairCaseId: number;
   onClose: (refresh: boolean) => void;
-  userRole: "ADMIN" | "OPERATOR";
+  userRole: "ADMIN" | "OPERATOR" | "TECHNICIAN";
+  userPermissions?: string[];
 }
 
 const CANCEL_REASONS = [
@@ -92,15 +93,16 @@ function eventLabel(type: string): string {
 
 type DrawerTab = "parts" | "score" | "history";
 type ConfirmAction = "SEPARATE_KIT" | "SEPARATE_PARTIAL" | "CANCEL_RESERVATION" | "ADD_TO_PURCHASE"
-  | "DIRECT_TO_TECHNICIAN" | "START_REPAIR" | "COMPLETE_REPAIR";
+  | "DIRECT_TO_TECHNICIAN" | "REDIRECT_TECHNICIAN" | "START_REPAIR" | "COMPLETE_REPAIR" | "CLOSE_CASE" | "SET_STATUS";
 
 interface ActionConfirmState {
   action: ConfirmAction;
   partId?: number;
   notes: string;
+  targetStatus?: string;
 }
 
-export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
+export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions }: RepairDrawerProps) {
   const [data, setData] = useState<CaseDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<DrawerTab>("parts");
@@ -120,6 +122,11 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
   const [noteText, setNoteText] = useState("");
   const [savingNote, setSavingNote] = useState(false);
 
+  // Score manual edit
+  const [scoreEdit, setScoreEdit] = useState<{ ageDays: string; cost: string; estimatedSale: string; margin: string } | null>(null);
+  const [savingScore, setSavingScore] = useState(false);
+  const [scoreMsg, setScoreMsg] = useState<string | null>(null);
+
   // Confirm modal
   const [confirmState, setConfirmState] = useState<ActionConfirmState | null>(null);
 
@@ -136,8 +143,8 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
   useEffect(() => {
     fetch("/api/staff")
       .then(r => r.ok ? r.json() : Promise.reject())
-      .then((d: { staff: Array<{ id: number; name: string; active: boolean }> }) => {
-        setTechnicians(d.staff.filter(m => m.active));
+      .then((d: { staff: Array<{ id: number; name: string; active: boolean; userId: number | null }> }) => {
+        setTechnicians(d.staff.filter(m => m.active && m.userId != null));
       })
       .catch(() => {});
   }, []);
@@ -210,9 +217,13 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
           setPurchaseMsg(res.created > 0 ? `${res.created} solicitação(ões) criada(s) em compra.` : "Todas as peças já estavam em compra.");
           break;
         }
-        case "DIRECT_TO_TECHNICIAN": {
+        case "DIRECT_TO_TECHNICIAN":
+        case "REDIRECT_TECHNICIAN": {
           if (!selectedTechId) break;
-          const r = await fetch(`/api/fila-reparos/${repairCaseId}/direct-technician`, {
+          const endpoint = state.action === "REDIRECT_TECHNICIAN"
+            ? `/api/fila-reparos/${repairCaseId}/redirect-technician`
+            : `/api/fila-reparos/${repairCaseId}/direct-technician`;
+          const r = await fetch(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ technicianId: selectedTechId, notes: state.notes || undefined }),
@@ -236,6 +247,25 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
           if (!r.ok) { const j = await r.json() as { error?: string }; throw new Error(j.error ?? "Erro ao concluir reparo"); }
           break;
         }
+        case "CLOSE_CASE": {
+          const r = await fetch(`/api/fila-reparos/${repairCaseId}/close`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "CONCLUIDO", notes: state.notes }),
+          });
+          if (!r.ok) { const j = await r.json() as { error?: string }; throw new Error(j.error ?? "Erro ao finalizar card"); }
+          break;
+        }
+        case "SET_STATUS": {
+          if (!state.targetStatus) throw new Error("Selecione um status.");
+          const r = await fetch(`/api/fila-reparos/${repairCaseId}/override-status`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ toStatus: state.targetStatus, notes: state.notes }),
+          });
+          if (!r.ok) { const j = await r.json() as { error?: string }; throw new Error(j.error ?? "Erro ao alterar fase"); }
+          break;
+        }
       }
       refresh();
     } catch (e) {
@@ -252,6 +282,7 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
   const showSeparatePartial = ws === "MATCH_PARCIAL";
   const showAddToPurchase = ws === "PEDIR_PECA" || ws === "MATCH_PARCIAL";
   const showDirectTech = ws === "APTO_REPARO";
+  const showRedirectTech = ws === "DIRECIONADO_TECNICO";
   const showStartRepair = ws === "DIRECIONADO_TECNICO";
   const showCompleteRepair = ws === "EM_REPARO";
 
@@ -371,6 +402,16 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                       <UserCheck size={14} /> Direcionar ao técnico
                     </button>
                   )}
+                  {showRedirectTech && (
+                    <button
+                      className="btn-secondary"
+                      onClick={() => setConfirmState({ action: "REDIRECT_TECHNICIAN", notes: "" })}
+                      disabled={working}
+                      style={{ fontSize: "0.8rem" }}
+                    >
+                      <RefreshCw size={13} /> Alterar técnico
+                    </button>
+                  )}
                   {showStartRepair && (
                     <button className="btn-primary" onClick={() => setConfirmState({ action: "START_REPAIR", notes: "" })} disabled={working}>
                       {working ? <Loader2 size={14} className="spin" /> : <UserCheck size={14} />}
@@ -405,6 +446,30 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                     </span>
                   )}
                   {purchaseMsg && <span style={{ fontSize: "0.8rem", color: "var(--success)" }}>{purchaseMsg}</span>}
+                </div>
+              )}
+
+              {/* Ações manuais — visíveis para admin ou quem tem OVERRIDE_REPAIR_STATUS */}
+              {(userRole === "ADMIN" || userPermissions?.includes("OVERRIDE_REPAIR_STATUS")) && (
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem", padding: "0.5rem 0" }}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    style={{ fontSize: "0.75rem" }}
+                    onClick={() => setConfirmState({ action: "SET_STATUS", notes: "", targetStatus: "" })}
+                    disabled={working}
+                    title="Alterar fase do aparelho manualmente"
+                  >
+                    <RefreshCw size={12} /> Alterar fase
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    style={{ color: "var(--err-text, #f87171)", fontSize: "0.75rem" }}
+                    onClick={() => setConfirmState({ action: "CLOSE_CASE", notes: "" })}
+                    disabled={working}
+                    title="Finalizar este card com justificativa"
+                  >
+                    <CheckCircle2 size={12} /> Finalizar card
+                  </button>
                 </div>
               )}
 
@@ -488,29 +553,110 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
             </>
           )}
 
-          {!loading && data && tab === "score" && (
-            <div className="score-section">
-              <div className="score-row"><span>Idade</span><span>{data.ageDays ?? "—"} dias</span></div>
-              <div className="score-row"><span>Custo</span><span>{data.cost != null ? `R$ ${data.cost.toFixed(2)}` : "—"}</span></div>
-              <div className="score-row"><span>Venda estimada</span><span>{data.estimatedSale != null ? `R$ ${data.estimatedSale.toFixed(2)}` : "—"}</span></div>
-              <div className="score-row">
-                <span>Margem</span>
-                <span style={{ color: (data.margin ?? 0) >= 0 ? "var(--success)" : "var(--danger)" }}>
-                  {data.margin != null ? `R$ ${data.margin.toFixed(2)}` : "—"}
-                </span>
+          {!loading && data && tab === "score" && (() => {
+            const editing = scoreEdit !== null;
+            function startEdit() {
+              setScoreEdit({
+                ageDays: data!.ageDays != null ? String(data!.ageDays) : "",
+                cost: data!.cost != null ? String(data!.cost) : "",
+                estimatedSale: data!.estimatedSale != null ? String(data!.estimatedSale) : "",
+                margin: data!.margin != null ? String(data!.margin) : "",
+              });
+              setScoreMsg(null);
+            }
+            async function saveScore() {
+              if (!scoreEdit) return;
+              setSavingScore(true);
+              setScoreMsg(null);
+              const toVal = (s: string) => s.trim() === "" ? null : parseFloat(s.replace(",", "."));
+              try {
+                const r = await fetch(`/api/fila-reparos/${repairCaseId}/score`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    ageDays: toVal(scoreEdit.ageDays),
+                    cost: toVal(scoreEdit.cost),
+                    estimatedSale: toVal(scoreEdit.estimatedSale),
+                    margin: toVal(scoreEdit.margin),
+                  }),
+                });
+                if (!r.ok) throw new Error((await r.json()).error ?? "Erro");
+                setScoreEdit(null);
+                setScoreMsg("Salvo com sucesso.");
+                refresh(true);
+              } catch (e) {
+                setScoreMsg(e instanceof Error ? e.message : "Erro ao salvar.");
+              } finally {
+                setSavingScore(false);
+              }
+            }
+            return (
+              <div className="score-section">
+                {!editing ? (
+                  <>
+                    <div className="score-row"><span>Idade</span><span>{data.ageDays != null ? `${data.ageDays} dias` : "—"}</span></div>
+                    <div className="score-row"><span>Custo</span><span>{data.cost != null ? `R$ ${data.cost.toFixed(2)}` : "—"}</span></div>
+                    <div className="score-row"><span>Venda estimada</span><span>{data.estimatedSale != null ? `R$ ${data.estimatedSale.toFixed(2)}` : "—"}</span></div>
+                    <div className="score-row">
+                      <span>Margem</span>
+                      <span style={{ color: (data.margin ?? 0) >= 0 ? "var(--success)" : "var(--danger)" }}>
+                        {data.margin != null ? `R$ ${data.margin.toFixed(2)}` : "—"}
+                      </span>
+                    </div>
+                    <div className="score-row"><span>Técnico</span><span>{data.technician?.name ?? data.directedTechnician?.name ?? "—"}</span></div>
+                    {data.notes && (
+                      <div className="score-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.25rem" }}>
+                        <span>Observações</span>
+                        <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>{data.notes}</span>
+                      </div>
+                    )}
+                    <div style={{ marginTop: "1rem", display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                      <button className="btn btn-secondary btn-sm" onClick={startEdit}>Editar manualmente</button>
+                      {scoreMsg && <span style={{ fontSize: "0.8rem", color: "var(--success)" }}>{scoreMsg}</span>}
+                    </div>
+                    <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: "0.75rem" }}>
+                      Score e pontos detalhados disponíveis nos resultados do motor (Auditoria do Motor).
+                    </p>
+                  </>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                    <p style={{ fontSize: "0.8rem", color: "var(--muted)", margin: 0 }}>
+                      Deixe em branco para remover o valor. Use ponto ou vírgula como decimal.
+                    </p>
+                    {[
+                      { label: "Idade (dias)", key: "ageDays" as const, placeholder: "ex: 45" },
+                      { label: "Custo (R$)", key: "cost" as const, placeholder: "ex: 350.00" },
+                      { label: "Venda estimada (R$)", key: "estimatedSale" as const, placeholder: "ex: 800.00" },
+                      { label: "Margem (R$)", key: "margin" as const, placeholder: "ex: 150.00" },
+                    ].map(({ label, key, placeholder }) => (
+                      <div key={key} style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                        <label style={{ fontSize: "0.8rem", fontWeight: 500 }}>{label}</label>
+                        <input
+                          className="input"
+                          type="text"
+                          inputMode="decimal"
+                          placeholder={placeholder}
+                          value={scoreEdit[key]}
+                          onChange={e => setScoreEdit(se => se ? { ...se, [key]: e.target.value } : se)}
+                          style={{ fontSize: "0.9rem" }}
+                        />
+                      </div>
+                    ))}
+                    {scoreMsg && <p style={{ fontSize: "0.8rem", color: "var(--danger)", margin: 0 }}>{scoreMsg}</p>}
+                    <div style={{ display: "flex", gap: "0.5rem" }}>
+                      <button className="btn btn-primary btn-sm" onClick={saveScore} disabled={savingScore}>
+                        {savingScore ? <Loader2 size={13} className="spin" /> : null}
+                        Salvar
+                      </button>
+                      <button className="btn btn-secondary btn-sm" onClick={() => { setScoreEdit(null); setScoreMsg(null); }} disabled={savingScore}>
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-              <div className="score-row"><span>Técnico</span><span>{data.technician?.name ?? data.directedTechnician?.name ?? "—"}</span></div>
-              {data.notes && (
-                <div className="score-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.25rem" }}>
-                  <span>Observações</span>
-                  <span style={{ color: "var(--muted)", fontSize: "0.85rem" }}>{data.notes}</span>
-                </div>
-              )}
-              <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: "1rem" }}>
-                Score e pontos detalhados disponíveis nos resultados do motor (Auditoria do Motor).
-              </p>
-            </div>
-          )}
+            );
+          })()}
 
           {!loading && data && tab === "history" && (
             <div>
@@ -588,6 +734,7 @@ export function RepairDrawer({ repairCaseId, onClose }: RepairDrawerProps) {
                 selectedTechId={selectedTechId}
                 onSelectTech={setSelectedTechId}
                 onChangeNotes={notes => setConfirmState(s => s ? { ...s, notes } : s)}
+                onChangeTargetStatus={targetStatus => setConfirmState(s => s ? { ...s, targetStatus } : s)}
                 cancelReason={cancelReason}
                 onConfirm={() => executeConfirmedAction(confirmState)}
                 onCancel={() => setConfirmState(null)}
@@ -608,30 +755,55 @@ interface ActionConfirmModalProps {
   selectedTechId: number | null;
   onSelectTech: (id: number) => void;
   onChangeNotes: (notes: string) => void;
+  onChangeTargetStatus: (status: string) => void;
   cancelReason: string;
   onConfirm: () => void;
   onCancel: () => void;
   working: boolean;
 }
 
-const ACTION_META: Record<ConfirmAction, { title: string; warn: string; showNotes?: boolean }> = {
+const ACTION_META: Record<ConfirmAction, { title: string; warn: string; showNotes?: boolean; notesRequired?: boolean }> = {
   SEPARATE_KIT: { title: "Separar kit completo", warn: "Todas as peças do motor serão reservadas no estoque." },
   SEPARATE_PARTIAL: { title: "Separar peças disponíveis", warn: "Apenas as peças com saldo disponível serão reservadas." },
   CANCEL_RESERVATION: { title: "Cancelar reserva", warn: "A reserva será liberada e o estoque ficará disponível novamente." },
   ADD_TO_PURCHASE: { title: "Incluir em compra", warn: "As peças sem saldo serão incluídas em uma solicitação de compra." },
   DIRECT_TO_TECHNICIAN: { title: "Direcionar ao técnico", warn: "O aparelho ficará aguardando início de reparo.", showNotes: true },
+  REDIRECT_TECHNICIAN: { title: "Alterar técnico", warn: "O técnico responsável será substituído. O registro fica no histórico.", showNotes: true },
   START_REPAIR: { title: "Iniciar reparo", warn: "O status mudará para EM REPARO. As peças permanecerão reservadas." },
   COMPLETE_REPAIR: { title: "Concluir reparo", warn: "As peças reservadas serão consumidas do estoque. Esta ação não pode ser desfeita.", showNotes: true },
+  CLOSE_CASE: { title: "Finalizar card", warn: "O card será marcado como CONCLUÍDO e removido da fila ativa.", showNotes: true, notesRequired: true },
+  SET_STATUS: { title: "Alterar fase", warn: "A fase do aparelho será alterada manualmente. A justificativa fica registrada para auditoria.", showNotes: true, notesRequired: true },
 };
 
-function ActionConfirmModal({ state, data, technicians, selectedTechId, onSelectTech, onChangeNotes, cancelReason, onConfirm, onCancel, working }: ActionConfirmModalProps) {
+const STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: "EM_ANALISE", label: "Em análise" },
+  { value: "PEDIR_PECA", label: "Pedir peça" },
+  { value: "AGUARDANDO_RECEBIMENTO", label: "Aguardando recebimento" },
+  { value: "MATCH_PARCIAL", label: "Match parcial" },
+  { value: "MATCH", label: "Match" },
+  { value: "EM_SEPARACAO", label: "Em separação" },
+  { value: "APTO_REPARO", label: "Apto para reparo" },
+  { value: "DIRECIONADO_TECNICO", label: "Direcionado ao técnico" },
+  { value: "EM_REPARO", label: "Em reparo" },
+  { value: "REPARO_EXECUTADO", label: "Reparo executado" },
+  { value: "TRIAGEM_FINAL", label: "Triagem final" },
+  { value: "RETORNO_TECNICO", label: "Retorno técnico" },
+  { value: "VERIFICAR", label: "Verificar" },
+  { value: "CONCLUIDO", label: "Concluído" },
+  { value: "VENDA_ESTADO", label: "Venda no estado" },
+  { value: "CANCELADO", label: "Cancelado" },
+];
+
+function ActionConfirmModal({ state, data, technicians, selectedTechId, onSelectTech, onChangeNotes, onChangeTargetStatus, cancelReason, onConfirm, onCancel, working }: ActionConfirmModalProps) {
   const meta = ACTION_META[state.action];
   const modelStr = data ? [data.model, data.capacity].filter(Boolean).join(" ") : "Aparelho";
 
-  const isDirectTech = state.action === "DIRECT_TO_TECHNICIAN";
+  const isDirectTech = state.action === "DIRECT_TO_TECHNICIAN" || state.action === "REDIRECT_TECHNICIAN";
   const canConfirm = !working && (
     isDirectTech ? selectedTechId != null :
     state.action === "CANCEL_RESERVATION" ? cancelReason.length > 0 :
+    state.action === "CLOSE_CASE" ? state.notes.trim().length > 0 :
+    state.action === "SET_STATUS" ? (state.notes.trim().length > 0 && !!state.targetStatus) :
     true
   );
 
@@ -663,10 +835,26 @@ function ActionConfirmModal({ state, data, technicians, selectedTechId, onSelect
         </div>
       )}
 
+      {state.action === "SET_STATUS" && (
+        <div style={{ marginBottom: "0.75rem" }}>
+          <select
+            className="input"
+            value={state.targetStatus ?? ""}
+            onChange={e => onChangeTargetStatus(e.target.value)}
+            style={{ fontSize: "0.85rem" }}
+          >
+            <option value="">Selecione a nova fase…</option>
+            {STATUS_OPTIONS.filter(o => o.value !== data?.workflowStatus).map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {meta.showNotes && (
         <textarea
           className="input"
-          placeholder="Observação (opcional)…"
+          placeholder={meta.notesRequired ? "Justificativa obrigatória…" : "Observação (opcional)…"}
           rows={2}
           value={state.notes}
           onChange={e => onChangeNotes(e.target.value)}

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { listStaff, createStaff, updateStaff, StaffError } from "../../staff/staff-service.js";
+import { listStaff, createStaff, updateStaff, linkUserToStaff, StaffError } from "../../staff/staff-service.js";
 import { getDb } from "../../db/database.js";
 import { requireAuth, requireAdmin } from "../middleware/auth-middleware.js";
 import { logAudit } from "../../audit/audit-service.js";
@@ -32,6 +32,7 @@ staffRouter.post("/staff", requireAuth, requireAdmin, (req, res, next) => {
 const UpdateSchema = z.object({
   name: z.string().min(1).optional(),
   active: z.boolean().optional(),
+  datasysDeposito: z.string().nullable().optional(),
 });
 
 staffRouter.patch("/staff/:id", requireAuth, requireAdmin, (req, res, next) => {
@@ -44,6 +45,24 @@ staffRouter.patch("/staff/:id", requireAuth, requireAdmin, (req, res, next) => {
   } catch (err) {
     if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
     if (err instanceof StaffError) { res.status(err.code === "NOT_FOUND" ? 404 : 400).json({ error: err.message }); return; }
+    next(err);
+  }
+});
+
+const LinkUserSchema = z.object({
+  userId: z.number().int().positive().nullable(),
+});
+
+staffRouter.post("/staff/:id/link-user", requireAuth, requireAdmin, (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const { userId } = LinkUserSchema.parse(req.body);
+    const member = linkUserToStaff(getDb(), id, userId);
+    logAudit(getDb(), { userId: req.sessionUser!.id, action: "STAFF_USER_LINKED", entityType: "STAFF", entityId: String(id), meta: { userId } });
+    res.json({ staff: member });
+  } catch (err) {
+    if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
+    if (err instanceof StaffError) { res.status(err.code === "NOT_FOUND" ? 404 : 409).json({ error: err.message }); return; }
     next(err);
   }
 });

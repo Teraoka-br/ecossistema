@@ -9,6 +9,10 @@ import {
   updateUser,
   resetUserPin,
   listUsers,
+  deleteUser,
+  getUserPermissions,
+  grantPermission,
+  revokePermission,
   AuthError,
 } from "../../auth/auth-service.js";
 import { getDb } from "../../db/database.js";
@@ -89,7 +93,9 @@ authRouter.post("/login", rateLimitLogin, async (req, res, next) => {
 // ─── Me (protegido) ───────────────────────────────────────────────────────
 
 authRouter.get("/me", requireAuth, (req, res) => {
-  res.json({ user: req.sessionUser });
+  const user = req.sessionUser!;
+  const permissions = user.role === "ADMIN" ? ["OVERRIDE_REPAIR_STATUS"] : getUserPermissions(getDb(), user.id);
+  res.json({ user: { ...user, permissions } });
 });
 
 // ─── Logout (protegido) ───────────────────────────────────────────────────
@@ -114,14 +120,20 @@ const CreateUserSchema = z.object({
   username: z.string().min(2),
   displayName: z.string().min(1),
   pin: z.string().regex(/^\d{4,8}$/),
-  role: z.enum(["ADMIN", "OPERATOR"]).default("OPERATOR"),
+  role: z.enum(["ADMIN", "OPERATOR", "TECHNICIAN"]).default("OPERATOR"),
 });
 
 authRouter.post("/users", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const body = CreateUserSchema.parse(req.body);
-    const user = await createUser(getDb(), body);
-    logAudit(getDb(), { userId: req.sessionUser!.id, action: "USER_CREATED", entityType: "USER", entityId: String(user.id), meta: { username: user.username, role: user.role } });
+    const db = getDb();
+    const user = await createUser(db, body);
+    // Técnico: auto-cria staff_member vinculado para aparecer na fila de despacho
+    if (user.role === "TECHNICIAN") {
+      const res2 = db.prepare("INSERT INTO staff_members (name, type, user_id) VALUES (?, 'TECHNICIAN', ?)").run(user.displayName, user.id);
+      logAudit(db, { userId: req.sessionUser!.id, action: "STAFF_CREATED", entityType: "STAFF", entityId: String(res2.lastInsertRowid), meta: { name: user.displayName, auto: true } });
+    }
+    logAudit(db, { userId: req.sessionUser!.id, action: "USER_CREATED", entityType: "USER", entityId: String(user.id), meta: { username: user.username, role: user.role } });
     res.status(201).json({ user });
   } catch (err) {
     if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos.", details: err.issues }); return; }
@@ -132,7 +144,7 @@ authRouter.post("/users", requireAuth, requireAdmin, async (req, res, next) => {
 
 const UpdateUserSchema = z.object({
   displayName: z.string().min(1).optional(),
-  role: z.enum(["ADMIN", "OPERATOR"]).optional(),
+  role: z.enum(["ADMIN", "OPERATOR", "TECHNICIAN"]).optional(),
   active: z.boolean().optional(),
 });
 
@@ -166,6 +178,59 @@ authRouter.post("/users/:id/reset-pin", requireAuth, requireAdmin, async (req, r
   } catch (err) {
     if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
     if (err instanceof AuthError) { res.status(err.code === "NOT_FOUND" ? 404 : 400).json({ error: err.message }); return; }
+    next(err);
+  }
+});
+
+// ─── Admin: permissões granulares ─────────────────────────────────────────
+
+const KNOWN_PERMISSIONS = ["OVERRIDE_REPAIR_STATUS"] as const;
+
+authRouter.get("/users/:id/permissions", requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  res.json({ permissions: getUserPermissions(getDb(), id) });
+});
+
+authRouter.post("/users/:id/permissions/:perm", requireAuth, requireAdmin, (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const perm = req.params.perm;
+    if (!(KNOWN_PERMISSIONS as readonly string[]).includes(perm)) {
+      res.status(400).json({ error: "Permissão desconhecida." }); return;
+    }
+    grantPermission(getDb(), id, perm, req.sessionUser!.id);
+    logAudit(getDb(), { userId: req.sessionUser!.id, action: "PERMISSION_GRANTED", entityType: "USER", entityId: String(id), meta: { permission: perm } });
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof AuthError) { res.status(404).json({ error: err.message }); return; }
+    next(err);
+  }
+});
+
+authRouter.delete("/users/:id/permissions/:perm", requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  const perm = req.params.perm;
+  revokePermission(getDb(), id, perm);
+  logAudit(getDb(), { userId: req.sessionUser!.id, action: "PERMISSION_REVOKED", entityType: "USER", entityId: String(id), meta: { permission: perm } });
+  res.json({ ok: true });
+});
+
+authRouter.delete("/users/:id", requireAuth, requireAdmin, (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (id === req.sessionUser!.id) {
+      res.status(422).json({ error: "Você não pode excluir sua própria conta." });
+      return;
+    }
+    deleteUser(getDb(), id);
+    logAudit(getDb(), { userId: req.sessionUser!.id, action: "USER_DELETED", entityType: "USER", entityId: String(id) });
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      const status = err.code === "NOT_FOUND" ? 404 : err.code === "LAST_ADMIN" ? 422 : 409;
+      res.status(status).json({ error: err.message, code: err.code });
+      return;
+    }
     next(err);
   }
 });

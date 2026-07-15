@@ -218,12 +218,13 @@ export interface ResolveReferenceInput {
   chavePeca: string;
   responsibleName: string;
   notes?: string | null;
+  createIfMissing?: boolean;
 }
 
 /**
- * Resolve manualmente uma referência pendente. A CHAVEPECA precisa existir no
- * catálogo do lote vinculado à sessão — o autocomplete do frontend só sugere
- * chaves válidas, e o backend valida de novo aqui (nunca aceita texto livre).
+ * Resolve manualmente uma referência pendente. Por padrão a CHAVEPECA precisa
+ * existir no catálogo; com createIfMissing=true o operador pode criar uma
+ * chave nova digitando livremente.
  */
 export function resolveReferenceManually(db: Db, sessionId: number, input: ResolveReferenceInput): ReferenceMappingRow {
   const session = getSessionOrThrow(db, sessionId);
@@ -233,15 +234,23 @@ export function resolveReferenceManually(db: Db, sessionId: number, input: Resol
   const responsibleName = requireNonEmpty(input.responsibleName, "responsável");
   const chavePecaNorm = normalizeKey(chavePeca);
 
-  if (!session.import_batch_id) {
-    throw new CountingError(422, "Sessão sem lote de importação vinculado — não há catálogo para validar a chave.");
-  }
-  if (!q.catalogHasKey(db, session.import_batch_id, chavePecaNorm)) {
-    throw new CountingError(
-      400,
-      `CHAVEPECA "${chavePeca}" não existe no catálogo do lote #${session.import_batch_id}. ` +
-        `Selecione uma chave válida sugerida pelo autocomplete.`,
-    );
+  if (input.createIfMissing) {
+    // Persiste a nova chave no catálogo permanente para que fique disponível em sessões futuras
+    db.prepare(
+      `INSERT OR IGNORE INTO custom_part_keys (chave_peca, chave_peca_norm, created_by)
+       VALUES (?, ?, ?)`,
+    ).run(chavePeca.trim(), chavePecaNorm, responsibleName);
+  } else {
+    if (!session.import_batch_id) {
+      throw new CountingError(422, "Sessão sem lote de importação vinculado — não há catálogo para validar a chave.");
+    }
+    if (!q.catalogHasKey(db, session.import_batch_id, chavePecaNorm)) {
+      throw new CountingError(
+        400,
+        `CHAVEPECA "${chavePeca}" não existe no catálogo do lote #${session.import_batch_id}. ` +
+          `Selecione uma chave válida sugerida pelo autocomplete.`,
+      );
+    }
   }
 
   // Usa o valor original mais recente bipado para essa referência (preserva o que foi digitado).

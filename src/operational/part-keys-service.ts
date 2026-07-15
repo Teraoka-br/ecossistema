@@ -1,0 +1,234 @@
+import type { Db } from "../db/database.js";
+import { normalizeKey } from "../domain/text.js";
+import { requestMatchRecompute } from "../match/engine-orchestrator.js";
+
+export interface PartKeyRow {
+  id: number;
+  chave_peca: string;
+  chave_peca_norm: string;
+  descricao: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PartKeyEditRow {
+  id: number;
+  chave_peca_norm: string;
+  field_changed: string;
+  old_value: string | null;
+  new_value: string | null;
+  edited_by: string | null;
+  edited_at: string;
+  notes: string | null;
+}
+
+export function listPartKeys(db: Db, search?: string): PartKeyRow[] {
+  const like = search?.trim();
+  return db.prepare(
+    `SELECT * FROM custom_part_keys
+     ${like ? "WHERE chave_peca LIKE ? OR descricao LIKE ?" : ""}
+     ORDER BY chave_peca`,
+  ).all(...(like ? [`%${like}%`, `%${like}%`] : [])) as unknown as PartKeyRow[];
+}
+
+export function getPartKey(db: Db, id: number): PartKeyRow | null {
+  return (db.prepare("SELECT * FROM custom_part_keys WHERE id = ?").get(id) as PartKeyRow | undefined) ?? null;
+}
+
+export function getPartKeyByNorm(db: Db, norm: string): PartKeyRow | null {
+  return (db.prepare("SELECT * FROM custom_part_keys WHERE chave_peca_norm = ?").get(norm) as PartKeyRow | undefined) ?? null;
+}
+
+export function createPartKey(db: Db, params: { chavePeca: string; descricao?: string; createdBy?: string }): PartKeyRow {
+  const chave = params.chavePeca.trim().toUpperCase();
+  const norm = normalizeKey(chave);
+  if (!chave) throw new Error("CHAVEPECA não pode ser vazia.");
+  const res = db.prepare(
+    `INSERT INTO custom_part_keys (chave_peca, chave_peca_norm, descricao, created_by)
+     VALUES (?, ?, ?, ?)`,
+  ).run(chave, norm, params.descricao?.trim() || null, params.createdBy?.trim() || null);
+  return getPartKey(db, res.lastInsertRowid as number)!;
+}
+
+export function updatePartKey(
+  db: Db,
+  id: number,
+  params: { chavePeca?: string; descricao?: string | null; editedBy?: string; notes?: string },
+): PartKeyRow {
+  const existing = getPartKey(db, id);
+  if (!existing) throw new Error("Chave não encontrada.");
+
+  let chaveChanged = false;
+
+  if (params.chavePeca !== undefined) {
+    const chave = params.chavePeca.trim().toUpperCase();
+    const norm = normalizeKey(chave);
+    if (chave !== existing.chave_peca) {
+      db.prepare("UPDATE custom_part_keys SET chave_peca = ?, chave_peca_norm = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(chave, norm, id);
+      db.prepare(
+        `INSERT INTO part_key_edits (chave_peca_norm, field_changed, old_value, new_value, edited_by, notes)
+         VALUES (?, 'chave_peca', ?, ?, ?, ?)`,
+      ).run(existing.chave_peca_norm, existing.chave_peca, chave, params.editedBy ?? null, params.notes ?? null);
+      chaveChanged = true;
+    }
+  }
+
+  if ("descricao" in params) {
+    const newDesc = params.descricao?.trim() || null;
+    if (newDesc !== existing.descricao) {
+      db.prepare("UPDATE custom_part_keys SET descricao = ?, updated_at = datetime('now') WHERE id = ?")
+        .run(newDesc, id);
+      db.prepare(
+        `INSERT INTO part_key_edits (chave_peca_norm, field_changed, old_value, new_value, edited_by, notes)
+         VALUES (?, 'descricao', ?, ?, ?, ?)`,
+      ).run(existing.chave_peca_norm, existing.descricao, newDesc, params.editedBy ?? null, params.notes ?? null);
+    }
+  }
+
+  if (chaveChanged) {
+    requestMatchRecompute(db, `Referência editada: ${existing.chave_peca} → ${params.chavePeca}`, "part_key", id);
+  }
+
+  return getPartKey(db, id)!;
+}
+
+/**
+ * Edita uma chave importada (source_inventory_items) criando ou atualizando uma entrada em
+ * custom_part_keys. Isso "promove" a chave importada para manual, sobrescrevendo com os novos valores.
+ */
+export function editImportedKey(
+  db: Db,
+  originalNorm: string,
+  params: { chavePeca?: string; descricao?: string | null; editedBy?: string; notes?: string },
+  importBatchId: number | null,
+): PartKeyRow {
+  // Buscar dados atuais da chave importada
+  const imported = importBatchId
+    ? (db.prepare(
+        `SELECT chave_peca, chave_peca_norm, MIN(referencia) AS referencia
+         FROM source_inventory_items
+         WHERE import_batch_id = ? AND chave_peca_norm = ?
+         GROUP BY chave_peca_norm`,
+      ).get(importBatchId, originalNorm) as { chave_peca: string; chave_peca_norm: string; referencia: string } | undefined)
+    : undefined;
+
+  const currentChave = imported?.chave_peca ?? originalNorm.toUpperCase();
+  const currentDesc = imported?.referencia ?? null;
+
+  // Verificar se já existe como custom
+  const existing = getPartKeyByNorm(db, originalNorm);
+
+  if (existing) {
+    // Já existe como custom — atualizar normalmente
+    return updatePartKey(db, existing.id, params);
+  }
+
+  // Criar nova entrada custom e registrar edição inicial
+  const newChave = params.chavePeca?.trim().toUpperCase() ?? currentChave;
+  const newNorm = normalizeKey(newChave);
+  const newDesc = "descricao" in params ? (params.descricao?.trim() || null) : currentDesc;
+
+  const res = db.prepare(
+    `INSERT INTO custom_part_keys (chave_peca, chave_peca_norm, descricao, created_by)
+     VALUES (?, ?, ?, ?)`,
+  ).run(newChave, newNorm, newDesc, params.editedBy?.trim() || null);
+  const newId = res.lastInsertRowid as number;
+
+  if (params.chavePeca !== undefined && newChave !== currentChave) {
+    db.prepare(
+      `INSERT INTO part_key_edits (chave_peca_norm, field_changed, old_value, new_value, edited_by, notes)
+       VALUES (?, 'chave_peca', ?, ?, ?, ?)`,
+    ).run(originalNorm, currentChave, newChave, params.editedBy ?? null, params.notes ?? null);
+    requestMatchRecompute(db, `Referência importada editada: ${currentChave} → ${newChave}`, "part_key", newId);
+  }
+  if ("descricao" in params && newDesc !== currentDesc) {
+    db.prepare(
+      `INSERT INTO part_key_edits (chave_peca_norm, field_changed, old_value, new_value, edited_by, notes)
+       VALUES (?, 'descricao', ?, ?, ?, ?)`,
+    ).run(originalNorm, currentDesc, newDesc, params.editedBy ?? null, params.notes ?? null);
+  }
+
+  return getPartKey(db, newId)!;
+}
+
+export function deletePartKey(db: Db, id: number): void {
+  const existing = getPartKey(db, id);
+  if (!existing) throw new Error("Chave não encontrada.");
+  db.prepare("DELETE FROM custom_part_keys WHERE id = ?").run(id);
+}
+
+export function getPartKeyHistory(db: Db, chavePecaNorm: string): PartKeyEditRow[] {
+  return db.prepare(
+    `SELECT * FROM part_key_edits WHERE chave_peca_norm = ? ORDER BY edited_at DESC`,
+  ).all(chavePecaNorm) as unknown as PartKeyEditRow[];
+}
+
+export interface AllPartKeyRow {
+  id: number | null;           // null = importada (sem id em custom_part_keys)
+  chave_peca: string;
+  chave_peca_norm: string;
+  descricao: string | null;
+  source: "IMPORTADA" | "MANUAL";
+  created_by: string | null;
+  created_at: string | null;
+}
+
+/** Todas as chaves: importadas do legado + criadas manualmente. */
+export function listAllPartKeys(db: Db, importBatchId: number | null, search?: string): AllPartKeyRow[] {
+  const like = search?.trim();
+  const likeParam = like ? [`%${like}%`] : [];
+
+  const customRows = db.prepare(
+    `SELECT id, chave_peca, chave_peca_norm, descricao, created_by, created_at
+     FROM custom_part_keys
+     ${like ? "WHERE chave_peca LIKE ? OR descricao LIKE ?" : ""}
+     ORDER BY chave_peca`,
+  ).all(...(like ? [`%${like}%`, `%${like}%`] : [])) as unknown as PartKeyRow[];
+
+  const customNorms = new Set(customRows.map(r => r.chave_peca_norm));
+
+  let legacyRows: { chave_peca: string; chave_peca_norm: string; referencia: string }[] = [];
+  if (importBatchId) {
+    legacyRows = db.prepare(
+      `SELECT chave_peca, chave_peca_norm, MIN(referencia) AS referencia
+       FROM source_inventory_items
+       WHERE import_batch_id = ? AND chave_peca_norm IS NOT NULL AND chave_peca_norm != ''
+         ${like ? "AND chave_peca LIKE ?" : ""}
+       GROUP BY chave_peca_norm
+       ORDER BY chave_peca`,
+    ).all(importBatchId, ...likeParam) as unknown as { chave_peca: string; chave_peca_norm: string; referencia: string }[];
+  }
+
+  const result: AllPartKeyRow[] = [];
+
+  for (const r of customRows) {
+    result.push({
+      id: r.id,
+      chave_peca: r.chave_peca,
+      chave_peca_norm: r.chave_peca_norm,
+      descricao: r.descricao,
+      source: "MANUAL",
+      created_by: r.created_by,
+      created_at: r.created_at,
+    });
+  }
+
+  for (const r of legacyRows) {
+    if (!customNorms.has(r.chave_peca_norm)) {
+      result.push({
+        id: null,
+        chave_peca: r.chave_peca,
+        chave_peca_norm: r.chave_peca_norm,
+        descricao: r.referencia || null,
+        source: "IMPORTADA",
+        created_by: null,
+        created_at: null,
+      });
+    }
+  }
+
+  result.sort((a, b) => a.chave_peca.localeCompare(b.chave_peca));
+  return result;
+}

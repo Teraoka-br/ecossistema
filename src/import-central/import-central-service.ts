@@ -41,6 +41,7 @@ export class ImportCentralError extends Error {
 export type SourceKey =
   | "his"
   | "rel-seriais"
+  | "rel-seriais-saldo"
   | "analise-mi"
   | "pedidos"
   | "bkp"
@@ -121,15 +122,16 @@ export interface AllSourcesStatus {
 // ---------------------------------------------------------------------------
 
 const ALLOWED_EXTENSIONS: Record<SourceKey, string[]> = {
-  his:            [".xlsx", ".xls"],
-  "rel-seriais":  [".csv"],
-  "analise-mi":   [".xlsx", ".xls"],
-  pedidos:        [".xlsx", ".xls"],
-  bkp:            [".xlsx", ".xls"],
-  "triagem-saida":[".xlsx", ".xls"],
-  sh:             [".xlsx", ".xls"],
-  peacs:          [".xlsx", ".xls"],
-  demonstrativo:  [".xlsx", ".xls"],
+  his:                 [".xlsx", ".xls"],
+  "rel-seriais":       [".csv"],
+  "rel-seriais-saldo": [".csv"],
+  "analise-mi":        [".xlsx", ".xls"],
+  pedidos:             [".xlsx", ".xls"],
+  bkp:                 [".xlsx", ".xls"],
+  "triagem-saida":     [".xlsx", ".xls"],
+  sh:                  [".xlsx", ".xls"],
+  peacs:               [".xlsx", ".xls"],
+  demonstrativo:       [".xlsx", ".xls"],
 };
 
 const XLSX_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // ZIP PK header
@@ -335,15 +337,16 @@ export function persistIssues(
 // ---------------------------------------------------------------------------
 
 const SOURCE_IMPORT_TABLES: Record<SourceKey, string> = {
-  his:            "his_imports",
-  "rel-seriais":  "rel_seriais_imports",
-  "analise-mi":   "analise_mi_imports",
-  pedidos:        "pedidos_imports",
-  bkp:            "bkp_imports",
-  "triagem-saida":"triagem_saida_imports",
-  sh:             "sh_os_imports",
-  peacs:          "peacs_imports",
-  demonstrativo:  "demonstrativo_imports",
+  his:                 "his_imports",
+  "rel-seriais":       "rel_seriais_imports",
+  "rel-seriais-saldo": "rel_seriais_saldo_imports",
+  "analise-mi":        "analise_mi_imports",
+  pedidos:             "pedidos_imports",
+  bkp:                 "bkp_imports",
+  "triagem-saida":     "triagem_saida_imports",
+  sh:                  "sh_os_imports",
+  peacs:               "peacs_imports",
+  demonstrativo:       "demonstrativo_imports",
 };
 
 export function createStaging(
@@ -969,13 +972,10 @@ export async function confirmRelSeriais(
         deposito:     colDeposito     >= 0 ? row[colDeposito]     ?? null : null,
         filial:       colFilialAtual  >= 0 ? row[colFilialAtual]  ?? null : null,
       };
-      const existing = byImei.get(imeiNorm);
-      if (!existing || (!isSim && existing.disponivel?.toUpperCase() !== "SIM")) {
-        // Substituir: preferir SIM; entre iguais, última linha vence
-        if (!existing || isSim || !existing.disponivel || existing.disponivel.toUpperCase() !== "SIM") {
-          byImei.set(imeiNorm, candidate);
-        }
-      }
+      // Última linha sempre vence — o arquivo "todos" é ordenado do mais antigo
+      // para o mais novo, então a última ocorrência de cada IMEI é o estado atual.
+      // Para "com saldo" há apenas uma linha por IMEI, então não faz diferença.
+      byImei.set(imeiNorm, candidate);
     });
     rl.on("close", res);
     rl.on("error", rej);
@@ -1027,6 +1027,215 @@ export async function confirmRelSeriais(
     persistIssues(db, "rel-seriais", importId, relIssues);
     db.prepare(
       `UPDATE rel_seriais_imports SET status='COMPLETED', finished_at=datetime('now'),
+         rows_valid=?, issues_count=?,
+         rows_inserted=?, rows_updated=?, rows_unchanged=? WHERE id=?`,
+    ).run(syncResult.inserted + syncResult.updated + syncResult.unchanged, relIssues.length,
+          syncResult.inserted, syncResult.updated, syncResult.unchanged, importId);
+
+    confirmStaging(db, stagingId, importId);
+  });
+
+  try { fs.unlinkSync(staged.stagedPath); } catch { /* ignore */ }
+  return {
+    rowsInserted:  syncResult.inserted,
+    rowsUpdated:   syncResult.updated,
+    rowsUnchanged: syncResult.unchanged,
+    reportScope,
+  };
+}
+
+// ===========================================================================
+// CARD 2b — REL. ESTOQUE DE SERIAIS "COM SALDO"
+// Fonte separada; usa a mesma lógica de parse mas grava em rel_seriais_saldo_imports.
+// "Com saldo" tem uma linha por IMEI — é o estado atual, não o histórico.
+// ===========================================================================
+
+export async function previewRelSeriaisSaldo(
+  db: Db,
+  filePath: string,
+  filename: string,
+  userId: number | null,
+): Promise<StagedPreview> {
+  validateFileForSource(filePath, "rel-seriais-saldo", filename);
+
+  const fileHash = hashFile(filePath);
+  const fileSize = fs.statSync(filePath).size;
+  const existingId = checkDuplicateHash(db, "rel_seriais_saldo_imports", fileHash);
+  const stagingId = createStaging(db, "rel-seriais-saldo", filename, fileHash, filePath, fileSize, userId);
+
+  try {
+    const csv = await readCsvFull(filePath, 20, "Serial");
+    const { headers, sample, totalLines, totalValid, totalInvalid } = csv;
+
+    const colSerial     = colIdx(headers, "Serial");
+    const colProduto    = colIdx(headers, "Produto");
+    const colDisponivel = colIdx(headers, "Disponivel", "Disponível");
+    const colDeposito   = colIdx(headers, "Deposito Atual", "Depósito Atual");
+    const colFilialAtual = colIdx(headers, "Filial Atual");
+
+    const issues: ImportIssueRaw[] = [];
+    if (colSerial < 0) {
+      throw new ImportCentralError("MISSING_SERIAL_COL", `Coluna "Serial" não encontrada. Colunas: ${headers.join(", ")}`);
+    }
+
+    const preview: StagedPreview = {
+      stagingId,
+      source: "rel-seriais-saldo",
+      filename,
+      fileHash,
+      fileSize,
+      status: "PREVIEW_READY",
+      alreadyImported: !!existingId,
+      existingImportId: existingId,
+      rowsFound: totalLines,
+      rowsValid: totalValid,
+      issues,
+      previewRows: sample.slice(0, 5).map((row) => ({
+        serial:    row[colSerial] ?? null,
+        produto:   colProduto    >= 0 ? row[colProduto]    : null,
+        deposito:  colDeposito   >= 0 ? row[colDeposito]   : null,
+        filial:    colFilialAtual >= 0 ? row[colFilialAtual] : null,
+        disponivel:colDisponivel >= 0 ? row[colDisponivel] : null,
+      })),
+      extra: {
+        totalValid,
+        totalInvalid,
+        totalLines,
+        colsFound: { serial: colSerial >= 0, produto: colProduto >= 0, deposito: colDeposito >= 0, filial: colFilialAtual >= 0 },
+      },
+    };
+
+    setStagingPreviewReady(db, stagingId, JSON.stringify(preview));
+    return preview;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    setStagingFailed(db, stagingId, msg);
+    if (err instanceof ImportCentralError) throw err;
+    throw new ImportCentralError("PARSE_ERROR", msg);
+  }
+}
+
+export async function confirmRelSeriaisSaldo(
+  db: Db,
+  stagingId: number,
+  userId: number | null,
+): Promise<{ rowsInserted: number; rowsUpdated: number; rowsUnchanged: number; reportScope: string }> {
+  const staged = getStagedFile(db, stagingId);
+  if (!staged)                     throw new ImportCentralError("NOT_FOUND",       "Staging não encontrado.");
+  if (staged.status !== "PREVIEW_READY") throw new ImportCentralError("NOT_READY", "Preview não pronto.");
+  if (!fs.existsSync(staged.stagedPath)) throw new ImportCentralError("FILE_GONE",  "Arquivo temporário não encontrado.");
+  if (staged.source !== "rel-seriais-saldo") throw new ImportCentralError("SOURCE_MISMATCH", "Staging pertence a outra fonte.");
+
+  const existingId = checkDuplicateHash(db, "rel_seriais_saldo_imports", staged.fileHash);
+  if (existingId) throw new ImportCentralError("ALREADY_IMPORTED", "Arquivo já importado.");
+
+  const csv = await readCsvFull(staged.stagedPath, 0);
+  const { headers, totalLines } = csv;
+
+  const colSerial       = colIdx(headers, "Serial");
+  if (colSerial < 0) throw new ImportCentralError("MISSING_SERIAL_COL", 'Coluna "Serial" não encontrada.');
+  const colDescricao    = colIdx(headers, "Descricao", "Descrição");
+  const colCodComercial = colIdx(headers, "Codigo Comercial", "Código Comercial");
+  const colFabricante   = colIdx(headers, "Fabricante");
+  const colDisponivel   = colIdx(headers, "Disponivel", "Disponível");
+  const colDeposito     = colIdx(headers, "Deposito Atual", "Depósito Atual");
+  const colFilialAtual  = colIdx(headers, "Filial Atual");
+
+  type RsRow = {
+    imeiNorm: string;
+    serial: string;
+    descricao: string | null;
+    codComercial: string | null;
+    fabricante: string | null;
+    disponivel: string | null;
+    deposito: string | null;
+    filial: string | null;
+  };
+
+  const byImei = new Map<string, RsRow>();
+  let hasSim = false;
+  let hasNonSim = false;
+  let validLines = 0;
+
+  await new Promise<void>((res, rej) => {
+    const rl = readline.createInterface({
+      input: fs.createReadStream(staged.stagedPath, { encoding: "latin1" }),
+      crlfDelay: Infinity,
+    });
+    let first = true;
+    const sep = ";";
+    rl.on("line", (line) => {
+      if (!line.trim()) return;
+      if (first) { first = false; return; }
+      const row = line.split(sep).map((p) => p.trim());
+      const serial = row[colSerial] ?? "";
+      const imeiNorm = normalizeImei(serial);
+      if (!imeiNorm) return;
+      validLines++;
+      const disp = colDisponivel >= 0 ? (row[colDisponivel] ?? null) : null;
+      const isSim = disp != null && disp.toUpperCase() === "SIM";
+      if (isSim) hasSim = true; else hasNonSim = true;
+      byImei.set(imeiNorm, {
+        imeiNorm,
+        serial: String(serial).replace(/'/g, ""),
+        descricao:    colDescricao    >= 0 ? row[colDescricao]    ?? null : null,
+        codComercial: colCodComercial >= 0 ? row[colCodComercial] ?? null : null,
+        fabricante:   colFabricante   >= 0 ? row[colFabricante]   ?? null : null,
+        disponivel:   disp,
+        deposito:     colDeposito     >= 0 ? row[colDeposito]     ?? null : null,
+        filial:       colFilialAtual  >= 0 ? row[colFilialAtual]  ?? null : null,
+      });
+    });
+    rl.on("close", res);
+    rl.on("error", rej);
+  });
+
+  const reportScope =
+    colDisponivel < 0 ? "UNKNOWN" :
+    hasSim && hasNonSim ? "ALL" :
+    hasSim ? "IN_STOCK" : "UNKNOWN";
+
+  const invalidCount = totalLines - validLines;
+  let syncResult = { inserted: 0, updated: 0, unchanged: 0 };
+
+  await withTxAsync(db, async () => {
+    const importRow = db
+      .prepare(
+        `INSERT INTO rel_seriais_saldo_imports (filename, file_hash, status, rows_found, rows_valid, issues_count, report_scope, created_by_user_id)
+         VALUES (?, ?, 'PENDING', ?, 0, 0, ?, ?)`,
+      )
+      .run(staged.filename, staged.fileHash, totalLines, reportScope, userId);
+    const importId = Number(importRow.lastInsertRowid);
+
+    const syncRows: SyncRow[] = Array.from(byImei.values()).map((r) => ({
+      key:  r.imeiNorm,
+      hash: rowHash(r.descricao, r.codComercial, r.fabricante, r.disponivel, r.deposito, r.filial),
+      cols: {
+        rel_seriais_import_id: importId,
+        serial:           r.serial,
+        descricao:        r.descricao,
+        codigo_comercial: r.codComercial,
+        fabricante:       r.fabricante,
+        disponivel:       r.disponivel,
+        deposito_atual:   r.deposito,
+        filial_atual:     r.filial,
+      },
+    }));
+
+    syncResult = syncCurrentTable(db, {
+      table:       "rel_seriais_current",
+      keyCol:      "imei_norm",
+      importIdCol: "rel_seriais_import_id",
+      rows:        syncRows,
+    });
+
+    const relIssues: ImportIssueRaw[] = [];
+    if (invalidCount > 0) {
+      relIssues.push({ row: null, severity: "WARNING", code: "INVALID_SERIAL", message: `${invalidCount} linha(s) com Serial inválido ignoradas.` });
+    }
+    persistIssues(db, "rel-seriais-saldo", importId, relIssues);
+    db.prepare(
+      `UPDATE rel_seriais_saldo_imports SET status='COMPLETED', finished_at=datetime('now'),
          rows_valid=?, issues_count=?,
          rows_inserted=?, rows_updated=?, rows_unchanged=? WHERE id=?`,
     ).run(syncResult.inserted + syncResult.updated + syncResult.unchanged, relIssues.length,

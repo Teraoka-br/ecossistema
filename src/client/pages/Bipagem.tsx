@@ -142,50 +142,88 @@ function NoSessionView({ onStarted }: { onStarted: () => void }) {
   );
 }
 
+// Fila de beeps persistida por sessão — sobrevive a travamentos e recargas de página
+function queueKey(sessionId: number) { return `scan_queue_v1_${sessionId}`; }
+function loadQueue(sessionId: number): string[] {
+  try { return JSON.parse(localStorage.getItem(queueKey(sessionId)) ?? "[]") as string[]; } catch { return []; }
+}
+function saveQueue(sessionId: number, q: string[]) {
+  if (q.length === 0) localStorage.removeItem(queueKey(sessionId));
+  else localStorage.setItem(queueKey(sessionId), JSON.stringify(q));
+}
+
 function ActiveSessionView({ session, onChanged }: { session: CountSession; onChanged: () => void }) {
   const [reference, setReference] = useState("");
-  const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<{ reference: string; total: number; status: string } | null>(null);
   const [state, setState] = useState<SessionState | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [queueSize, setQueueSize] = useState(0);
+  const [processing, setProcessing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Fila em memória — ref para evitar closures obsoletas
+  const queueRef = useRef<string[]>([]);
+  const processingRef = useRef(false);
 
-  // O backend é a autoridade: todo total/consolidação/pendência vem do /state.
-  // Recarregamos o estado consolidado depois de cada mutação (beep, cancelamento,
-  // resolução, cancelamento em massa) — nada é reconstruído só no estado React.
   const reloadState = useCallback(async () => {
-    try {
-      setState(await getSessionState(session.id));
-    } catch (e) {
-      setError((e as Error).message);
-    }
+    try { setState(await getSessionState(session.id)); }
+    catch (e) { setError((e as Error).message); }
   }, [session.id]);
 
-  useEffect(() => {
-    void reloadState();
-    inputRef.current?.focus();
-  }, [reloadState]);
+  // Drena a fila sequencialmente; cada scan espera o anterior terminar
+  const processQueue = useCallback(async () => {
+    if (processingRef.current) return;
+    processingRef.current = true;
+    setProcessing(true);
+    while (queueRef.current.length > 0) {
+      const ref = queueRef.current[0];
+      try {
+        const result = await registerScan(session.id, ref);
+        setLastScan({ reference: ref, total: result.totalForReference, status: result.scan.mappingStatus });
+        // Recarrega estado a cada 5 scans ou quando a fila esvaziar
+        if (queueRef.current.length <= 1 || queueRef.current.length % 5 === 0) {
+          await reloadState();
+        }
+      } catch (e) {
+        setError((e as Error).message);
+        // Scan com erro: remove da fila e continua (não trava o restante)
+      }
+      queueRef.current = queueRef.current.slice(1);
+      saveQueue(session.id, queueRef.current);
+      setQueueSize(queueRef.current.length);
+    }
+    processingRef.current = false;
+    setProcessing(false);
+    await reloadState();
+  }, [session.id, reloadState]);
 
-  async function onSubmit(e: React.FormEvent) {
+  useEffect(() => {
+    // Recupera fila pendente de uma sessão anterior (ex: PC travou)
+    const saved = loadQueue(session.id);
+    if (saved.length > 0) {
+      queueRef.current = saved;
+      setQueueSize(saved.length);
+      void processQueue();
+    } else {
+      void reloadState();
+    }
+    inputRef.current?.focus();
+  }, [session.id, reloadState, processQueue]);
+
+  // Mantém o foco no input sempre
+  useEffect(() => { inputRef.current?.focus(); }, [processing]);
+
+  function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (sending) return; // impede 2º envio causado pelo mesmo Enter
     const ref = reference.trim();
     if (ref === "") return;
-    setSending(true);
-    setError(null);
-    try {
-      const result = await registerScan(session.id, ref);
-      setLastScan({ reference: ref, total: result.totalForReference, status: result.scan.mappingStatus });
-      await reloadState();
-    } catch (e2) {
-      setError((e2 as Error).message);
-    } finally {
-      setReference("");
-      setSending(false);
-      // devolve o foco imediatamente — não impede beeps repetidos após a resposta.
-      inputRef.current?.focus();
-    }
+    // Adiciona à fila imediatamente e limpa o input — não espera o servidor
+    queueRef.current = [...queueRef.current, ref];
+    saveQueue(session.id, queueRef.current);
+    setQueueSize(queueRef.current.length);
+    setReference("");
+    inputRef.current?.focus();
+    void processQueue();
   }
 
   async function onCancelScan(scanId: number) {
@@ -237,14 +275,18 @@ function ActiveSessionView({ session, onChanged }: { session: CountSession; onCh
               type="text"
               value={reference}
               onChange={(e) => setReference(e.target.value)}
-              disabled={sending}
               autoFocus
               style={{ fontSize: "1.4rem", padding: "0.7rem" }}
               placeholder="bipe aqui…"
             />
           </div>
         </form>
-        {lastScan && (
+        {queueSize > 0 && (
+          <p className="hint" style={{ color: "var(--warning, #f59e0b)" }}>
+            ⏳ Fila: <strong>{queueSize}</strong> beep{queueSize !== 1 ? "s" : ""} aguardando envio…
+          </p>
+        )}
+        {lastScan && queueSize === 0 && (
           <p className="hint">
             Último beep: <strong>{lastScan.reference}</strong> — total desta referência: <strong>{lastScan.total}</strong>
             {" "}<StatusTag status={lastScan.status} />
@@ -363,11 +405,11 @@ function PendingRow({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function link(chavePeca: string) {
+  async function link(chavePeca: string, createIfMissing?: boolean) {
     setBusy(true);
     setError(null);
     try {
-      await resolveReference(sessionId, pending.referenceNorm, chavePeca, responsibleName);
+      await resolveReference(sessionId, pending.referenceNorm, chavePeca, responsibleName, undefined, createIfMissing);
       setLinking(false);
       onResolved();
     } catch (e) {
@@ -410,7 +452,7 @@ function PendingRow({
           <KeyAutocomplete
             sessionId={sessionId}
             disabled={busy}
-            onSelect={(k) => void link(k)}
+            onSelect={(k, isNew) => void link(k, isNew)}
             onCancel={() => setLinking(false)}
           />
         )}
@@ -420,9 +462,9 @@ function PendingRow({
 }
 
 /**
- * Autocomplete de CHAVEPECA: busca no backend (catálogo da SESSÃO) e só
- * permite confirmar uma chave selecionada da lista — nunca texto livre. O
- * backend revalida a chave de qualquer forma.
+ * Autocomplete de CHAVEPECA: busca no catálogo e permite criar nova chave
+ * digitando livremente quando não há resultado. onSelect(chave, isNew) indica
+ * se a chave precisa ser criada no backend.
  */
 function KeyAutocomplete({
   sessionId,
@@ -432,22 +474,43 @@ function KeyAutocomplete({
 }: {
   sessionId: number;
   disabled: boolean;
-  onSelect: (chavePeca: string) => void;
+  onSelect: (chavePeca: string, isNew: boolean) => void;
   onCancel: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [options, setOptions] = useState<{ chavePeca: string; referencia: string }[]>([]);
+  // null = nada selecionado; string = chave do catálogo; "__new__" = criar nova
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const t = setTimeout(() => {
       void getSessionCatalogKeys(sessionId, query.trim() || undefined)
-        .then((keys) => { if (!cancelled) setOptions(keys); })
+        .then((keys) => { if (!cancelled) { setOptions(keys); setSelected(null); } })
         .catch(() => { if (!cancelled) setOptions([]); });
     }, 200);
     return () => { cancelled = true; clearTimeout(t); };
   }, [sessionId, query]);
+
+  const trimmedQuery = query.trim().toUpperCase();
+  // Mostra opção "criar" quando há texto E essa chave exata não está no catálogo
+  const showCreate = trimmedQuery.length >= 2 && !options.some(
+    (o) => o.chavePeca.toUpperCase() === trimmedQuery,
+  );
+
+  function confirm() {
+    if (selected === "__new__") {
+      onSelect(trimmedQuery, true);
+    } else if (selected) {
+      onSelect(selected, false);
+    }
+  }
+
+  const confirmLabel = selected === "__new__"
+    ? `Criar "${trimmedQuery}"`
+    : selected
+      ? `Confirmar "${selected}"`
+      : "Confirmar";
 
   return (
     <div className="field" style={{ minWidth: 280 }}>
@@ -456,28 +519,44 @@ function KeyAutocomplete({
         autoFocus
         value={query}
         onChange={(e) => { setQuery(e.target.value); setSelected(null); }}
-        placeholder="buscar CHAVEPECA do catálogo…"
+        placeholder="buscar ou digitar nova CHAVEPECA…"
       />
-      <div className="table-wrap" style={{ maxHeight: 160, marginTop: "0.3rem" }}>
+      <div className="table-wrap" style={{ maxHeight: 180, marginTop: "0.3rem" }}>
         <table>
           <tbody>
             {options.map((o) => (
               <tr
                 key={o.chavePeca}
                 onClick={() => setSelected(o.chavePeca)}
-                style={{ cursor: "pointer", background: selected === o.chavePeca ? "var(--accent-soft, #e0e7ff)" : undefined }}
+                style={{ cursor: "pointer", background: selected === o.chavePeca ? "var(--accent-soft, rgba(99,102,241,0.15))" : undefined }}
               >
                 <td className="small"><strong>{o.chavePeca}</strong></td>
                 <td className="small muted">{o.referencia}</td>
               </tr>
             ))}
-            {options.length === 0 && <tr><td className="muted small">Nenhuma chave encontrada.</td></tr>}
+            {options.length === 0 && !showCreate && (
+              <tr><td className="muted small" colSpan={2}>Nenhuma chave encontrada. Digite para criar uma nova.</td></tr>
+            )}
+            {showCreate && (
+              <tr
+                onClick={() => setSelected("__new__")}
+                style={{
+                  cursor: "pointer",
+                  background: selected === "__new__" ? "var(--accent-soft, rgba(99,102,241,0.15))" : undefined,
+                  borderTop: options.length > 0 ? "1px dashed var(--border)" : undefined,
+                }}
+              >
+                <td className="small" colSpan={2} style={{ color: "var(--accent)", fontStyle: "italic" }}>
+                  ＋ Criar nova chave: <strong>{trimmedQuery}</strong>
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
       <div className="row" style={{ gap: "0.3rem", marginTop: "0.3rem" }}>
-        <button onClick={() => selected && onSelect(selected)} disabled={disabled || !selected}>
-          Confirmar {selected ? `"${selected}"` : ""}
+        <button onClick={confirm} disabled={disabled || !selected}>
+          {confirmLabel}
         </button>
         <button className="secondary" onClick={onCancel} disabled={disabled}>Cancelar</button>
       </div>

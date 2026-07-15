@@ -532,6 +532,54 @@ export function directToTechnician(
   requestMatchRecompute(db, "DIRECTED_TO_TECHNICIAN", "repair_case", repairCaseId);
 }
 
+/** Redireciona para outro técnico — aceita APTO_REPARO e DIRECIONADO_TECNICO. */
+export function redirectTechnician(
+  db: Db,
+  repairCaseId: number,
+  params: { technicianId: number; userId: number | null; notes?: string | null },
+): void {
+  const rc = db.prepare("SELECT * FROM repair_cases WHERE id = ?").get(repairCaseId) as Record<string, unknown> | undefined;
+  if (!rc) throw new ReservationError("NOT_FOUND", "Caso não encontrado.");
+
+  const allowed = ["APTO_REPARO", "DIRECIONADO_TECNICO"];
+  if (!allowed.includes(rc.workflow_status as string)) {
+    throw new ReservationError("INVALID_STATUS", `Caso deve estar em APTO_REPARO ou DIRECIONADO_TECNICO para redirecionar (atual: ${rc.workflow_status}).`);
+  }
+
+  const tech = db.prepare("SELECT id, name, active, type FROM staff_members WHERE id = ?").get(params.technicianId) as { id: number; name: string; active: number; type: string } | undefined;
+  if (!tech) throw new ReservationError("TECH_NOT_FOUND", "Técnico não encontrado.");
+  if (!tech.active) throw new ReservationError("TECH_INACTIVE", "Técnico está inativo.");
+  if (tech.type !== "TECHNICIAN") throw new ReservationError("TECH_INVALID_TYPE", "Colaborador não é um técnico.");
+
+  const prevTechId = rc.directed_technician_id as number | null;
+  const prevStatus = rc.workflow_status as string;
+
+  db.prepare(`
+    UPDATE repair_cases SET
+      workflow_status = 'DIRECIONADO_TECNICO',
+      directed_technician_id = ?,
+      directed_at = datetime('now'),
+      directed_by_user_id = ?,
+      notes = COALESCE(?, notes),
+      updated_at = datetime('now'),
+      updated_by_user_id = ?
+    WHERE id = ?
+  `).run(params.technicianId, params.userId ?? null, params.notes ?? null, params.userId ?? null, repairCaseId);
+
+  const prevTech = prevTechId
+    ? (db.prepare("SELECT name FROM staff_members WHERE id = ?").get(prevTechId) as { name: string } | undefined)
+    : undefined;
+
+  recordOperationalEvent(db, {
+    repairCaseId,
+    eventType: prevStatus === "DIRECIONADO_TECNICO" ? "TECHNICIAN_CHANGED" : "DIRECTED_TO_TECHNICIAN",
+    previousStatus: prevStatus,
+    newStatus: "DIRECIONADO_TECNICO",
+    responsibleName: tech.name,
+    notes: prevTech ? `Técnico anterior: ${prevTech.name}${params.notes ? ` — ${params.notes}` : ""}` : (params.notes ?? null),
+  });
+}
+
 export class RepairFlowError extends Error {
   constructor(public readonly code: string, message: string) {
     super(message);

@@ -30,7 +30,7 @@ export interface PartPayload {
 
 export interface AnaliseInput {
   userId: number | null;
-  userRole: "ADMIN" | "OPERATOR";
+  userRole: "ADMIN" | "OPERATOR" | "TECHNICIAN";
   responsibleName: string | null;
   existingCaseId?: number | null;
   imei?: string | null;

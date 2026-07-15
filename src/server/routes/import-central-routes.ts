@@ -17,6 +17,7 @@ import {
   expireOldStagings,
   previewHis, confirmHis,
   previewRelSeriais, confirmRelSeriais,
+  previewRelSeriaisSaldo, confirmRelSeriaisSaldo,
   previewAnaliseMi, confirmAnaliseMi,
   previewPedidos, confirmPedidos,
   previewBkp, confirmBkp,
@@ -37,8 +38,8 @@ import {
 export const importCentralRouter = Router();
 
 const VALID_SOURCES: SourceKey[] = [
-  "his", "rel-seriais", "analise-mi", "pedidos", "bkp", "triagem-saida", "sh",
-  "peacs", "demonstrativo",
+  "his", "rel-seriais", "rel-seriais-saldo", "analise-mi", "pedidos", "bkp",
+  "triagem-saida", "sh", "peacs", "demonstrativo",
 ];
 
 const upload = multer({
@@ -148,8 +149,9 @@ type PreviewFn = (
 ) => Promise<unknown>;
 
 const previewFns: Record<SourceKey, PreviewFn> = {
-  his:             (db, fp, fn, uid) => previewHis(db, fp, fn, uid),
-  "rel-seriais":   (db, fp, fn, uid) => previewRelSeriais(db, fp, fn, uid),
+  his:                  (db, fp, fn, uid) => previewHis(db, fp, fn, uid),
+  "rel-seriais":        (db, fp, fn, uid) => previewRelSeriais(db, fp, fn, uid),
+  "rel-seriais-saldo":  (db, fp, fn, uid) => previewRelSeriaisSaldo(db, fp, fn, uid),
   "analise-mi":    (db, fp, fn, uid) => previewAnaliseMi(db, fp, fn, uid),
   pedidos:         (db, fp, fn, uid) => previewPedidos(db, fp, fn, uid),
   bkp:             (db, fp, fn, uid) => previewBkp(db, fp, fn, uid),
@@ -214,8 +216,9 @@ type ConfirmFn = (
 ) => Promise<unknown>;
 
 const confirmFns: Record<SourceKey, ConfirmFn> = {
-  his:             async (db, sid, uid) => confirmHis(db, sid, uid),
-  "rel-seriais":   (db, sid, uid) => confirmRelSeriais(db, sid, uid),
+  his:                  async (db, sid, uid) => confirmHis(db, sid, uid),
+  "rel-seriais":        (db, sid, uid) => confirmRelSeriais(db, sid, uid),
+  "rel-seriais-saldo":  (db, sid, uid) => confirmRelSeriaisSaldo(db, sid, uid),
   "analise-mi":    async (db, sid, uid) => confirmAnaliseMi(db, sid, uid),
   pedidos:         async (db, sid, uid) => confirmPedidos(db, sid, uid),
   bkp:             async (db, sid, uid) => confirmBkp(db, sid, uid),
@@ -257,7 +260,7 @@ importCentralRouter.post("/:source/confirm", requireAuth, requireAdmin, async (r
           if ((hisResult.rowsInserted ?? 0) + (hisResult.rowsUpdated ?? 0) > 0) shouldTriggerMatch = true;
         }
         catch (e) { operationalErrors.push(`HIS sync: ${(e as Error).message}`); }
-      } else if (source === "rel-seriais") {
+      } else if (source === "rel-seriais" || source === "rel-seriais-saldo") {
         try { sync.relSeriais = applyRelSeriaisToRepairCases(db); }
         catch (e) { operationalErrors.push(`Rel. Seriais sync: ${(e as Error).message}`); }
       } else if (source === "analise-mi") {

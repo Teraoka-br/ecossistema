@@ -5,6 +5,8 @@ export interface StaffMember {
   name: string;
   type: "TECHNICIAN";
   active: boolean;
+  userId: number | null;
+  datasysDeposito: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -22,15 +24,22 @@ export class StaffError extends Error {
 export function listStaff(db: Db, opts: { activeOnly?: boolean } = {}): StaffMember[] {
   const where = opts.activeOnly ? "WHERE active = 1" : "";
   const rows = db
-    .prepare(`SELECT id, name, type, active, created_at, updated_at FROM staff_members ${where} ORDER BY name`)
+    .prepare(`SELECT id, name, type, active, user_id, datasys_deposito, created_at, updated_at FROM staff_members ${where} ORDER BY name`)
     .all() as unknown as StaffRow[];
   return rows.map(toStaffMember);
 }
 
 export function getStaffById(db: Db, id: number): StaffMember | null {
   const row = db
-    .prepare("SELECT id, name, type, active, created_at, updated_at FROM staff_members WHERE id = ?")
+    .prepare("SELECT id, name, type, active, user_id, datasys_deposito, created_at, updated_at FROM staff_members WHERE id = ?")
     .get(id) as StaffRow | undefined;
+  return row ? toStaffMember(row) : null;
+}
+
+export function getStaffByUserId(db: Db, userId: number): StaffMember | null {
+  const row = db
+    .prepare("SELECT id, name, type, active, user_id, datasys_deposito, created_at, updated_at FROM staff_members WHERE user_id = ?")
+    .get(userId) as StaffRow | undefined;
   return row ? toStaffMember(row) : null;
 }
 
@@ -45,7 +54,7 @@ export function createStaff(db: Db, params: { name: string; type?: "TECHNICIAN" 
 export function updateStaff(
   db: Db,
   id: number,
-  params: { name?: string; active?: boolean },
+  params: { name?: string; active?: boolean; datasysDeposito?: string | null },
 ): StaffMember {
   const member = getStaffById(db, id);
   if (!member) throw new StaffError("NOT_FOUND", "Técnico não encontrado.");
@@ -62,7 +71,31 @@ export function updateStaff(
       id,
     );
   }
+  if (params.datasysDeposito !== undefined) {
+    const val = params.datasysDeposito?.trim().toUpperCase() || null;
+    db.prepare("UPDATE staff_members SET datasys_deposito = ?, updated_at = datetime('now') WHERE id = ?").run(
+      val,
+      id,
+    );
+  }
   return getStaffById(db, id)!;
+}
+
+export function linkUserToStaff(db: Db, staffId: number, userId: number | null): StaffMember {
+  const member = getStaffById(db, staffId);
+  if (!member) throw new StaffError("NOT_FOUND", "Técnico não encontrado.");
+  if (userId !== null) {
+    // Garante que o usuário não está vinculado a outro técnico
+    const existing = db
+      .prepare("SELECT id FROM staff_members WHERE user_id = ? AND id != ?")
+      .get(userId, staffId) as { id: number } | undefined;
+    if (existing) throw new StaffError("USER_ALREADY_LINKED", "Este usuário já está vinculado a outro técnico.");
+  }
+  db.prepare("UPDATE staff_members SET user_id = ?, updated_at = datetime('now') WHERE id = ?").run(
+    userId,
+    staffId,
+  );
+  return getStaffById(db, staffId)!;
 }
 
 interface StaffRow {
@@ -70,6 +103,8 @@ interface StaffRow {
   name: string;
   type: string;
   active: number;
+  user_id: number | null;
+  datasys_deposito: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -80,6 +115,8 @@ function toStaffMember(r: StaffRow): StaffMember {
     name: r.name,
     type: r.type as "TECHNICIAN",
     active: r.active === 1,
+    userId: r.user_id ?? null,
+    datasysDeposito: r.datasys_deposito ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
