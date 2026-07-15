@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { z } from "zod";
 import { getDb } from "../../db/database.js";
+import { requireAuth, requireAdmin } from "../middleware/auth-middleware.js";
+
+function normalizeChave(s: string): string {
+  return s.trim().toUpperCase().replace(/\s+/g, " ");
+}
 import {
   runMatch,
   getLatestRun,
@@ -335,6 +340,77 @@ matchRouter.get("/match-runs/:id/export-csv", (req, res) => {
       `attachment; filename="match-${id}${onlyDivergent ? "-divergencias" : ""}.csv"`,
     );
     res.send(csv);
+  } catch (err) {
+    handleError(err, res);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Aliases de chave de peça (admin)
+// ---------------------------------------------------------------------------
+
+const aliasCreateSchema = z.object({
+  requestedChavePeca: z.string().min(1),
+  stockChavePeca: z.string().min(1),
+  reason: z.string().optional().nullable(),
+});
+
+matchRouter.get("/part-key-aliases", requireAuth, requireAdmin, (_req, res) => {
+  try {
+    const rows = getDb().prepare(
+      "SELECT * FROM part_key_aliases ORDER BY created_at DESC",
+    ).all();
+    res.json({ aliases: rows });
+  } catch (err) {
+    handleError(err, res);
+  }
+});
+
+matchRouter.post("/part-key-aliases", requireAuth, requireAdmin, (req, res) => {
+  try {
+    const body = aliasCreateSchema.parse(req.body);
+    const db = getDb();
+    const reqNorm = normalizeChave(body.requestedChavePeca);
+    const stNorm = normalizeChave(body.stockChavePeca);
+    const existing = db.prepare(
+      "SELECT id FROM part_key_aliases WHERE requested_chave_peca_norm = ? AND active = 1",
+    ).get(reqNorm) as { id: number } | undefined;
+    if (existing) {
+      res.status(409).json({ error: "Já existe um alias ativo para essa chave solicitada." });
+      return;
+    }
+    const result = db.prepare(`
+      INSERT INTO part_key_aliases
+        (requested_chave_peca, requested_chave_peca_norm, stock_chave_peca, stock_chave_peca_norm, reason, active, created_by_user_id)
+      VALUES (?, ?, ?, ?, ?, 1, ?)
+    `).run(
+      body.requestedChavePeca, reqNorm,
+      body.stockChavePeca, stNorm,
+      body.reason ?? null,
+      (req as unknown as { sessionUser?: { id: number } }).sessionUser?.id ?? null,
+    );
+    const row = db.prepare("SELECT * FROM part_key_aliases WHERE id = ?").get(result.lastInsertRowid);
+    res.status(201).json({ alias: row });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: "Dados inválidos.", details: err.errors });
+      return;
+    }
+    handleError(err, res);
+  }
+});
+
+matchRouter.delete("/part-key-aliases/:id", requireAuth, requireAdmin, (req, res) => {
+  try {
+    const id = idParam(req.params.id);
+    const db = getDb();
+    const row = db.prepare("SELECT id FROM part_key_aliases WHERE id = ?").get(id) as { id: number } | undefined;
+    if (!row) {
+      res.status(404).json({ error: "Alias não encontrado." });
+      return;
+    }
+    db.prepare("UPDATE part_key_aliases SET active = 0, updated_at = datetime('now') WHERE id = ?").run(id);
+    res.json({ ok: true });
   } catch (err) {
     handleError(err, res);
   }

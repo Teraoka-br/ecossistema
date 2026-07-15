@@ -189,6 +189,8 @@ interface AllocResult {
   chaveNorm: string;
   refAllocated: string | null;
   refAllocatedNorm: string | null;
+  /** Chave do estoque usada quando houve resolução via alias (null = chave direta). */
+  aliasStockChaveNorm: string | null;
   resultStatus: "MATCH" | "MATCH_PARCIAL" | "PEDIR_PECA" | "VERIFICAR";
   marginPoints: number;
   agePoints: number;
@@ -204,15 +206,13 @@ interface CaseDecision {
 }
 
 /**
- * Monta estoque (keyed por chavePecaNorm) e um resolver que mapeia
- * PR.chave_peca_norm → chavePecaNorm no estoque, via catálogo de referências.
- *
- * O resolver usa dois saltos:
+ * Monta estoque (keyed por chavePecaNorm) + resolver que mapeia
+ * PR.chave_peca_norm → chavePecaNorm no estoque em dois passos:
  *   1. source_inventory_items: PR.chaveNorm → referencia (PC-...)
- *   2. grupos do estoque: referencia → chavePecaNorm no snapshot/movimentos
+ *   2. índice inverso do estoque: referencia → chavePecaNorm
  *
- * Quando um PR usa um nome diferente do que o estoque conhece para a mesma
- * referência física, o resolver corrige o lookup sem precisar de similaridade.
+ * Também carrega part_key_aliases ativos como resolução adicional,
+ * com prioridade sobre o catálogo.
  */
 function buildRefStock(db: Db): { stock: RefStock; resolver: Map<string, string> } {
   const { groups } = getCurrentOperationalStock(db);
@@ -235,11 +235,12 @@ function buildRefStock(db: Db): { stock: RefStock; resolver: Map<string, string>
     }
   }
 
-  // Catálogo: chave_peca_norm → referencia (de source_inventory_items)
+  const resolver = new Map<string, string>(); // PR chave → chave no estoque
+
+  // Caminho 1: catálogo source_inventory_items (chave → referencia → chave no estoque)
   const catalogRows = db.prepare(
     "SELECT DISTINCT chave_peca_norm, referencia FROM source_inventory_items WHERE chave_peca_norm IS NOT NULL AND referencia IS NOT NULL",
   ).all() as { chave_peca_norm: string; referencia: string }[];
-  const resolver = new Map<string, string>(); // PR chave → chave no estoque
   for (const r of catalogRows) {
     const stockChave = refToChave.get(r.referencia);
     if (stockChave && !resolver.has(r.chave_peca_norm)) {
@@ -247,13 +248,32 @@ function buildRefStock(db: Db): { stock: RefStock; resolver: Map<string, string>
     }
   }
 
+  // Caminho 2: aliases ativos (prioridade — sobrescreve catálogo)
+  let aliasRows: { requested_chave_peca_norm: string; stock_chave_peca_norm: string }[] = [];
+  try {
+    aliasRows = db.prepare(
+      "SELECT requested_chave_peca_norm, stock_chave_peca_norm FROM part_key_aliases WHERE active = 1",
+    ).all() as { requested_chave_peca_norm: string; stock_chave_peca_norm: string }[];
+  } catch { /* tabela pode não existir em banco antigo — silencia */ }
+  for (const a of aliasRows) {
+    resolver.set(a.requested_chave_peca_norm, a.stock_chave_peca_norm);
+  }
+
   return { stock, resolver };
 }
 
-/** Resolve a chave_peca_norm da PR para a chave de busca no estoque. */
-function resolveStockKey(chaveNorm: string | null, resolver: Map<string, string>): string | null {
-  if (!chaveNorm) return null;
-  return resolver.get(chaveNorm) ?? chaveNorm;
+/**
+ * Resolve chave_peca_norm da PR para a chave de busca no estoque.
+ * Retorna [stockKey, aliasUsed]: se aliasUsed=true, o resolver mudou a chave.
+ */
+function resolveStockKey(
+  chaveNorm: string | null,
+  resolver: Map<string, string>,
+): [string | null, boolean] {
+  if (!chaveNorm) return [null, false];
+  const resolved = resolver.get(chaveNorm);
+  if (resolved && resolved !== chaveNorm) return [resolved, true];
+  return [chaveNorm, false];
 }
 
 /**
@@ -272,7 +292,8 @@ function tryFullKit(
   if (parts.some(p => !p.chave_peca_norm)) return null;
 
   // Resolve cada chave da PR para a chave correspondente no estoque
-  const neededKeys = new Set(parts.map(p => resolveStockKey(p.chave_peca_norm!, resolver)!));
+  const resolvedKeys = parts.map(p => resolveStockKey(p.chave_peca_norm!, resolver));
+  const neededKeys = new Set(resolvedKeys.map(([k]) => k!));
   const tempStock: RefStock = new Map();
   for (const key of neededKeys) {
     const inner = workingStock.get(key);
@@ -285,9 +306,10 @@ function tryFullKit(
 
   const allocations: AllocResult[] = [];
   let rank = 1;
-  for (const p of parts) {
-    const stockKey = resolveStockKey(p.chave_peca_norm!, resolver)!;
-    const alloc = allocateOne(tempStock, stockKey);
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    const [stockKey, aliasUsed] = resolvedKeys[i];
+    const alloc = allocateOne(tempStock, stockKey!);
     if (!alloc || alloc.refNorm === "") return null; // kit incompleto — descarta
     allocations.push({
       partRequestId: p.id,
@@ -296,6 +318,7 @@ function tryFullKit(
       chaveNorm: p.chave_peca_norm!,
       refAllocated: alloc.ref || alloc.refNorm,
       refAllocatedNorm: alloc.refNorm,
+      aliasStockChaveNorm: aliasUsed ? stockKey! : null,
       resultStatus: "MATCH",
       ...scoreInfo,
       rank: rank++,
@@ -445,18 +468,20 @@ function executeEngine(
           partRequestId: p.id, caseId: sc.caseRow.id,
           chave: p.chave_peca ?? "", chaveNorm: "",
           refAllocated: null, refAllocatedNorm: null,
+          aliasStockChaveNorm: null,
           resultStatus: "VERIFICAR", marginPoints, agePoints, score, rank: rank++,
         });
         hasAll = false;
         continue;
       }
-      const stockKey = resolveStockKey(p.chave_peca_norm, resolver)!;
-      const alloc = allocateOne(workingStock, stockKey);
+      const [stockKey, aliasUsed] = resolveStockKey(p.chave_peca_norm, resolver);
+      const alloc = stockKey ? allocateOne(workingStock, stockKey) : null;
       if (alloc && alloc.refNorm !== "") {
         allocations.push({
           partRequestId: p.id, caseId: sc.caseRow.id,
           chave: p.chave_peca ?? p.chave_peca_norm, chaveNorm: p.chave_peca_norm,
           refAllocated: alloc.ref || alloc.refNorm, refAllocatedNorm: alloc.refNorm,
+          aliasStockChaveNorm: aliasUsed ? stockKey! : null,
           resultStatus: "MATCH_PARCIAL", marginPoints, agePoints, score, rank: rank++,
         });
         hasPartial = true;
@@ -465,6 +490,7 @@ function executeEngine(
           partRequestId: p.id, caseId: sc.caseRow.id,
           chave: p.chave_peca ?? p.chave_peca_norm, chaveNorm: p.chave_peca_norm,
           refAllocated: null, refAllocatedNorm: null,
+          aliasStockChaveNorm: null,
           resultStatus: "PEDIR_PECA", marginPoints, agePoints, score, rank: rank++,
         });
         hasAll = false;
@@ -502,8 +528,9 @@ function executeEngine(
       INSERT OR REPLACE INTO repair_match_results
         (run_id, repair_case_id, part_request_id, chave_peca, chave_peca_norm,
          allocated_reference, allocated_reference_norm,
-         result_status, allocated_units, margin_points, age_points, score, priority_rank)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+         result_status, allocated_units, margin_points, age_points, score, priority_rank,
+         alias_stock_chave_norm)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
 
     for (const dec of decisions) {
@@ -515,6 +542,7 @@ function executeEngine(
           a.refAllocated, a.refAllocatedNorm,
           a.resultStatus, isAlloc ? 1 : 0,
           a.marginPoints, a.agePoints, a.score, a.rank,
+          a.aliasStockChaveNorm ?? null,
         );
       }
 

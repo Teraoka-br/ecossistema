@@ -21,9 +21,11 @@ import { getCurrentOperationalStock } from "../operational/stock-service.js";
 // Depósitos válidos para MATCH/MATCH_PARCIAL/APTO_REPARO (espelha pós-processamento do motor real)
 const DEPOSITOS_MATCH_VALIDOS = new Set(["AGUARDANDO PECA", "MANUTENCAO INTERNA"]);
 
-function resolveStockKey(chaveNorm: string | null, resolver: Map<string, string>): string | null {
-  if (!chaveNorm) return null;
-  return resolver.get(chaveNorm) ?? chaveNorm;
+function resolveStockKey(chaveNorm: string | null, resolver: Map<string, string>): [string | null, boolean] {
+  if (!chaveNorm) return [null, false];
+  const resolved = resolver.get(chaveNorm);
+  if (resolved && resolved !== chaveNorm) return [resolved, true];
+  return [chaveNorm, false];
 }
 
 interface SimCaseRow {
@@ -110,6 +112,16 @@ function buildRefStock(db: Db): { stock: RefStock; resolver: Map<string, string>
     }
   }
 
+  let aliasRows: { requested_chave_peca_norm: string; stock_chave_peca_norm: string }[] = [];
+  try {
+    aliasRows = db.prepare(
+      "SELECT requested_chave_peca_norm, stock_chave_peca_norm FROM part_key_aliases WHERE active = 1",
+    ).all() as { requested_chave_peca_norm: string; stock_chave_peca_norm: string }[];
+  } catch { /* tabela pode não existir em banco antigo */ }
+  for (const a of aliasRows) {
+    resolver.set(a.requested_chave_peca_norm, a.stock_chave_peca_norm);
+  }
+
   return { stock, resolver };
 }
 
@@ -176,7 +188,8 @@ function simulateCore(
     const parts = sc.caseParts;
     if (parts.some(p => !p.chave_peca_norm)) continue;
 
-    const neededKeys = new Set(parts.map(p => resolveStockKey(p.chave_peca_norm!, resolver)!));
+    const resolvedKeys = parts.map(p => resolveStockKey(p.chave_peca_norm!, resolver));
+    const neededKeys = new Set(resolvedKeys.map(([k]) => k!).filter(Boolean));
     const tempStock: RefStock = new Map();
     for (const k of neededKeys) {
       const inner = workingStock.get(k);
@@ -184,12 +197,15 @@ function simulateCore(
     }
 
     let canFulfill = true;
-    for (const p of parts) {
-      const stockKey = resolveStockKey(p.chave_peca_norm!, resolver)!;
+    for (let i = 0; i < parts.length; i++) {
+      const [stockKey] = resolvedKeys[i];
+      if (!stockKey) { canFulfill = false; break; }
       let found = false;
-      const inner = tempStock.get(stockKey)!;
-      for (const [, entry] of inner) {
-        if (entry.qty >= 1) { entry.qty--; found = true; break; }
+      const inner = tempStock.get(stockKey);
+      if (inner) {
+        for (const [, entry] of inner) {
+          if (entry.qty >= 1) { entry.qty--; found = true; break; }
+        }
       }
       if (!found) { canFulfill = false; break; }
     }
@@ -215,7 +231,8 @@ function simulateCore(
 
     for (const p of sc.caseParts) {
       if (!p.chave_peca_norm) continue; // sem chave → VERIFICAR, ignora para status do caso
-      const allocated = allocateOne(workingStock, resolveStockKey(p.chave_peca_norm, resolver)!);
+      const [stockKey2] = resolveStockKey(p.chave_peca_norm, resolver);
+      const allocated = stockKey2 ? allocateOne(workingStock, stockKey2) : false;
       if (allocated) {
         hasPartial = true;
       } else {
