@@ -19,7 +19,12 @@ import { getCurrentOperationalStock } from "../operational/stock-service.js";
 // ---------------------------------------------------------------------------
 
 // Depósitos válidos para MATCH/MATCH_PARCIAL/APTO_REPARO (espelha pós-processamento do motor real)
-const DEPOSITOS_MATCH_VALIDOS = new Set(["Aguardando peças", "Manutencao interna"]);
+const DEPOSITOS_MATCH_VALIDOS = new Set(["AGUARDANDO PECA", "MANUTENCAO INTERNA"]);
+
+function resolveStockKey(chaveNorm: string | null, resolver: Map<string, string>): string | null {
+  if (!chaveNorm) return null;
+  return resolver.get(chaveNorm) ?? chaveNorm;
+}
 
 interface SimCaseRow {
   id: number;
@@ -76,9 +81,11 @@ export interface SimulateResult {
 // Funções auxiliares (duplicam lógica do orchestrator para manter isolamento)
 // ---------------------------------------------------------------------------
 
-function buildRefStock(db: Db): RefStock {
+function buildRefStock(db: Db): { stock: RefStock; resolver: Map<string, string> } {
   const { groups } = getCurrentOperationalStock(db);
   const stock: RefStock = new Map();
+  const refToChave = new Map<string, string>();
+
   for (const g of groups) {
     if (!g.chavePecaNorm || g.availableQuantity <= 0) continue;
     const refNorm = g.referenciaNorm || "";
@@ -87,8 +94,23 @@ function buildRefStock(db: Db): RefStock {
     const prev = inner.get(refNorm);
     if (prev) { prev.qty += g.availableQuantity; }
     else { inner.set(refNorm, { ref: g.referencia || refNorm, qty: g.availableQuantity }); }
+    if (g.referencia && !refToChave.has(g.referencia)) {
+      refToChave.set(g.referencia, g.chavePecaNorm);
+    }
   }
-  return stock;
+
+  const catalogRows = db.prepare(
+    "SELECT DISTINCT chave_peca_norm, referencia FROM source_inventory_items WHERE chave_peca_norm IS NOT NULL AND referencia IS NOT NULL",
+  ).all() as { chave_peca_norm: string; referencia: string }[];
+  const resolver = new Map<string, string>();
+  for (const r of catalogRows) {
+    const stockChave = refToChave.get(r.referencia);
+    if (stockChave && !resolver.has(r.chave_peca_norm)) {
+      resolver.set(r.chave_peca_norm, stockChave);
+    }
+  }
+
+  return { stock, resolver };
 }
 
 function cloneStock(stock: RefStock): RefStock {
@@ -122,6 +144,7 @@ function simulateCore(
   baseStock: RefStock,
   activeOrderPartIds: Set<number>,
   ruleSet: MatchRuleSet,
+  resolver: Map<string, string>,
 ): Map<number, SimDecision> {
   // Pontuar e filtrar casos com peças abertas
   const scored = cases
@@ -153,7 +176,7 @@ function simulateCore(
     const parts = sc.caseParts;
     if (parts.some(p => !p.chave_peca_norm)) continue;
 
-    const neededKeys = new Set(parts.map(p => p.chave_peca_norm!));
+    const neededKeys = new Set(parts.map(p => resolveStockKey(p.chave_peca_norm!, resolver)!));
     const tempStock: RefStock = new Map();
     for (const k of neededKeys) {
       const inner = workingStock.get(k);
@@ -162,8 +185,9 @@ function simulateCore(
 
     let canFulfill = true;
     for (const p of parts) {
+      const stockKey = resolveStockKey(p.chave_peca_norm!, resolver)!;
       let found = false;
-      const inner = tempStock.get(p.chave_peca_norm!)!;
+      const inner = tempStock.get(stockKey)!;
       for (const [, entry] of inner) {
         if (entry.qty >= 1) { entry.qty--; found = true; break; }
       }
@@ -191,7 +215,7 @@ function simulateCore(
 
     for (const p of sc.caseParts) {
       if (!p.chave_peca_norm) continue; // sem chave → VERIFICAR, ignora para status do caso
-      const allocated = allocateOne(workingStock, p.chave_peca_norm);
+      const allocated = allocateOne(workingStock, resolveStockKey(p.chave_peca_norm, resolver)!);
       if (allocated) {
         hasPartial = true;
       } else {
@@ -304,10 +328,10 @@ export async function simulateMatchRules(
     partsByCase.set(p.repair_case_id, arr);
   }
 
-  const baseStock = buildRefStock(db);
+  const { stock: baseStock, resolver } = buildRefStock(db);
 
   // Simulação com a regra proposta
-  const decisionsA = simulateCore(cases, partsByCase, baseStock, activeOrderPartIds, rule);
+  const decisionsA = simulateCore(cases, partsByCase, baseStock, activeOrderPartIds, rule, resolver);
 
   const vals = [...decisionsA.values()];
   const fullKitsFound = vals.filter(d => d.newStatus === "MATCH").length;
@@ -326,7 +350,7 @@ export async function simulateMatchRules(
 
     if (activeRule) {
       // Simulação com regra ativa (estoque recriado para evitar interferência)
-      const decisionsB = simulateCore(cases, partsByCase, cloneStock(baseStock), activeOrderPartIds, activeRule);
+      const decisionsB = simulateCore(cases, partsByCase, cloneStock(baseStock), activeOrderPartIds, activeRule, resolver);
 
       let changed = 0;
       let fullChanged = 0;

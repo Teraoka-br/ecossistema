@@ -178,7 +178,7 @@ interface PartRow {
   cancelled_at: string | null;
 }
 
-/** Estoque disponível indexado por chave_peca_norm → referencia_norm → qty */
+/** Estoque disponível indexado por (referencia ou chave_peca_norm) → referencia_norm → qty */
 type RefStock = Map<string, Map<string, { ref: string; qty: number }>>;
 
 /** Resultado de alocação in-memory (antes do commit). */
@@ -204,30 +204,56 @@ interface CaseDecision {
 }
 
 /**
- * Monta estoque disponível por (chavePecaNorm → referenciaNorm → qty) a partir do
- * estoque operacional atual (base importada ou snapshot + movimentações − reservas − bloqueios).
+ * Monta estoque (keyed por chavePecaNorm) e um resolver que mapeia
+ * PR.chave_peca_norm → chavePecaNorm no estoque, via catálogo de referências.
  *
- * Não relê stock_movements diretamente para evitar dupla contagem:
- * getCurrentOperationalStock() já representa o saldo líquido disponível.
+ * O resolver usa dois saltos:
+ *   1. source_inventory_items: PR.chaveNorm → referencia (PC-...)
+ *   2. grupos do estoque: referencia → chavePecaNorm no snapshot/movimentos
+ *
+ * Quando um PR usa um nome diferente do que o estoque conhece para a mesma
+ * referência física, o resolver corrige o lookup sem precisar de similaridade.
  */
-function buildRefStock(db: Db): RefStock {
+function buildRefStock(db: Db): { stock: RefStock; resolver: Map<string, string> } {
   const { groups } = getCurrentOperationalStock(db);
-  const refStock: RefStock = new Map();
+  const stock: RefStock = new Map();
+  const refToChave = new Map<string, string>(); // referencia → chavePecaNorm no estoque
 
   for (const g of groups) {
     if (!g.chavePecaNorm || g.availableQuantity <= 0) continue;
     const refNorm = g.referenciaNorm || "";
-    let inner = refStock.get(g.chavePecaNorm);
-    if (!inner) { inner = new Map(); refStock.set(g.chavePecaNorm, inner); }
+    let inner = stock.get(g.chavePecaNorm);
+    if (!inner) { inner = new Map(); stock.set(g.chavePecaNorm, inner); }
     const prev = inner.get(refNorm);
     if (prev) {
       prev.qty += g.availableQuantity;
     } else {
       inner.set(refNorm, { ref: g.referencia || refNorm, qty: g.availableQuantity });
     }
+    if (g.referencia && !refToChave.has(g.referencia)) {
+      refToChave.set(g.referencia, g.chavePecaNorm);
+    }
   }
 
-  return refStock;
+  // Catálogo: chave_peca_norm → referencia (de source_inventory_items)
+  const catalogRows = db.prepare(
+    "SELECT DISTINCT chave_peca_norm, referencia FROM source_inventory_items WHERE chave_peca_norm IS NOT NULL AND referencia IS NOT NULL",
+  ).all() as { chave_peca_norm: string; referencia: string }[];
+  const resolver = new Map<string, string>(); // PR chave → chave no estoque
+  for (const r of catalogRows) {
+    const stockChave = refToChave.get(r.referencia);
+    if (stockChave && !resolver.has(r.chave_peca_norm)) {
+      resolver.set(r.chave_peca_norm, stockChave);
+    }
+  }
+
+  return { stock, resolver };
+}
+
+/** Resolve a chave_peca_norm da PR para a chave de busca no estoque. */
+function resolveStockKey(chaveNorm: string | null, resolver: Map<string, string>): string | null {
+  if (!chaveNorm) return null;
+  return resolver.get(chaveNorm) ?? chaveNorm;
 }
 
 /**
@@ -240,26 +266,28 @@ function tryFullKit(
   parts: PartRow[],
   scoreInfo: { marginPoints: number; agePoints: number; score: number },
   caseRow: CaseRow,
+  resolver: Map<string, string>,
 ): AllocResult[] | null {
   // Kit completo exige que todas as partes tenham chave_peca_norm
   if (parts.some(p => !p.chave_peca_norm)) return null;
 
-  // Clona apenas as chaves necessárias para a simulação
-  const neededChaves = new Set(parts.map(p => p.chave_peca_norm!));
+  // Resolve cada chave da PR para a chave correspondente no estoque
+  const neededKeys = new Set(parts.map(p => resolveStockKey(p.chave_peca_norm!, resolver)!));
   const tempStock: RefStock = new Map();
-  for (const chaveNorm of neededChaves) {
-    const inner = workingStock.get(chaveNorm);
+  for (const key of neededKeys) {
+    const inner = workingStock.get(key);
     if (!inner) {
-      tempStock.set(chaveNorm, new Map());
+      tempStock.set(key, new Map());
     } else {
-      tempStock.set(chaveNorm, new Map(Array.from(inner).map(([k, v]) => [k, { ...v }])));
+      tempStock.set(key, new Map(Array.from(inner).map(([k, v]) => [k, { ...v }])));
     }
   }
 
   const allocations: AllocResult[] = [];
   let rank = 1;
   for (const p of parts) {
-    const alloc = allocateOne(tempStock, p.chave_peca_norm!);
+    const stockKey = resolveStockKey(p.chave_peca_norm!, resolver)!;
+    const alloc = allocateOne(tempStock, stockKey);
     if (!alloc || alloc.refNorm === "") return null; // kit incompleto — descarta
     allocations.push({
       partRequestId: p.id,
@@ -274,9 +302,9 @@ function tryFullKit(
     });
   }
 
-  // Sucesso — aplica a cópia mutada ao workingStock real
-  for (const [chaveNorm, tempInner] of tempStock) {
-    workingStock.set(chaveNorm, tempInner);
+  // Sucesso — aplica a cópia mutada ao workingStock real (keyed by stockKey)
+  for (const [key, tempInner] of tempStock) {
+    workingStock.set(key, tempInner);
   }
   return allocations;
 }
@@ -350,8 +378,8 @@ function executeEngine(
     partsByCase.set(p.repair_case_id, arr);
   }
 
-  // Build REF-aware stock (mutable during simulation)
-  const workingStock = buildRefStock(db);
+  // Build REF-aware stock (mutable during simulation) + resolver de chaves via catálogo
+  const { stock: workingStock, resolver } = buildRefStock(db);
 
   interface ScoredCase {
     caseRow: CaseRow;
@@ -393,7 +421,7 @@ function executeEngine(
   for (const sc of scoredCases) {
     if (sc.caseParts.length === 0) continue;
     const { marginPoints, agePoints, score } = computeScore(ruleSet, sc.caseRow.age_days, sc.margin);
-    const allocations = tryFullKit(workingStock, sc.caseParts, { marginPoints, agePoints, score }, sc.caseRow);
+    const allocations = tryFullKit(workingStock, sc.caseParts, { marginPoints, agePoints, score }, sc.caseRow, resolver);
     if (!allocations) continue;
 
     decisions.push({ caseId: sc.caseRow.id, prevStatus: sc.caseRow.workflow_status, newStatus: "MATCH", parts: allocations });
@@ -422,7 +450,8 @@ function executeEngine(
         hasAll = false;
         continue;
       }
-      const alloc = allocateOne(workingStock, p.chave_peca_norm);
+      const stockKey = resolveStockKey(p.chave_peca_norm, resolver)!;
+      const alloc = allocateOne(workingStock, stockKey);
       if (alloc && alloc.refNorm !== "") {
         allocations.push({
           partRequestId: p.id, caseId: sc.caseRow.id,
@@ -540,7 +569,7 @@ function executeEngine(
        SET workflow_status = 'VERIFICAR', updated_at = datetime('now')
        WHERE workflow_status IN ('MATCH','MATCH_PARCIAL','APTO_REPARO')
          AND deposito_atual IS NOT NULL
-         AND deposito_atual NOT IN ('Aguardando peças','Manutencao interna')`,
+         AND deposito_atual NOT IN ('AGUARDANDO PECA','MANUTENCAO INTERNA')`,
     ).run();
     casesChanged += Number(depositoResult.changes);
 
