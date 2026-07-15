@@ -310,7 +310,7 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
   const showSeparatePartial = ws === "MATCH_PARCIAL";
   const showAddToPurchase = ws === "PEDIR_PECA" || ws === "MATCH_PARCIAL";
   const showDirectTech = ws === "APTO_REPARO";
-  const showRedirectTech = ws === "DIRECIONADO_TECNICO";
+  const showRedirectTech = ["DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "RETORNO_TECNICO", "TRIAGEM_FINAL"].includes(ws);
   const showStartRepair = ws === "DIRECIONADO_TECNICO";
   const showCompleteRepair = ws === "EM_REPARO";
 
@@ -823,7 +823,7 @@ const ACTION_META: Record<ConfirmAction, { title: string; warn: string; showNote
   CANCEL_RESERVATION: { title: "Cancelar reserva", warn: "A reserva será liberada e o estoque ficará disponível novamente." },
   ADD_TO_PURCHASE: { title: "Incluir em compra", warn: "As peças sem saldo serão incluídas em uma solicitação de compra." },
   DIRECT_TO_TECHNICIAN: { title: "Direcionar ao técnico", warn: "O aparelho ficará aguardando início de reparo.", showNotes: true },
-  REDIRECT_TECHNICIAN: { title: "Alterar técnico", warn: "O técnico responsável será substituído. O registro fica no histórico.", showNotes: true },
+  REDIRECT_TECHNICIAN: { title: "Alterar técnico", warn: "O técnico responsável será substituído. O registro fica no histórico.", showNotes: true, notesRequired: true },
   START_REPAIR: { title: "Iniciar reparo", warn: "O status mudará para EM REPARO. As peças permanecerão reservadas." },
   COMPLETE_REPAIR: { title: "Concluir reparo", warn: "As peças reservadas serão consumidas do estoque. Esta ação não pode ser desfeita.", showNotes: true },
   CLOSE_CASE: { title: "Finalizar card", warn: "O card será marcado como CONCLUÍDO e removido da fila ativa.", showNotes: true, notesRequired: true },

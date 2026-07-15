@@ -176,8 +176,11 @@ function AuthenticatedShell() {
                   <NavLink to="/admin/dados" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                     <Database size={15} /> Dados
                   </NavLink>
+                  <NavLink to="/admin/usuarios" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Users size={15} /> Usuários
+                  </NavLink>
                   <NavLink to="/admin/pessoas" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Users size={15} /> Pessoas
+                    <Users size={15} /> Pessoas / Técnicos
                   </NavLink>
                   <NavLink to="/admin/regras-match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                     <Sliders size={15} /> Regras do Match
