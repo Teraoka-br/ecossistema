@@ -790,20 +790,44 @@ export function FilaReparos() {
   const selectedCount = selectedMap.size;
   const canExportAll  = EXPORTABLE_FILTERS.includes(filter) && total > 0 && !loading;
 
-  const fc = queueSummary?.filterCounts ?? {};
+  // Calcula contagens por filtro — usa filterCounts do servidor ou deriva do summary como fallback
+  const sumByStatuses = (statuses: string[]) =>
+    statuses.reduce((acc, s) => acc + ((queueSummary?.summary[s] ?? 0)), 0);
+  const fc: Record<string, number> = queueSummary?.filterCounts ?? (queueSummary ? {
+    DO_NOW:          sumByStatuses(["MATCH","APTO_REPARO","MATCH_PARCIAL","VERIFICAR"]),
+    MATCH:           sumByStatuses(["MATCH"]),
+    MATCH_PARCIAL:   sumByStatuses(["MATCH_PARCIAL"]),
+    AGUARDANDO_PECAS:sumByStatuses(["PEDIR_PECA","AGUARDANDO_RECEBIMENTO"]),
+    APTO_REPARO:     sumByStatuses(["APTO_REPARO"]),
+    EM_ANALISE:      sumByStatuses(["EM_ANALISE","EM_SEPARACAO"]),
+    VERIFICAR:       sumByStatuses(["VERIFICAR"]),
+    FINALIZADOS:     sumByStatuses(["CONCLUIDO","VENDA_ESTADO","CANCELADO"]),
+    TODOS:           kpiTotal,
+  } : {});
 
   type FilterCardDef = { f: QueueFilter; label: string; sub: string; color?: string; borderColor?: string };
   const FILTER_CARDS: FilterCardDef[] = [
-    { f: "DO_NOW",          label: "Fazer agora",      sub: "prioritários",        color: "var(--warn-text)",  borderColor: "rgba(245,158,11,0.35)" },
-    { f: "MATCH",           label: "Match completo",   sub: "prontos p/ separar",  color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.35)" },
-    { f: "MATCH_PARCIAL",   label: "Match parcial",    sub: "incompletos",         color: "var(--warn-text)",  borderColor: "rgba(245,158,11,0.25)" },
-    { f: "AGUARDANDO_PECAS",label: "Aguardando peças", sub: "em compra",           color: "var(--text-muted)", borderColor: undefined },
-    { f: "APTO_REPARO",     label: "Apto p/ reparo",   sub: "para direcionar",     color: "var(--accent)",     borderColor: "rgba(124,58,237,0.35)" },
-    { f: "EM_ANALISE",      label: "Em análise",       sub: "em separação",        color: "var(--text-muted)", borderColor: undefined },
-    { f: "VERIFICAR",       label: "Verificar",        sub: "precisam atenção",    color: "var(--err-text)",   borderColor: "rgba(239,68,68,0.35)" },
-    { f: "FINALIZADOS",     label: "Finalizados",      sub: "concluídos",          color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.2)" },
-    { f: "TODOS",           label: "Todos",            sub: "aparelhos",           color: "var(--text-muted)", borderColor: undefined },
+    { f: "TODOS",           label: "Total",            sub: "aparelhos",           color: undefined,            borderColor: undefined },
+    { f: "DO_NOW",          label: "Fazer agora",      sub: "prioritários",        color: "var(--warn-text)",   borderColor: "rgba(245,158,11,0.35)" },
+    { f: "MATCH",           label: "Match completo",   sub: "prontos p/ separar",  color: "var(--ok-text)",     borderColor: "rgba(16,185,129,0.35)" },
+    { f: "MATCH_PARCIAL",   label: "Match parcial",    sub: "incompletos",         color: "var(--warn-text)",   borderColor: "rgba(245,158,11,0.25)" },
+    { f: "AGUARDANDO_PECAS",label: "Aguard. peças",    sub: "em compra",           color: "var(--text-muted)",  borderColor: undefined },
+    { f: "APTO_REPARO",     label: "Apto p/ reparo",   sub: "para direcionar",     color: "var(--accent)",      borderColor: "rgba(124,58,237,0.35)" },
+    { f: "EM_ANALISE",      label: "Em análise",       sub: "em separação",        color: "var(--text-muted)",  borderColor: undefined },
+    { f: "VERIFICAR",       label: "Verificar",        sub: "precisam atenção",    color: "var(--err-text)",    borderColor: "rgba(239,68,68,0.35)" },
+    { f: "FINALIZADOS",     label: "Finalizados",      sub: "concluídos",          color: "var(--ok-text)",     borderColor: "rgba(16,185,129,0.2)" },
   ];
+
+  // Cards grandes: só os que têm contagem > 0, mais o ativo atual e TODOS (sempre)
+  const bigCards = FILTER_CARDS.filter(({ f }) => {
+    const count = f === "TODOS" ? kpiTotal : (fc[f] ?? 0);
+    return count > 0 || f === "TODOS" || f === filter;
+  });
+  // Chips compactos: filtros zerados que não estão nos bigCards
+  const smallChips = FILTER_CARDS.filter(({ f }) => {
+    const count = f === "TODOS" ? kpiTotal : (fc[f] ?? 0);
+    return count === 0 && f !== "TODOS" && f !== filter;
+  });
 
   return (
     <div className="page-container">
@@ -827,12 +851,11 @@ export function FilaReparos() {
         </div>
       </div>
 
-      {/* Filter cards — cada card é o filtro, no estilo kpi-card */}
+      {/* KPI cards clicáveis — só aparecem os com contagem > 0 */}
       <div className="kpi-bar">
-        {FILTER_CARDS.map(({ f, label, sub, color, borderColor }) => {
+        {bigCards.map(({ f, label, sub, color, borderColor }) => {
           const count = f === "TODOS" ? kpiTotal : (fc[f] ?? 0);
           const isActive = filter === f;
-          const hasItems = count > 0;
           return (
             <button
               key={f}
@@ -840,16 +863,15 @@ export function FilaReparos() {
               onClick={() => { setFilter(f); setPage(1); clearSelection(); }}
               style={{
                 cursor: "pointer", font: "inherit", textAlign: "left",
-                "--kpi-color": color ?? "var(--accent)",
+                "--kpi-color": color ?? "linear-gradient(90deg, var(--accent), #6366f1)",
                 borderColor: isActive ? (borderColor ?? "rgba(124,58,237,0.5)") : undefined,
-                boxShadow: isActive ? `0 0 0 1px ${borderColor ?? "rgba(124,58,237,0.35)"}, 0 8px 28px rgba(0,0,0,0.55)` : undefined,
-                opacity: hasItems ? 1 : 0.38,
+                boxShadow: isActive
+                  ? `0 0 0 1px ${borderColor ?? "rgba(124,58,237,0.35)"}, 0 8px 28px rgba(0,0,0,0.55)`
+                  : undefined,
               } as React.CSSProperties}
             >
               <div className="kpi-label" style={{ color: color ?? "var(--text-muted)" }}>{label}</div>
-              <div className="kpi-value" style={{ color: isActive || hasItems ? (color ?? "var(--text)") : "var(--text-muted)" }}>
-                {count}
-              </div>
+              <div className="kpi-value" style={{ color: color ?? "var(--text)" }}>{count}</div>
               <div className="kpi-sub">{sub}</div>
             </button>
           );
@@ -865,6 +887,21 @@ export function FilaReparos() {
           </div>
         )}
       </div>
+
+      {/* Chips secundários — filtros zerados (navegação) */}
+      {smallChips.length > 0 && (
+        <div className="filter-bar" style={{ marginBottom: "0.5rem" }}>
+          {smallChips.map(({ f, label }) => (
+            <button
+              key={f}
+              className={`filter-chip${filter === f ? " active" : ""}`}
+              onClick={() => { setFilter(f); setPage(1); clearSelection(); }}
+            >
+              {label} <span style={{ opacity: 0.45, marginLeft: "0.2rem" }}>0</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Busca + exportar todos */}
       <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.875rem", alignItems: "center" }}>
