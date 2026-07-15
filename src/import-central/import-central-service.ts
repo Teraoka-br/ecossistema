@@ -1211,7 +1211,7 @@ export async function confirmRelSeriaisSaldo(
       key:  r.imeiNorm,
       hash: rowHash(r.descricao, r.codComercial, r.fabricante, r.disponivel, r.deposito, r.filial),
       cols: {
-        rel_seriais_import_id: importId,
+        rel_seriais_saldo_import_id: importId,
         serial:           r.serial,
         descricao:        r.descricao,
         codigo_comercial: r.codComercial,
@@ -1222,10 +1222,11 @@ export async function confirmRelSeriaisSaldo(
       },
     }));
 
+    // "Com Saldo" grava em tabela separada — nunca sobrescrito pelo "Todos"
     syncResult = syncCurrentTable(db, {
-      table:       "rel_seriais_current",
+      table:       "rel_seriais_saldo_current",
       keyCol:      "imei_norm",
-      importIdCol: "rel_seriais_import_id",
+      importIdCol: "rel_seriais_saldo_import_id",
       rows:        syncRows,
     });
 

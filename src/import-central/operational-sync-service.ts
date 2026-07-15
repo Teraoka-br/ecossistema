@@ -124,9 +124,26 @@ export function applyHisToRepairCases(db: Db, _importId?: number): HisSyncResult
 // ---------------------------------------------------------------------------
 
 export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSeriaisSyncResult {
+  // "Com Saldo" (rel_seriais_saldo_current) tem prioridade sobre "Todos" (rel_seriais_current)
+  // para deposito_atual e filial_atual. Demais campos vêm do "Todos" como fallback.
   const rows = db.prepare(
-    `SELECT imei_norm, serial, deposito_atual, filial_atual, disponivel, fabricante, descricao
-     FROM rel_seriais_current`,
+    `SELECT
+       COALESCE(c.imei_norm, s.imei_norm) AS imei_norm,
+       COALESCE(c.serial, s.serial)       AS serial,
+       COALESCE(s.deposito_atual, c.deposito_atual) AS deposito_atual,
+       COALESCE(s.filial_atual, c.filial_atual)     AS filial_atual,
+       COALESCE(c.disponivel, s.disponivel)         AS disponivel,
+       COALESCE(c.fabricante, s.fabricante)         AS fabricante,
+       COALESCE(c.descricao, s.descricao)           AS descricao
+     FROM rel_seriais_current c
+     LEFT JOIN rel_seriais_saldo_current s ON s.imei_norm = c.imei_norm
+     UNION
+     SELECT
+       s.imei_norm, s.serial,
+       s.deposito_atual, s.filial_atual,
+       s.disponivel, s.fabricante, s.descricao
+     FROM rel_seriais_saldo_current s
+     WHERE s.imei_norm NOT IN (SELECT imei_norm FROM rel_seriais_current WHERE imei_norm IS NOT NULL)`,
   ).all() as {
     imei_norm: string | null;
     serial: string | null;
