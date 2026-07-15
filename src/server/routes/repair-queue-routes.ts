@@ -26,6 +26,36 @@ import { getCurrentOperationalStock } from "../../operational/stock-service.js";
 
 export const repairQueueRouter = Router();
 
+// ─── Stats do técnico logado (dashboard home) ────────────────────────────
+
+repairQueueRouter.get("/fila-reparos/minha-fila/stats", requireAuth, (req, res) => {
+  const db = getDb();
+  const userId = (req as Request).sessionUser!.id;
+  const staff = getStaffByUserId(db, userId);
+  if (!staff) { res.json({ linked: false, staffName: null, current: 0, completed: 0 }); return; }
+
+  // default: from = início do mês atual, to = hoje (inclusive, até meia-noite amanhã)
+  const today = new Date();
+  const defaultFrom = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`;
+  const defaultTo   = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const from = (typeof req.query.from === "string" && req.query.from) ? req.query.from : defaultFrom;
+  const to   = (typeof req.query.to   === "string" && req.query.to)   ? req.query.to   : defaultTo;
+
+  const current = (db.prepare(`
+    SELECT COUNT(*) AS c FROM repair_cases
+    WHERE directed_technician_id = ?
+      AND workflow_status IN ('DIRECIONADO_TECNICO','EM_REPARO','REPARO_EXECUTADO','TRIAGEM_FINAL','RETORNO_TECNICO')
+  `).get(staff.id) as { c: number }).c;
+
+  const completed = (db.prepare(`
+    SELECT COUNT(*) AS c FROM repair_cases
+    WHERE directed_technician_id = ?
+      AND repair_completed_at >= ? AND repair_completed_at <= ? || 'T23:59:59'
+  `).get(staff.id, from, to) as { c: number }).c;
+
+  res.json({ linked: true, staffName: staff.name, current, completed });
+});
+
 // ─── Fila do técnico logado ───────────────────────────────────────────────
 
 repairQueueRouter.get("/fila-reparos/minha-fila", requireAuth, (req, res) => {
@@ -199,7 +229,26 @@ repairQueueRouter.get("/fila-reparos/summary", requireAuth, (_req, res) => {
   const priorityCount = (
     db.prepare("SELECT COUNT(*) AS c FROM repair_cases WHERE manual_priority_active = 1").get() as { c: number }
   ).c;
-  res.json({ summary, total, priorityCount });
+
+  const FILTER_STATUSES: Record<string, string[] | null> = {
+    DO_NOW:         ["MATCH", "APTO_REPARO", "MATCH_PARCIAL", "VERIFICAR"],
+    MATCH:          ["MATCH"],
+    MATCH_PARCIAL:  ["MATCH_PARCIAL"],
+    AGUARDANDO_PECAS: ["PEDIR_PECA", "AGUARDANDO_RECEBIMENTO"],
+    APTO_REPARO:    ["APTO_REPARO"],
+    EM_ANALISE:     ["EM_ANALISE", "EM_SEPARACAO"],
+    VERIFICAR:      ["VERIFICAR"],
+    FINALIZADOS:    ["CONCLUIDO", "VENDA_ESTADO", "CANCELADO"],
+    TODOS:          null,
+  };
+  const filterCounts: Record<string, number> = {};
+  for (const [f, statuses] of Object.entries(FILTER_STATUSES)) {
+    filterCounts[f] = statuses === null
+      ? total
+      : statuses.reduce((acc, s) => acc + (summary[s] ?? 0), 0);
+  }
+
+  res.json({ summary, total, priorityCount, filterCounts });
 });
 
 // ─── Drawer do caso ───────────────────────────────────────────────────────

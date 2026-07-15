@@ -65,12 +65,6 @@ const FILTER_LABELS: Record<QueueFilter, string> = {
   TODOS: "Todos",
 };
 
-const FILTER_ICONS: Partial<Record<QueueFilter, React.ReactNode>> = {
-  DO_NOW: <Star size={11} />,
-  MATCH: <CheckCircle2 size={11} />,
-  VERIFICAR: <AlertTriangle size={11} />,
-  FINALIZADOS: <CheckCircle2 size={11} />,
-};
 
 function statusMeta(s: string): { label: string; color: string; bg: string; icon: React.ReactNode } {
   switch (s) {
@@ -571,6 +565,7 @@ interface QueueSummary {
   summary: Record<string, number>;
   total: number;
   priorityCount: number;
+  filterCounts: Record<string, number>;
 }
 
 // Filtros que faz sentido exportar IMEIs (têm aparelhos reais com IMEI)
@@ -790,12 +785,25 @@ export function FilaReparos() {
   }
 
   const totalPages = Math.ceil(total / LIMIT);
-  const kpiMatch    = queueSummary?.summary["MATCH"] ?? 0;
-  const kpiVerif    = queueSummary?.summary["VERIFICAR"] ?? 0;
   const kpiPriority = queueSummary?.priorityCount ?? 0;
   const kpiTotal    = queueSummary?.total ?? total;
   const selectedCount = selectedMap.size;
   const canExportAll  = EXPORTABLE_FILTERS.includes(filter) && total > 0 && !loading;
+
+  const fc = queueSummary?.filterCounts ?? {};
+
+  type FilterCardDef = { f: QueueFilter; label: string; sub: string; color?: string; borderColor?: string };
+  const FILTER_CARDS: FilterCardDef[] = [
+    { f: "DO_NOW",          label: "Fazer agora",      sub: "prioritários",        color: "var(--warn-text)",  borderColor: "rgba(245,158,11,0.35)" },
+    { f: "MATCH",           label: "Match completo",   sub: "prontos p/ separar",  color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.35)" },
+    { f: "MATCH_PARCIAL",   label: "Match parcial",    sub: "incompletos",         color: "var(--warn-text)",  borderColor: "rgba(245,158,11,0.25)" },
+    { f: "AGUARDANDO_PECAS",label: "Aguardando peças", sub: "em compra",           color: "var(--text-muted)", borderColor: undefined },
+    { f: "APTO_REPARO",     label: "Apto p/ reparo",   sub: "para direcionar",     color: "var(--accent)",     borderColor: "rgba(124,58,237,0.35)" },
+    { f: "EM_ANALISE",      label: "Em análise",       sub: "em separação",        color: "var(--text-muted)", borderColor: undefined },
+    { f: "VERIFICAR",       label: "Verificar",        sub: "precisam atenção",    color: "var(--err-text)",   borderColor: "rgba(239,68,68,0.35)" },
+    { f: "FINALIZADOS",     label: "Finalizados",      sub: "concluídos",          color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.2)" },
+    { f: "TODOS",           label: "Todos",            sub: "aparelhos",           color: "var(--text-muted)", borderColor: undefined },
+  ];
 
   return (
     <div className="page-container">
@@ -819,79 +827,77 @@ export function FilaReparos() {
         </div>
       </div>
 
-      {/* KPI bar */}
-      {!loading && kpiTotal > 0 && (
-        <div className="kpi-bar">
-          <div className="kpi-card">
-            <div className="kpi-label">Total</div>
-            <div className="kpi-value">{kpiTotal}</div>
-            <div className="kpi-sub">aparelhos</div>
-          </div>
-          {kpiMatch > 0 && (
-            <div className="kpi-card" style={{ borderColor: "rgba(16,185,129,0.3)" }}>
-              <div className="kpi-label" style={{ color: "var(--ok-text)" }}>Match completo</div>
-              <div className="kpi-value" style={{ color: "var(--ok-text)" }}>{kpiMatch}</div>
-              <div className="kpi-sub">prontos para separar</div>
-            </div>
-          )}
-          {kpiVerif > 0 && (
-            <div className="kpi-card" style={{ borderColor: "rgba(239,68,68,0.3)" }}>
-              <div className="kpi-label" style={{ color: "var(--err-text)" }}>Verificar</div>
-              <div className="kpi-value" style={{ color: "var(--err-text)" }}>{kpiVerif}</div>
-              <div className="kpi-sub">precisam atenção</div>
-            </div>
-          )}
-          {kpiPriority > 0 && (
-            <div className="kpi-card" style={{ borderColor: "rgba(245,158,11,0.3)" }}>
-              <div className="kpi-label" style={{ color: "var(--warn-text)" }}>
-                <Star size={10} style={{ display: "inline", marginRight: 3 }} fill="currentColor" />
-                Prioritários
-              </div>
-              <div className="kpi-value" style={{ color: "var(--warn-text)" }}>{kpiPriority}</div>
-              <div className="kpi-sub">prioridade manual</div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Busca */}
-      <div className="search-bar" style={{ marginBottom: "0.875rem" }}>
-        <input
-          type="search"
-          placeholder="Buscar por IMEI, OS, marca, modelo, peça, depósito…"
-          value={searchInput}
-          onChange={e => setSearchInput(e.target.value)}
-        />
-      </div>
-
-      {/* Filtros + botão exportar todos */}
-      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.625rem", flexWrap: "wrap" }}>
-        <div className="filter-bar" style={{ margin: 0, flex: 1 }}>
-          {(Object.keys(FILTER_LABELS) as QueueFilter[]).map((f) => (
+      {/* Filter cards — cada card é o filtro */}
+      <div style={{
+        display: "flex", gap: "0.5rem", flexWrap: "wrap",
+        marginBottom: "0.875rem",
+      }}>
+        {FILTER_CARDS.map(({ f, label, sub, color, borderColor }) => {
+          const count = f === "TODOS" ? kpiTotal : (fc[f] ?? 0);
+          const isActive = filter === f;
+          const hasItems = count > 0;
+          return (
             <button
               key={f}
-              className={`filter-chip${filter === f ? " active" : ""}`}
               onClick={() => { setFilter(f); setPage(1); clearSelection(); }}
+              style={{
+                cursor: "pointer", font: "inherit", textAlign: "left",
+                padding: "0.55rem 0.85rem",
+                background: isActive ? (borderColor ? `rgba(${borderColor.replace(/rgba?\(|\)/g, "").split(",").slice(0,3).join(",")},0.18)` : "var(--elevated)") : "var(--surface)",
+                border: `1px solid ${isActive ? (borderColor ?? "var(--accent)") : (hasItems && borderColor ? borderColor : "var(--border)")}`,
+                borderRadius: "var(--r-md)",
+                opacity: hasItems ? 1 : 0.45,
+                boxShadow: isActive ? `0 0 0 1px ${borderColor ?? "var(--accent)"}` : undefined,
+                transition: "all 0.15s",
+                minWidth: 90,
+              }}
             >
-              {FILTER_ICONS[f]}
-              {FILTER_LABELS[f]}
+              <div style={{ fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.04em", color: hasItems ? (color ?? "var(--text-muted)") : "var(--text-muted)", marginBottom: "0.2rem", textTransform: "uppercase" }}>
+                {label}
+              </div>
+              <div style={{ fontSize: "1.25rem", fontWeight: 800, lineHeight: 1, color: isActive ? (color ?? "var(--text)") : (hasItems ? (color ?? "var(--text)") : "var(--text-muted)"), fontVariantNumeric: "tabular-nums" }}>
+                {count}
+              </div>
+              <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", marginTop: "0.15rem" }}>{sub}</div>
             </button>
-          ))}
-        </div>
+          );
+        })}
 
-        {/* Exportar todos os IMEIs da aba atual */}
+        {kpiPriority > 0 && (
+          <div style={{
+            padding: "0.55rem 0.85rem",
+            background: "var(--surface)", border: "1px solid rgba(245,158,11,0.25)",
+            borderRadius: "var(--r-md)", minWidth: 90,
+            display: "flex", flexDirection: "column",
+          }}>
+            <div style={{ fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.04em", color: "var(--warn-text)", marginBottom: "0.2rem", textTransform: "uppercase", display: "flex", alignItems: "center", gap: "0.2rem" }}>
+              <Star size={9} fill="currentColor" /> Prioritários
+            </div>
+            <div style={{ fontSize: "1.25rem", fontWeight: 800, lineHeight: 1, color: "var(--warn-text)", fontVariantNumeric: "tabular-nums" }}>{kpiPriority}</div>
+            <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", marginTop: "0.15rem" }}>prioridade manual</div>
+          </div>
+        )}
+      </div>
+
+      {/* Busca + exportar todos */}
+      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.875rem", alignItems: "center" }}>
+        <div className="search-bar" style={{ marginBottom: 0, flex: 1 }}>
+          <input
+            type="search"
+            placeholder="Buscar por IMEI, OS, marca, modelo, peça, depósito…"
+            value={searchInput}
+            onChange={e => setSearchInput(e.target.value)}
+          />
+        </div>
         {canExportAll && (
           <button
             className="btn btn-primary btn-sm"
             style={{ flexShrink: 0, gap: "0.35rem", whiteSpace: "nowrap" }}
             onClick={() => void exportAllImeis()}
             disabled={exportingAll}
-            title={`Exportar todos os ${total} IMEIs desta aba`}
+            title={`Exportar todos os ${total} IMEIs deste filtro`}
           >
-            {exportingAll
-              ? <Loader2 size={12} className="spin" />
-              : <Download size={12} />
-            }
+            {exportingAll ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
             {exportFeedback ?? `Exportar ${total} IMEIs`}
           </button>
         )}

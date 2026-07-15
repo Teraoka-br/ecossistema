@@ -26,6 +26,7 @@ import { FilaReparos } from "./pages/FilaReparos.js";
 import { AdminMatchRules } from "./pages/AdminMatchRules.js";
 import { AdminDados } from "./pages/AdminDados.js";
 import { TecnicoFila } from "./pages/TecnicoFila.js";
+import { TecnicoHome } from "./pages/TecnicoHome.js";
 import { AdminDashboards } from "./pages/AdminDashboards.js";
 import { Referencias } from "./pages/Referencias.js";
 
@@ -131,6 +132,9 @@ function AuthenticatedShell() {
           {isTechnician ? (
             <div className="sidebar-section">
               <div className="sidebar-label">Meu trabalho</div>
+              <NavLink to="/inicio" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <LayoutDashboard size={15} /> Início
+              </NavLink>
               <NavLink to="/minha-fila" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                 <Wrench size={15} /> Minha fila
               </NavLink>
@@ -195,7 +199,8 @@ function AuthenticatedShell() {
 
         <main className="main-content">
           <Routes>
-            <Route path="/" element={<Navigate to={isTechnician ? "/minha-fila" : "/fila-reparos"} replace />} />
+            <Route path="/" element={<Navigate to={isTechnician ? "/inicio" : "/fila-reparos"} replace />} />
+            <Route path="/inicio" element={<TecnicoHome />} />
             <Route path="/minha-fila" element={<TecnicoFila />} />
             <Route path="/fila-reparos" element={<FilaReparos />} />
             <Route path="/analise" element={<Analise />} />
@@ -218,7 +223,7 @@ function AuthenticatedShell() {
             <Route path="/admin/dados" element={<AdminDados />} />
             <Route path="/admin/dashboards" element={<AdminDashboards />} />
             <Route path="/admin/regras-match" element={<AdminMatchRules />} />
-            <Route path="*" element={<Navigate to={isTechnician ? "/minha-fila" : "/fila-reparos"} replace />} />
+            <Route path="*" element={<Navigate to={isTechnician ? "/inicio" : "/fila-reparos"} replace />} />
           </Routes>
         </main>
       </div>
@@ -243,7 +248,7 @@ function AppShell() {
           !setupDone
             ? <Navigate to="/setup" replace />
             : user
-              ? <Navigate to="/fila-reparos" replace />
+              ? <Navigate to={user.role === "TECHNICIAN" ? "/inicio" : "/fila-reparos"} replace />
               : <Login />
         }
       />
