@@ -827,11 +827,8 @@ export function FilaReparos() {
         </div>
       </div>
 
-      {/* Filter cards — cada card é o filtro */}
-      <div style={{
-        display: "flex", gap: "0.5rem", flexWrap: "wrap",
-        marginBottom: "0.875rem",
-      }}>
+      {/* Filter cards — cada card é o filtro, no estilo kpi-card */}
+      <div className="kpi-bar">
         {FILTER_CARDS.map(({ f, label, sub, color, borderColor }) => {
           const count = f === "TODOS" ? kpiTotal : (fc[f] ?? 0);
           const isActive = filter === f;
@@ -839,42 +836,32 @@ export function FilaReparos() {
           return (
             <button
               key={f}
+              className="kpi-card"
               onClick={() => { setFilter(f); setPage(1); clearSelection(); }}
               style={{
                 cursor: "pointer", font: "inherit", textAlign: "left",
-                padding: "0.55rem 0.85rem",
-                background: isActive ? (borderColor ? `rgba(${borderColor.replace(/rgba?\(|\)/g, "").split(",").slice(0,3).join(",")},0.18)` : "var(--elevated)") : "var(--surface)",
-                border: `1px solid ${isActive ? (borderColor ?? "var(--accent)") : (hasItems && borderColor ? borderColor : "var(--border)")}`,
-                borderRadius: "var(--r-md)",
-                opacity: hasItems ? 1 : 0.45,
-                boxShadow: isActive ? `0 0 0 1px ${borderColor ?? "var(--accent)"}` : undefined,
-                transition: "all 0.15s",
-                minWidth: 90,
-              }}
+                "--kpi-color": color ?? "var(--accent)",
+                borderColor: isActive ? (borderColor ?? "rgba(124,58,237,0.5)") : undefined,
+                boxShadow: isActive ? `0 0 0 1px ${borderColor ?? "rgba(124,58,237,0.35)"}, 0 8px 28px rgba(0,0,0,0.55)` : undefined,
+                opacity: hasItems ? 1 : 0.38,
+              } as React.CSSProperties}
             >
-              <div style={{ fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.04em", color: hasItems ? (color ?? "var(--text-muted)") : "var(--text-muted)", marginBottom: "0.2rem", textTransform: "uppercase" }}>
-                {label}
-              </div>
-              <div style={{ fontSize: "1.25rem", fontWeight: 800, lineHeight: 1, color: isActive ? (color ?? "var(--text)") : (hasItems ? (color ?? "var(--text)") : "var(--text-muted)"), fontVariantNumeric: "tabular-nums" }}>
+              <div className="kpi-label" style={{ color: color ?? "var(--text-muted)" }}>{label}</div>
+              <div className="kpi-value" style={{ color: isActive || hasItems ? (color ?? "var(--text)") : "var(--text-muted)" }}>
                 {count}
               </div>
-              <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", marginTop: "0.15rem" }}>{sub}</div>
+              <div className="kpi-sub">{sub}</div>
             </button>
           );
         })}
 
         {kpiPriority > 0 && (
-          <div style={{
-            padding: "0.55rem 0.85rem",
-            background: "var(--surface)", border: "1px solid rgba(245,158,11,0.25)",
-            borderRadius: "var(--r-md)", minWidth: 90,
-            display: "flex", flexDirection: "column",
-          }}>
-            <div style={{ fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.04em", color: "var(--warn-text)", marginBottom: "0.2rem", textTransform: "uppercase", display: "flex", alignItems: "center", gap: "0.2rem" }}>
+          <div className="kpi-card" style={{ "--kpi-color": "var(--warn-text)" } as React.CSSProperties}>
+            <div className="kpi-label" style={{ color: "var(--warn-text)", display: "flex", alignItems: "center", gap: "0.3rem" }}>
               <Star size={9} fill="currentColor" /> Prioritários
             </div>
-            <div style={{ fontSize: "1.25rem", fontWeight: 800, lineHeight: 1, color: "var(--warn-text)", fontVariantNumeric: "tabular-nums" }}>{kpiPriority}</div>
-            <div style={{ fontSize: "0.65rem", color: "var(--text-muted)", marginTop: "0.15rem" }}>prioridade manual</div>
+            <div className="kpi-value" style={{ color: "var(--warn-text)" }}>{kpiPriority}</div>
+            <div className="kpi-sub">prioridade manual</div>
           </div>
         )}
       </div>
