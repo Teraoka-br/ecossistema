@@ -1,21 +1,30 @@
 /**
- * Orquestrador do motor de match para repair_cases.
+ * Orquestrador do motor de match — camada de PERSISTÊNCIA.
+ *
+ * A decisão vive exclusivamente em calculateMatch (função pura). Este módulo:
+ *   1. carrega os dados (engine-loader);
+ *   2. chama calculateMatch;
+ *   3. persiste os resultados de forma transacional e idempotente;
+ *   4. atualiza part_requests/repair_cases preservando estados protegidos;
+ *   5. registra a regra/versão que gerou cada resultado.
+ *
+ * O motor NUNCA cria reservas, movimentações ou pedidos — apenas sinaliza.
  *
  * requestMatchRecompute: registra uma solicitação na fila persistente.
- * processPendingRecompute: processa a próxima solicitação pendente.
- * runRepairMatchEngine: executa o motor em duas passagens.
- *
- * A transação operacional que origina a solicitação deve terminar ANTES
- * de chamar requestMatchRecompute. O motor é idempotente e não altera
- * reservas existentes — apenas atualiza workflow_status e repair_match_results.
+ * processPendingRecompute: consolida as solicitações pendentes em uma execução.
  */
 
 import type { Db } from "../db/database.js";
-import { getActiveRuleSet, computeScore, type MatchRuleSet } from "./match-rule-service.js";
-import { getCurrentOperationalStock } from "../operational/stock-service.js";
+import { calculateMatch, type CaseDecision } from "./calculate-match.js";
+import {
+  loadActiveRuleStrict,
+  loadEngineInput,
+  MatchRuleStateError,
+  type LoadedEngineInput,
+} from "./engine-loader.js";
 
 // ---------------------------------------------------------------------------
-// Queue helpers
+// Fila de recálculo
 // ---------------------------------------------------------------------------
 
 export function requestMatchRecompute(
@@ -58,15 +67,12 @@ export function getEngineState(db: Db): {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Engine execution
-// ---------------------------------------------------------------------------
-
 export interface RepairMatchRunResult {
   runId: number;
   casesEvaluated: number;
   fullKitsFound: number;
   partialKitsFound: number;
+  verificarCount: number;
   casesChanged: number;
   durationMs: number;
 }
@@ -78,15 +84,14 @@ export async function processPendingRecompute(db: Db): Promise<RepairMatchRunRes
 
   if (pending === 0) return null;
 
-  // Collect all pending reasons before running
+  // Consolida todas as solicitações pendentes em UMA execução
   const requests = db.prepare(
-    "SELECT id, reason, entity_type, entity_id FROM match_recompute_requests WHERE processed_at IS NULL ORDER BY requested_at LIMIT 50"
-  ).all() as Array<{ id: number; reason: string; entity_type: string | null; entity_id: number | null }>;
+    "SELECT id, reason FROM match_recompute_requests WHERE processed_at IS NULL ORDER BY requested_at LIMIT 50"
+  ).all() as Array<{ id: number; reason: string }>;
 
   const reason = requests.map(r => r.reason).join("; ");
   const result = await runRepairMatchEngine(db, { triggerReason: reason });
 
-  // Mark all collected requests as processed
   const ids = requests.map(r => r.id);
   const placeholders = ids.map(() => "?").join(",");
   db.prepare(
@@ -96,31 +101,36 @@ export async function processPendingRecompute(db: Db): Promise<RepairMatchRunRes
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Execução do motor
+// ---------------------------------------------------------------------------
+
 export async function runRepairMatchEngine(
   db: Db,
   opts: { triggerReason?: string; userId?: number | null } = {},
 ): Promise<RepairMatchRunResult> {
   const startMs = Date.now();
 
-  // Prevent concurrent runs
+  // Impede execuções concorrentes
   const state = getEngineState(db);
   if (state.status === "RUNNING") {
     throw new Error("Motor já em execução.");
   }
 
-  let ruleSet: MatchRuleSet;
+  // Regra ativa estrita: 0 ou >1 aborta SEM criar run e SEM alterar cards.
+  let rule;
   try {
-    ruleSet = getActiveRuleSet(db);
-  } catch {
-    throw new Error("Nenhuma regra de match ativa. Configure uma regra antes de executar o motor.");
+    rule = loadActiveRuleStrict(db);
+  } catch (err) {
+    if (err instanceof MatchRuleStateError) throw err;
+    throw new Error("Falha ao carregar a regra de match ativa.");
   }
 
-  // Create run record
   const runRes = db.prepare(`
     INSERT INTO repair_match_runs
       (rule_set_id, rule_set_version, status, trigger_reason, triggered_by_user_id)
     VALUES (?,?,?,?,?)
-  `).run(ruleSet.id, ruleSet.version, "RUNNING", opts.triggerReason ?? "MANUAL", opts.userId ?? null);
+  `).run(rule.id, rule.version, "RUNNING", opts.triggerReason ?? "MANUAL", opts.userId ?? null);
   const runId = runRes.lastInsertRowid as number;
 
   db.prepare(
@@ -128,7 +138,17 @@ export async function runRepairMatchEngine(
   ).run();
 
   try {
-    const result = executeEngine(db, runId, ruleSet);
+    const input = loadEngineInput(db, rule);
+    const output = calculateMatch(input);
+    const persisted = persistDecisions(db, runId, input, output.cases);
+
+    const result = {
+      casesEvaluated: output.stats.casesEvaluated,
+      fullKitsFound: output.stats.match,
+      partialKitsFound: output.stats.matchParcial,
+      verificarCount: output.stats.verificar,
+      casesChanged: persisted.casesChanged,
+    };
 
     db.prepare(`
       UPDATE repair_match_runs SET
@@ -157,375 +177,31 @@ export async function runRepairMatchEngine(
 }
 
 // ---------------------------------------------------------------------------
-// Core two-pass matching algorithm (REF-based, atomic commit)
+// Persistência transacional das decisões
 // ---------------------------------------------------------------------------
 
-interface CaseRow {
-  id: number;
-  workflow_status: string;
-  analysis_status: string;
-  age_days: number | null;
-  margin: number | null;
-  manual_priority_active: number;
-}
+/** Estados que o motor jamais sobrescreve em repair_cases. */
+const LOCKED_WORKFLOW = new Set([
+  "APTO_REPARO", "EM_SEPARACAO", "DIRECIONADO_TECNICO", "EM_REPARO",
+  "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO",
+  "CONCLUIDO", "VENDA_ESTADO", "CANCELADO",
+]);
 
-interface PartRow {
-  id: number;
-  repair_case_id: number;
-  chave_peca_norm: string | null;
-  chave_peca: string | null;
-  status: string;
-  cancelled_at: string | null;
-}
-
-/** Estoque disponível indexado por (referencia ou chave_peca_norm) → referencia_norm → qty */
-type RefStock = Map<string, Map<string, { ref: string; qty: number }>>;
-
-/** Resultado de alocação in-memory (antes do commit). */
-interface AllocResult {
-  partRequestId: number;
-  caseId: number;
-  chave: string;
-  chaveNorm: string;
-  refAllocated: string | null;
-  refAllocatedNorm: string | null;
-  /** Chave do estoque usada quando houve resolução via alias (null = chave direta). */
-  aliasStockChaveNorm: string | null;
-  resultStatus: "MATCH" | "MATCH_PARCIAL" | "PEDIR_PECA" | "VERIFICAR";
-  marginPoints: number;
-  agePoints: number;
-  score: number;
-  rank: number;
-}
-
-interface CaseDecision {
-  caseId: number;
-  prevStatus: string;
-  newStatus: string;
-  parts: AllocResult[];
-}
-
-/**
- * Monta estoque (keyed por chavePecaNorm) + resolver que mapeia
- * PR.chave_peca_norm → chavePecaNorm no estoque em dois passos:
- *   1. source_inventory_items: PR.chaveNorm → referencia (PC-...)
- *   2. índice inverso do estoque: referencia → chavePecaNorm
- *
- * Também carrega part_key_aliases ativos como resolução adicional,
- * com prioridade sobre o catálogo.
- */
-function buildRefStock(db: Db): { stock: RefStock; resolver: Map<string, string> } {
-  const { groups } = getCurrentOperationalStock(db);
-  const stock: RefStock = new Map();
-  const refToChave = new Map<string, string>(); // referencia → chavePecaNorm no estoque
-
-  for (const g of groups) {
-    if (!g.chavePecaNorm || g.availableQuantity <= 0) continue;
-    const refNorm = g.referenciaNorm || "";
-    let inner = stock.get(g.chavePecaNorm);
-    if (!inner) { inner = new Map(); stock.set(g.chavePecaNorm, inner); }
-    const prev = inner.get(refNorm);
-    if (prev) {
-      prev.qty += g.availableQuantity;
-    } else {
-      inner.set(refNorm, { ref: g.referencia || refNorm, qty: g.availableQuantity });
-    }
-    if (g.referencia && !refToChave.has(g.referencia)) {
-      refToChave.set(g.referencia, g.chavePecaNorm);
-    }
-  }
-
-  const resolver = new Map<string, string>(); // PR chave → chave no estoque
-
-  // Caminho 1: catálogo source_inventory_items (chave → referencia → chave no estoque)
-  const catalogRows = db.prepare(
-    "SELECT DISTINCT chave_peca_norm, referencia FROM source_inventory_items WHERE chave_peca_norm IS NOT NULL AND referencia IS NOT NULL",
-  ).all() as { chave_peca_norm: string; referencia: string }[];
-  for (const r of catalogRows) {
-    const stockChave = refToChave.get(r.referencia);
-    if (stockChave && !resolver.has(r.chave_peca_norm)) {
-      resolver.set(r.chave_peca_norm, stockChave);
-    }
-  }
-
-  // Caminho 2: aliases ativos (prioridade — sobrescreve catálogo)
-  let aliasRows: { requested_chave_peca_norm: string; stock_chave_peca_norm: string }[] = [];
-  try {
-    aliasRows = db.prepare(
-      "SELECT requested_chave_peca_norm, stock_chave_peca_norm FROM part_key_aliases WHERE active = 1",
-    ).all() as { requested_chave_peca_norm: string; stock_chave_peca_norm: string }[];
-  } catch { /* tabela pode não existir em banco antigo — silencia */ }
-  for (const a of aliasRows) {
-    resolver.set(a.requested_chave_peca_norm, a.stock_chave_peca_norm);
-  }
-
-  return { stock, resolver };
-}
-
-/**
- * Resolve chave_peca_norm da PR para a chave de busca no estoque.
- * Retorna [stockKey, aliasUsed]: se aliasUsed=true, o resolver mudou a chave.
- */
-function resolveStockKey(
-  chaveNorm: string | null,
-  resolver: Map<string, string>,
-): [string | null, boolean] {
-  if (!chaveNorm) return [null, false];
-  const resolved = resolver.get(chaveNorm);
-  if (resolved && resolved !== chaveNorm) return [resolved, true];
-  return [chaveNorm, false];
-}
-
-/**
- * Tenta alocar um kit completo em uma CÓPIA do estoque (atômico).
- * Retorna null se qualquer peça falhar (sem alterar workingStock).
- * Em sucesso, substitui as entradas de workingStock pelas alocações efetivadas.
- */
-function tryFullKit(
-  workingStock: RefStock,
-  parts: PartRow[],
-  scoreInfo: { marginPoints: number; agePoints: number; score: number },
-  caseRow: CaseRow,
-  resolver: Map<string, string>,
-): AllocResult[] | null {
-  // Kit completo exige que todas as partes tenham chave_peca_norm
-  if (parts.some(p => !p.chave_peca_norm)) return null;
-
-  // Resolve cada chave da PR para a chave correspondente no estoque
-  const resolvedKeys = parts.map(p => resolveStockKey(p.chave_peca_norm!, resolver));
-  const neededKeys = new Set(resolvedKeys.map(([k]) => k!));
-  const tempStock: RefStock = new Map();
-  for (const key of neededKeys) {
-    const inner = workingStock.get(key);
-    if (!inner) {
-      tempStock.set(key, new Map());
-    } else {
-      tempStock.set(key, new Map(Array.from(inner).map(([k, v]) => [k, { ...v }])));
-    }
-  }
-
-  const allocations: AllocResult[] = [];
-  let rank = 1;
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i];
-    const [stockKey, aliasUsed] = resolvedKeys[i];
-    const alloc = allocateOne(tempStock, stockKey!);
-    if (!alloc || alloc.refNorm === "") return null; // kit incompleto — descarta
-    allocations.push({
-      partRequestId: p.id,
-      caseId: caseRow.id,
-      chave: p.chave_peca ?? p.chave_peca_norm!,
-      chaveNorm: p.chave_peca_norm!,
-      refAllocated: alloc.ref || alloc.refNorm,
-      refAllocatedNorm: alloc.refNorm,
-      aliasStockChaveNorm: aliasUsed ? stockKey! : null,
-      resultStatus: "MATCH",
-      ...scoreInfo,
-      rank: rank++,
-    });
-  }
-
-  // Sucesso — aplica a cópia mutada ao workingStock real (keyed by stockKey)
-  for (const [key, tempInner] of tempStock) {
-    workingStock.set(key, tempInner);
-  }
-  return allocations;
-}
-
-/** Tenta alocar 1 unidade de uma chave (qualquer REF disponível). Muta workingStock. */
-function allocateOne(
-  workingStock: RefStock,
-  chaveNorm: string,
-): { ref: string; refNorm: string } | null {
-  const inner = workingStock.get(chaveNorm);
-  if (!inner) return null;
-  for (const [refNorm, entry] of inner) {
-    if (entry.qty >= 1) {
-      entry.qty--;
-      if (entry.qty === 0) inner.delete(refNorm);
-      return { ref: entry.ref, refNorm };
-    }
-  }
-  return null;
-}
-
-function executeEngine(
+function persistDecisions(
   db: Db,
   runId: number,
-  ruleSet: MatchRuleSet,
-): Omit<RepairMatchRunResult, "runId" | "durationMs"> {
-  // Load eligible cases — analysis COMPLETED, not locked/committed
-  const cases = db.prepare(`
-    SELECT id, workflow_status, analysis_status, age_days, margin, manual_priority_active
-    FROM repair_cases
-    WHERE analysis_status = 'COMPLETED'
-      AND workflow_status NOT IN (
-        'APTO_REPARO','EM_SEPARACAO',
-        'CONCLUIDO','VENDA_ESTADO','CANCELADO',
-        'DIRECIONADO_TECNICO','EM_REPARO','REPARO_EXECUTADO','TRIAGEM_FINAL','RETORNO_TECNICO'
-      )
-    ORDER BY id
-  `).all() as unknown as CaseRow[];
-
-  if (cases.length === 0) {
-    return { casesEvaluated: 0, fullKitsFound: 0, partialKitsFound: 0, casesChanged: 0 };
-  }
-
-  const caseIds = cases.map(c => c.id);
-  const placeholders = caseIds.map(() => "?").join(",");
-  const parts = db.prepare(`
-    SELECT id, repair_case_id, chave_peca_norm, chave_peca, status, cancelled_at
-    FROM part_requests
-    WHERE repair_case_id IN (${placeholders})
-      AND cancelled_at IS NULL
-      AND status NOT IN ('CANCELADA','SEPARADA','CONSUMIDA','RESERVADA')
-  `).all(...caseIds) as unknown as PartRow[];
-
-  // Identificar part_requests com pedido ativo (ORDERED + pedido AWAITING/PARTIALLY_RECEIVED)
-  const activeOrderPartIds = new Set<number>(
-    (db.prepare(`
-      SELECT DISTINCT purch.part_request_id
-      FROM purchase_requests purch
-      JOIN purchase_order_items poi ON poi.purchase_request_id = purch.id
-      JOIN purchase_orders po ON po.id = poi.purchase_order_id
-      WHERE purch.part_request_id IS NOT NULL
-        AND purch.status = 'ORDERED'
-        AND po.status IN ('AWAITING_RECEIPT','PARTIALLY_RECEIVED')
-    `).all() as Array<{ part_request_id: number }>).map(r => r.part_request_id)
-  );
-
-  const partsByCase = new Map<number, PartRow[]>();
-  for (const p of parts) {
-    const arr = partsByCase.get(p.repair_case_id) ?? [];
-    arr.push(p);
-    partsByCase.set(p.repair_case_id, arr);
-  }
-
-  // Build REF-aware stock (mutable during simulation) + resolver de chaves via catálogo
-  const { stock: workingStock, resolver } = buildRefStock(db);
-
-  interface ScoredCase {
-    caseRow: CaseRow;
-    caseParts: PartRow[];
-    score: number;
-    margin: number | null;
-    openParts: number;
-    isManualPriority: boolean;
-  }
-
-  const scoredCases: ScoredCase[] = [];
-  for (const c of cases) {
-    const caseParts = partsByCase.get(c.id) ?? [];
-    if (caseParts.length === 0) continue;
-    const { score } = computeScore(ruleSet, c.age_days, c.margin);
-    scoredCases.push({
-      caseRow: c, caseParts, score, margin: c.margin,
-      openParts: caseParts.length,
-      isManualPriority: c.manual_priority_active === 1,
-    });
-  }
-
-  scoredCases.sort((a, b) => {
-    if (a.isManualPriority !== b.isManualPriority) return a.isManualPriority ? -1 : 1;
-    if (b.score !== a.score) return b.score - a.score;
-    if ((b.margin ?? -Infinity) !== (a.margin ?? -Infinity)) return (b.margin ?? -Infinity) - (a.margin ?? -Infinity);
-    if (a.openParts !== b.openParts) return a.openParts - b.openParts;
-    return a.caseRow.id - b.caseRow.id;
-  });
-
-  // ── In-memory simulation ────────────────────────────────────────────────
-  const decisions: CaseDecision[] = [];
-  const fullKitCaseIds = new Set<number>();
-  let fullKitsFound = 0;
-  let partialKitsFound = 0;
+  input: LoadedEngineInput,
+  decisions: CaseDecision[],
+): { casesChanged: number } {
   let casesChanged = 0;
 
-  // Pass 1 — full kits: simulação atômica em cópia do estoque; só confirma se TODAS as peças tiverem REF
-  for (const sc of scoredCases) {
-    if (sc.caseParts.length === 0) continue;
-    const { marginPoints, agePoints, score } = computeScore(ruleSet, sc.caseRow.age_days, sc.margin);
-    const allocations = tryFullKit(workingStock, sc.caseParts, { marginPoints, agePoints, score }, sc.caseRow, resolver);
-    if (!allocations) continue;
-
-    decisions.push({ caseId: sc.caseRow.id, prevStatus: sc.caseRow.workflow_status, newStatus: "MATCH", parts: allocations });
-    fullKitCaseIds.add(sc.caseRow.id);
-    fullKitsFound++;
-  }
-
-  // Pass 2 — partial kits
-  for (const sc of scoredCases) {
-    if (fullKitCaseIds.has(sc.caseRow.id)) continue;
-
-    const { marginPoints, agePoints, score } = computeScore(ruleSet, sc.caseRow.age_days, sc.margin);
-    const allocations: AllocResult[] = [];
-    let hasPartial = false;
-    let hasAll = true;
-    let rank = 1;
-
-    for (const p of sc.caseParts) {
-      if (!p.chave_peca_norm) {
-        allocations.push({
-          partRequestId: p.id, caseId: sc.caseRow.id,
-          chave: p.chave_peca ?? "", chaveNorm: "",
-          refAllocated: null, refAllocatedNorm: null,
-          aliasStockChaveNorm: null,
-          resultStatus: "VERIFICAR", marginPoints, agePoints, score, rank: rank++,
-        });
-        hasAll = false;
-        continue;
-      }
-      const [stockKey, aliasUsed] = resolveStockKey(p.chave_peca_norm, resolver);
-      const alloc = stockKey ? allocateOne(workingStock, stockKey) : null;
-      if (alloc && alloc.refNorm !== "") {
-        allocations.push({
-          partRequestId: p.id, caseId: sc.caseRow.id,
-          chave: p.chave_peca ?? p.chave_peca_norm, chaveNorm: p.chave_peca_norm,
-          refAllocated: alloc.ref || alloc.refNorm, refAllocatedNorm: alloc.refNorm,
-          aliasStockChaveNorm: aliasUsed ? stockKey! : null,
-          resultStatus: "MATCH_PARCIAL", marginPoints, agePoints, score, rank: rank++,
-        });
-        hasPartial = true;
-      } else {
-        allocations.push({
-          partRequestId: p.id, caseId: sc.caseRow.id,
-          chave: p.chave_peca ?? p.chave_peca_norm, chaveNorm: p.chave_peca_norm,
-          refAllocated: null, refAllocatedNorm: null,
-          aliasStockChaveNorm: null,
-          resultStatus: "PEDIR_PECA", marginPoints, agePoints, score, rank: rank++,
-        });
-        hasAll = false;
-      }
-    }
-
-    // Determinar newStatus da passagem 2:
-    // - MATCH_PARCIAL se alguma peça foi alocada
-    // - AGUARDANDO_RECEBIMENTO se nenhuma alocada mas todas as faltantes têm pedido ativo
-    // - PEDIR_PECA caso contrário
-    let newStatus: string;
-    if (hasAll) {
-      newStatus = "MATCH";
-    } else if (hasPartial) {
-      newStatus = "MATCH_PARCIAL";
-    } else {
-      const allMissingHaveOrder = allocations
-        .filter(a => a.resultStatus === "PEDIR_PECA")
-        .every(a => activeOrderPartIds.has(a.partRequestId));
-      newStatus = allMissingHaveOrder && allocations.some(a => a.resultStatus === "PEDIR_PECA")
-        ? "AGUARDANDO_RECEBIMENTO"
-        : "PEDIR_PECA";
-    }
-
-    decisions.push({ caseId: sc.caseRow.id, prevStatus: sc.caseRow.workflow_status, newStatus, parts: allocations });
-    if (hasPartial) partialKitsFound++;
-  }
-
-  // ── Atomic DB commit ────────────────────────────────────────────────────
   db.exec("BEGIN");
   try {
     db.prepare("DELETE FROM repair_match_results WHERE run_id = ?").run(runId);
+    db.prepare("DELETE FROM repair_match_case_results WHERE run_id = ?").run(runId);
 
-    const insertResult = db.prepare(`
-      INSERT OR REPLACE INTO repair_match_results
+    const insertPartResult = db.prepare(`
+      INSERT INTO repair_match_results
         (run_id, repair_case_id, part_request_id, chave_peca, chave_peca_norm,
          allocated_reference, allocated_reference_norm,
          result_status, allocated_units, margin_points, age_points, score, priority_rank,
@@ -533,73 +209,74 @@ function executeEngine(
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
 
+    const insertCaseResult = db.prepare(`
+      INSERT INTO repair_match_case_results
+        (run_id, repair_case_id, eligible, result_status, verify_reasons_json,
+         margin, margin_points, age_points, score, priority_rank,
+         rule_set_id, rule_set_version, deposito_atual)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `);
+
+    const setPartStatus = db.prepare(
+      "UPDATE part_requests SET status = ?, updated_at = datetime('now') WHERE id = ?",
+    );
+
+    const depositoByCase = new Map(input.cases.map((c) => [c.caseId, c.depositoAtual]));
+
     for (const dec of decisions) {
-      for (const a of dec.parts) {
-        const isAlloc = a.resultStatus === "MATCH" || a.resultStatus === "MATCH_PARCIAL";
-        insertResult.run(
-          runId, a.caseId, a.partRequestId,
-          a.chave, a.chaveNorm || null,
-          a.refAllocated, a.refAllocatedNorm,
-          a.resultStatus, isAlloc ? 1 : 0,
-          a.marginPoints, a.agePoints, a.score, a.rank,
-          a.aliasStockChaveNorm ?? null,
+      insertCaseResult.run(
+        runId, dec.caseId, dec.eligible ? 1 : 0, dec.result,
+        dec.verifyReasons.length > 0 ? JSON.stringify(dec.verifyReasons) : null,
+        dec.margin, dec.marginPoints, dec.agePoints, dec.score, dec.rank,
+        dec.activeRuleId, dec.activeRuleVersion,
+        depositoByCase.get(dec.caseId) ?? null,
+      );
+
+      for (const p of dec.requiredParts) {
+        const isAlloc = p.allocatedReference !== null;
+        insertPartResult.run(
+          runId, dec.caseId, p.partRequestId,
+          p.chavePeca, p.chavePecaNorm,
+          p.allocatedReference, p.allocatedReferenceNorm,
+          p.resultStatus, isAlloc ? 1 : 0,
+          dec.marginPoints ?? 0, dec.agePoints ?? 0, dec.score ?? 0, dec.rank,
+          p.aliasStockChaveNorm,
         );
-      }
 
-      // Update part_request statuses
-      for (const a of dec.parts) {
-        const part = parts.find(p => p.id === a.partRequestId);
-        if (!part) continue;
-        if (a.resultStatus === "MATCH" || a.resultStatus === "MATCH_PARCIAL") {
-          // Peça alocada: promover para INDICADA (de PEDIR_PECA, VERIFICAR ou AGUARDANDO_RECEBIMENTO)
-          if (part.status === "PEDIR_PECA" || part.status === "VERIFICAR" || part.status === "AGUARDANDO_RECEBIMENTO") {
-            db.prepare("UPDATE part_requests SET status = 'INDICADA', updated_at = datetime('now') WHERE id = ?").run(a.partRequestId);
+        // Atualização de status da peça (nunca toca peças travadas — o loader
+        // já exclui RESERVADA/SEPARADA/CONSUMIDA/CANCELADA)
+        const current = input.partStatusById.get(p.partRequestId);
+        if (!current) continue;
+        if (p.resultStatus === "MATCH" || p.resultStatus === "MATCH_PARCIAL") {
+          if (current === "PEDIR_PECA" || current === "VERIFICAR" || current === "AGUARDANDO_RECEBIMENTO") {
+            setPartStatus.run("INDICADA", p.partRequestId);
           }
-        } else if (a.resultStatus === "PEDIR_PECA") {
-          // Peça não alocada
-          if (activeOrderPartIds.has(a.partRequestId)) {
-            // Tem pedido ativo — manter/definir AGUARDANDO_RECEBIMENTO
-            if (part.status === "PEDIR_PECA" || part.status === "INDICADA") {
-              db.prepare("UPDATE part_requests SET status = 'AGUARDANDO_RECEBIMENTO', updated_at = datetime('now') WHERE id = ?").run(a.partRequestId);
-            }
-          } else {
-            // Sem pedido ativo — devolve para PEDIR_PECA se estava em INDICADA ou AGUARDANDO_RECEBIMENTO
-            if (part.status === "INDICADA" || part.status === "AGUARDANDO_RECEBIMENTO") {
-              db.prepare("UPDATE part_requests SET status = 'PEDIR_PECA', updated_at = datetime('now') WHERE id = ?").run(a.partRequestId);
-            }
+        } else if (p.resultStatus === "AGUARDANDO_RECEBIMENTO") {
+          if (current === "PEDIR_PECA" || current === "INDICADA") {
+            setPartStatus.run("AGUARDANDO_RECEBIMENTO", p.partRequestId);
           }
-        } else if (a.resultStatus === "VERIFICAR") {
-          // Mantém VERIFICAR — não promove nem regride
+        } else if (p.resultStatus === "PEDIR_PECA") {
+          if (current === "INDICADA" || current === "AGUARDANDO_RECEBIMENTO") {
+            setPartStatus.run("PEDIR_PECA", p.partRequestId);
+          }
         }
+        // VERIFICAR (caso inelegível): status da peça permanece como está.
       }
 
-      // Update workflow_status (do not demote APTO_REPARO/AGUARDANDO_RECEBIMENTO→PEDIR_PECA etc.)
-      // AGUARDANDO_RECEBIMENTO é bloqueado: só o recebimento real ou cancelamento de pedido o muda
-      const lockedStatuses = new Set(["APTO_REPARO","EM_SEPARACAO","DIRECIONADO_TECNICO","EM_REPARO","REPARO_EXECUTADO","TRIAGEM_FINAL","RETORNO_TECNICO","CONCLUIDO","VENDA_ESTADO","CANCELADO"]);
-      // Não regredir AGUARDANDO_RECEBIMENTO para PEDIR_PECA enquanto há pedido ativo
-      if (dec.prevStatus === "AGUARDANDO_RECEBIMENTO" && dec.newStatus === "PEDIR_PECA") {
-        const caseHasActiveOrder = dec.parts.some(a => activeOrderPartIds.has(a.partRequestId));
-        if (caseHasActiveOrder) continue; // skip this case's workflow update
+      // Workflow do caso — preserva estados travados e nunca regride
+      // AGUARDANDO_RECEBIMENTO→PEDIR_PECA enquanto houver pedido ativo.
+      const prevStatus = input.workflowByCase.get(dec.caseId);
+      if (prevStatus === undefined || LOCKED_WORKFLOW.has(prevStatus)) continue;
+      if (prevStatus === dec.result) continue;
+      if (prevStatus === "AGUARDANDO_RECEBIMENTO" && dec.result === "PEDIR_PECA") {
+        const caseHasActiveOrder = dec.requiredParts.some((p) => input.activeOrderPartIds.has(p.partRequestId));
+        if (caseHasActiveOrder) continue;
       }
-      if (!lockedStatuses.has(dec.prevStatus) && dec.prevStatus !== dec.newStatus) {
-        db.prepare(
-          "UPDATE repair_cases SET workflow_status = ?, updated_at = datetime('now') WHERE id = ?"
-        ).run(dec.newStatus, dec.caseId);
-        casesChanged++;
-      }
+      db.prepare(
+        "UPDATE repair_cases SET workflow_status = ?, updated_at = datetime('now') WHERE id = ?",
+      ).run(dec.result, dec.caseId);
+      casesChanged++;
     }
-
-    // Pós-processamento: casos com status de match positivo mas em depósito incorreto → VERIFICAR
-    // Depósitos válidos para MATCH/MATCH_PARCIAL/APTO_REPARO são apenas esses dois.
-    // Qualquer outro depósito (incluindo depósitos de técnicos) indica situação fora do fluxo normal.
-    const depositoResult = db.prepare(
-      `UPDATE repair_cases
-       SET workflow_status = 'VERIFICAR', updated_at = datetime('now')
-       WHERE workflow_status IN ('MATCH','MATCH_PARCIAL','APTO_REPARO')
-         AND deposito_atual IS NOT NULL
-         AND deposito_atual NOT IN ('AGUARDANDO PECA','MANUTENCAO INTERNA')`,
-    ).run();
-    casesChanged += Number(depositoResult.changes);
 
     db.exec("COMMIT");
   } catch (err) {
@@ -607,10 +284,5 @@ function executeEngine(
     throw err;
   }
 
-  return {
-    casesEvaluated: scoredCases.length,
-    fullKitsFound,
-    partialKitsFound,
-    casesChanged,
-  };
+  return { casesChanged };
 }

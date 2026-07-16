@@ -1,8 +1,17 @@
+/**
+ * CRUD e ativação transacional das regras de match (match_rule_sets).
+ *
+ * O CÁLCULO do score NÃO vive aqui — a única implementação é
+ * calculateMatch/computeRuleScore em calculate-match.ts (sem arredondamento).
+ */
+
 import type { Db } from "../db/database.js";
+import type { ActiveRule } from "./calculate-match.js";
 
 export interface MatchRuleSet {
   id: number;
   version: number;
+  name: string | null;
   marginAmountPerPoint: number;
   ageDaysPerPoint: number;
   ageMaxPoints: number;
@@ -18,6 +27,7 @@ export interface MatchRuleSet {
 }
 
 export interface MatchRuleSetInput {
+  name?: string | null;
   marginAmountPerPoint?: number;
   ageDaysPerPoint?: number;
   ageMaxPoints?: number;
@@ -39,6 +49,7 @@ function toRuleSet(r: Record<string, unknown>): MatchRuleSet {
   return {
     id: r.id as number,
     version: r.version as number,
+    name: (r.name as string | null) ?? null,
     marginAmountPerPoint: r.margin_amount_per_point as number,
     ageDaysPerPoint: r.age_days_per_point as number,
     ageMaxPoints: r.age_max_points as number,
@@ -54,10 +65,31 @@ function toRuleSet(r: Record<string, unknown>): MatchRuleSet {
   };
 }
 
+/** Converte a regra persistida para o formato consumido por calculateMatch. */
+export function toActiveRule(rs: MatchRuleSet): ActiveRule {
+  return {
+    id: rs.id,
+    version: rs.version,
+    name: rs.name,
+    marginAmountPerPoint: rs.marginAmountPerPoint,
+    ageDaysPerPoint: rs.ageDaysPerPoint,
+    ageMaxPoints: rs.ageMaxPoints,
+    allowNegativeMarginScore: rs.allowNegativeMarginScore,
+    marginWeight: rs.marginWeight,
+    ageWeight: rs.ageWeight,
+  };
+}
+
 export function getActiveRuleSet(db: Db): MatchRuleSet {
-  const row = db.prepare("SELECT * FROM match_rule_sets WHERE active = 1").get() as Record<string, unknown> | undefined;
-  if (!row) throw new MatchRuleError("NO_ACTIVE_RULE", "Nenhuma regra de match ativa encontrada.");
-  return toRuleSet(row);
+  const rows = db.prepare("SELECT * FROM match_rule_sets WHERE active = 1 ORDER BY id").all() as Record<string, unknown>[];
+  if (rows.length === 0) throw new MatchRuleError("NO_ACTIVE_RULE", "Nenhuma regra de match ativa encontrada.");
+  if (rows.length > 1) {
+    throw new MatchRuleError(
+      "MULTIPLE_ACTIVE_RULES",
+      `Existem ${rows.length} regras ativas simultaneamente — corrija a configuração.`,
+    );
+  }
+  return toRuleSet(rows[0]);
 }
 
 export function getRuleSetById(db: Db, id: number): MatchRuleSet | null {
@@ -74,14 +106,15 @@ export function createDraftRuleSet(db: Db, input: MatchRuleSetInput): MatchRuleS
   const maxVersion = (db.prepare("SELECT MAX(version) as v FROM match_rule_sets").get() as { v: number | null }).v ?? 0;
   const res = db.prepare(`
     INSERT INTO match_rule_sets
-      (version, margin_amount_per_point, age_days_per_point, age_max_points,
+      (version, name, margin_amount_per_point, age_days_per_point, age_max_points,
        allow_negative_margin_score, margin_weight, age_weight, active, reason, created_by_user_id)
-    VALUES (?,?,?,?,?,?,?,0,?,?)
+    VALUES (?,?,?,?,?,?,?,?,0,?,?)
   `).run(
     maxVersion + 1,
+    input.name?.trim() || `Regra v${maxVersion + 1}`,
     input.marginAmountPerPoint ?? 150.0,
     input.ageDaysPerPoint ?? 30,
-    input.ageMaxPoints ?? 15,
+    input.ageMaxPoints ?? 12,
     input.allowNegativeMarginScore !== false ? 1 : 0,
     input.marginWeight ?? 1.0,
     input.ageWeight ?? 1.0,
@@ -98,6 +131,7 @@ export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput,
 
   db.prepare(`
     UPDATE match_rule_sets SET
+      name = COALESCE(?, name),
       margin_amount_per_point = COALESCE(?, margin_amount_per_point),
       age_days_per_point = COALESCE(?, age_days_per_point),
       age_max_points = COALESCE(?, age_max_points),
@@ -107,6 +141,7 @@ export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput,
       reason = COALESCE(?, reason)
     WHERE id = ?
   `).run(
+    input.name?.trim() ?? null,
     input.marginAmountPerPoint ?? null,
     input.ageDaysPerPoint ?? null,
     input.ageMaxPoints ?? null,
@@ -119,6 +154,10 @@ export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput,
   return getRuleSetById(db, id)!;
 }
 
+/**
+ * Ativa uma regra desativando a anterior NA MESMA transação.
+ * O índice único parcial (active=1) garante no banco que nunca existam duas.
+ */
 export function activateRuleSet(
   db: Db,
   id: number,
@@ -145,21 +184,4 @@ export function activateRuleSet(
   }
 
   return getRuleSetById(db, id)!;
-}
-
-export function computeScore(rule: MatchRuleSet, ageDays: number | null, margin: number | null): {
-  marginPoints: number; agePoints: number; score: number;
-} {
-  const agePoints = ageDays != null
-    ? Math.min(Math.floor(ageDays / rule.ageDaysPerPoint), rule.ageMaxPoints)
-    : 0;
-
-  let marginPoints = 0;
-  if (margin != null) {
-    const raw = Math.floor(margin / rule.marginAmountPerPoint);
-    marginPoints = !rule.allowNegativeMarginScore ? Math.max(0, raw) : raw;
-  }
-
-  const score = Math.round(marginPoints * rule.marginWeight + agePoints * rule.ageWeight);
-  return { marginPoints, agePoints, score };
 }
