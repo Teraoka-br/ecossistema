@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createDb } from "./helpers.js";
 import type { Db } from "../src/db/database.js";
 import {
-  getActiveRuleSet, createDraftRuleSet, activateRuleSet, listRuleSets, computeScore,
+  getActiveRuleSet, createDraftRuleSet, activateRuleSet, listRuleSets,
   MatchRuleError,
 } from "../src/match/match-rule-service.js";
 
@@ -49,31 +49,6 @@ describe("match_rule_sets", () => {
       .toThrow(MatchRuleError);
   });
 
-  it("computeScore — fórmula padrão", () => {
-    const rule = getActiveRuleSet(db);
-    const { marginPoints, agePoints, score } = computeScore(rule, 90, 450);
-    expect(agePoints).toBe(3); // floor(90/30)=3
-    expect(marginPoints).toBe(3); // floor(450/150)=3
-    expect(score).toBe(6);
-  });
-
-  it("computeScore — teto de idade", () => {
-    const rule = getActiveRuleSet(db);
-    const { agePoints } = computeScore(rule, 9999, 0);
-    expect(agePoints).toBe(15);
-  });
-
-  it("computeScore — margem negativa pune", () => {
-    const rule = getActiveRuleSet(db);
-    const { marginPoints } = computeScore(rule, 0, -300);
-    expect(marginPoints).toBe(-2); // floor(-300/150)=-2
-    expect(marginPoints).toBeLessThan(0);
-  });
-
-  it("computeScore — margem nula não causa crash", () => {
-    const rule = getActiveRuleSet(db);
-    const { marginPoints, score } = computeScore(rule, 60, null);
-    expect(marginPoints).toBe(0);
-    expect(score).toBe(2); // só pontos de idade
-  });
+  // O cálculo de score foi consolidado em calculate-match.ts (computeRuleScore,
+  // sem arredondamento) — testado em tests/calculate-match.test.ts.
 });

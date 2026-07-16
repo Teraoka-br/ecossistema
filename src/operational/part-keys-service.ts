@@ -172,6 +172,110 @@ export function getPartKeyHistory(db: Db, chavePecaNorm: string): PartKeyEditRow
   ).all(chavePecaNorm) as unknown as PartKeyEditRow[];
 }
 
+// ---------------------------------------------------------------------------
+// Compatibilidade manual de chaves (part_key_aliases)
+// ---------------------------------------------------------------------------
+
+export class PartKeyAliasError extends Error {
+  constructor(public readonly code: string, public readonly statusCode: number, message: string) {
+    super(message);
+    this.name = "PartKeyAliasError";
+  }
+}
+
+export interface PartKeyAliasRow {
+  id: number;
+  requested_chave_peca: string;
+  requested_chave_peca_norm: string;
+  stock_chave_peca: string;
+  stock_chave_peca_norm: string;
+  reason: string | null;
+  active: number;
+  created_by_user_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function listPartKeyAliases(db: Db, search?: string): PartKeyAliasRow[] {
+  const q = search?.trim();
+  if (q) {
+    const like = `%${q.replace(/[%_\\]/g, (m) => `\\${m}`)}%`;
+    return db.prepare(
+      `SELECT * FROM part_key_aliases
+       WHERE requested_chave_peca LIKE ? ESCAPE '\\' OR stock_chave_peca LIKE ? ESCAPE '\\'
+       ORDER BY active DESC, created_at DESC`,
+    ).all(like, like) as unknown as PartKeyAliasRow[];
+  }
+  return db.prepare(
+    "SELECT * FROM part_key_aliases ORDER BY active DESC, created_at DESC",
+  ).all() as unknown as PartKeyAliasRow[];
+}
+
+/**
+ * Cria um vínculo de compatibilidade (chave solicitada → chave de estoque) e
+ * solicita recálculo do motor. Impede vínculo duplicado, auto-vínculo e ciclo
+ * direto (grupos conflitantes).
+ */
+export function createPartKeyAlias(
+  db: Db,
+  params: { requestedChavePeca: string; stockChavePeca: string; reason?: string | null; userId?: number | null },
+): PartKeyAliasRow {
+  const reqNorm = normalizeKey(params.requestedChavePeca);
+  const stNorm = normalizeKey(params.stockChavePeca);
+  if (!reqNorm || !stNorm) {
+    throw new PartKeyAliasError("EMPTY_KEY", 400, "Chaves não podem ser vazias.");
+  }
+  if (reqNorm === stNorm) {
+    throw new PartKeyAliasError("SELF_LINK", 400, "A chave solicitada e a chave de estoque são iguais — vínculo desnecessário.");
+  }
+  const existing = db.prepare(
+    "SELECT id, stock_chave_peca FROM part_key_aliases WHERE requested_chave_peca_norm = ? AND active = 1",
+  ).get(reqNorm) as { id: number; stock_chave_peca: string } | undefined;
+  if (existing) {
+    throw new PartKeyAliasError(
+      "DUPLICATE",
+      409,
+      `Já existe um vínculo ativo para essa chave solicitada (→ ${existing.stock_chave_peca}). Remova-o antes de criar outro.`,
+    );
+  }
+  const inverse = db.prepare(
+    "SELECT id FROM part_key_aliases WHERE requested_chave_peca_norm = ? AND stock_chave_peca_norm = ? AND active = 1",
+  ).get(stNorm, reqNorm) as { id: number } | undefined;
+  if (inverse) {
+    throw new PartKeyAliasError(
+      "INVERSE_EXISTS",
+      409,
+      "Já existe o vínculo inverso ativo — a compatibilidade é simétrica no consumo de estoque; use apenas um sentido (solicitada → estoque).",
+    );
+  }
+  const res = db.prepare(`
+    INSERT INTO part_key_aliases
+      (requested_chave_peca, requested_chave_peca_norm, stock_chave_peca, stock_chave_peca_norm, reason, active, created_by_user_id)
+    VALUES (?, ?, ?, ?, ?, 1, ?)
+  `).run(
+    params.requestedChavePeca.trim(), reqNorm,
+    params.stockChavePeca.trim(), stNorm,
+    params.reason ?? null,
+    params.userId ?? null,
+  );
+  const id = res.lastInsertRowid as number;
+  requestMatchRecompute(db, `ALIAS_CREATED ${reqNorm} → ${stNorm}`, "part_key_alias", id);
+  return db.prepare("SELECT * FROM part_key_aliases WHERE id = ?").get(id) as unknown as PartKeyAliasRow;
+}
+
+/** Desativa (nunca apaga) um vínculo e solicita recálculo se ele estava ativo. */
+export function deactivatePartKeyAlias(db: Db, id: number): { wasActive: boolean } {
+  const row = db.prepare(
+    "SELECT id, requested_chave_peca_norm, active FROM part_key_aliases WHERE id = ?",
+  ).get(id) as { id: number; requested_chave_peca_norm: string; active: number } | undefined;
+  if (!row) throw new PartKeyAliasError("NOT_FOUND", 404, "Vínculo não encontrado.");
+  db.prepare("UPDATE part_key_aliases SET active = 0, updated_at = datetime('now') WHERE id = ?").run(id);
+  if (row.active === 1) {
+    requestMatchRecompute(db, `ALIAS_DEACTIVATED ${row.requested_chave_peca_norm}`, "part_key_alias", id);
+  }
+  return { wasActive: row.active === 1 };
+}
+
 export interface AllPartKeyRow {
   id: number | null;           // null = importada (sem id em custom_part_keys)
   chave_peca: string;

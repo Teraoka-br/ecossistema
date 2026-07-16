@@ -140,7 +140,7 @@ describe("recebimento → motor → MATCH", () => {
     // Cria aparelho com análise completa
     const rc = createRepairCase(db, { imei: "444", os: "OS-4", createdByUserId: 1 });
     const partA32 = addPart(db, rc.id, { description: "Bateria", chavePeca: "BATERIA A32", createdByUserId: 1 });
-    db.prepare("UPDATE repair_cases SET analysis_status='COMPLETED', workflow_status='PEDIR_PECA', age_days=30, margin=50 WHERE id=?").run(rc.id);
+    db.prepare("UPDATE repair_cases SET analysis_status='COMPLETED', workflow_status='PEDIR_PECA', age_days=30, cost=0, estimated_sale=50, margin=50, model='MODELO A32', deposito_atual='AGUARDANDO PECA' WHERE id=?").run(rc.id);
     db.prepare("UPDATE part_requests SET status='PEDIR_PECA' WHERE repair_case_id=?").run(rc.id);
 
     // Cria pedido de compra
@@ -179,7 +179,7 @@ describe("recebimento → motor → MATCH", () => {
     const rc = createRepairCase(db, { imei: "555", createdByUserId: 1 });
     addPart(db, rc.id, { description: "Bateria", chavePeca: "BATERIA B10", createdByUserId: 1 });
     addPart(db, rc.id, { description: "Tela", chavePeca: "TELA B10", createdByUserId: 1 });
-    db.prepare("UPDATE repair_cases SET analysis_status='COMPLETED', workflow_status='PEDIR_PECA', age_days=20, margin=40 WHERE id=?").run(rc.id);
+    db.prepare("UPDATE repair_cases SET analysis_status='COMPLETED', workflow_status='PEDIR_PECA', age_days=20, cost=0, estimated_sale=40, margin=40, model='MODELO A52', deposito_atual='AGUARDANDO PECA' WHERE id=?").run(rc.id);
     db.prepare("UPDATE part_requests SET status='PEDIR_PECA' WHERE repair_case_id=?").run(rc.id);
 
     // Cria pedido só para bateria

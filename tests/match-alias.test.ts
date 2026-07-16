@@ -23,8 +23,9 @@ beforeEach(async () => {
 function addCase(imei = "IMEI-001", opts: { deposito?: string } = {}): number {
   const r = db.prepare(`
     INSERT INTO repair_cases
-      (imei, imei_norm, workflow_status, analysis_status, deposito_atual, age_days, margin, created_at, updated_at)
-    VALUES (?, ?, 'PEDIR_PECA', 'COMPLETED', ?, 100, 200, datetime('now'), datetime('now'))
+      (imei, imei_norm, model, workflow_status, analysis_status, deposito_atual,
+       age_days, cost, estimated_sale, margin, created_at, updated_at)
+    VALUES (?, ?, 'MODELO TESTE', 'PEDIR_PECA', 'COMPLETED', ?, 100, 0, 200, 200, datetime('now'), datetime('now'))
   `).run(imei, imei.toLowerCase(), opts.deposito ?? "AGUARDANDO PECA");
   return Number(r.lastInsertRowid);
 }
