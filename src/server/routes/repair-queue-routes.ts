@@ -21,6 +21,7 @@ import {
 } from "../../operational/purchase-request-service.js";
 import {
   getEngineState, runRepairMatchEngine, getPendingRequestCount,
+  requestMatchRecompute, processPendingRecompute,
 } from "../../match/engine-orchestrator.js";
 import { getCurrentOperationalStock } from "../../operational/stock-service.js";
 
@@ -278,6 +279,35 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
         AND rmr.run_id = (SELECT MAX(run_id) FROM repair_match_results WHERE repair_case_id = ?)
     `).all(id, id) as Record<string, unknown>[];
 
+    // Resultado canônico por caso (explicabilidade: motivos, score decimal, regra)
+    const caseResultRow = db.prepare(`
+      SELECT rmcr.*, mrs.name AS rule_name
+      FROM repair_match_case_results rmcr
+      LEFT JOIN match_rule_sets mrs ON mrs.id = rmcr.rule_set_id
+      WHERE rmcr.repair_case_id = ?
+      ORDER BY rmcr.run_id DESC LIMIT 1
+    `).get(id) as Record<string, unknown> | undefined;
+    const matchCaseResult = caseResultRow
+      ? {
+          runId: caseResultRow.run_id,
+          eligible: caseResultRow.eligible === 1,
+          resultStatus: caseResultRow.result_status,
+          verifyReasons: caseResultRow.verify_reasons_json
+            ? (JSON.parse(caseResultRow.verify_reasons_json as string) as string[])
+            : [],
+          margin: caseResultRow.margin,
+          marginPoints: caseResultRow.margin_points,
+          agePoints: caseResultRow.age_points,
+          score: caseResultRow.score,
+          priorityRank: caseResultRow.priority_rank,
+          ruleSetId: caseResultRow.rule_set_id,
+          ruleSetVersion: caseResultRow.rule_set_version,
+          ruleName: caseResultRow.rule_name ?? null,
+          depositoAtual: caseResultRow.deposito_atual,
+          computedAt: caseResultRow.created_at,
+        }
+      : null;
+
     // Get stock for each chave
     const { groups: stockGroups } = getCurrentOperationalStock(db);
     const stockMap = new Map<string, number>();
@@ -368,6 +398,7 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
       reservations,
       nextAction,
       matchResults,
+      matchCaseResult,
       history,
       technician,
       directedTechnician,
@@ -559,7 +590,7 @@ repairQueueRouter.post("/fila-reparos/:id/override-status", requireAuth, require
 
 // ─── Editar campos do caso ────────────────────────────────────────────────
 
-repairQueueRouter.patch("/fila-reparos/:id/info", requireAuth, requireAdmin, (req, res, next) => {
+repairQueueRouter.patch("/fila-reparos/:id/info", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const db = getDb();
     const repairCaseId = parseInt(req.params.id);
@@ -574,28 +605,113 @@ repairQueueRouter.patch("/fila-reparos/:id/info", requireAuth, requireAdmin, (re
     if (sets.length === 0) return res.json({ ok: true });
     sets.push("updated_at = datetime('now')");
     db.prepare(`UPDATE repair_cases SET ${sets.join(", ")} WHERE id = ?`).run(...vals, repairCaseId);
+
+    // Correção de dado indispensável (ex.: modelo) devolve o card ao motor
+    if ("model" in body || "brand" in body) {
+      requestMatchRecompute(db, `INFO_EDIT_${repairCaseId}`, "repair_case", repairCaseId);
+      await processPendingRecompute(db).catch(() => null);
+    }
     res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ─── Corrigir dados de score (custo/venda/idade) — tela VERIFICAR ─────────
+
+repairQueueRouter.patch("/fila-reparos/:id/score", requireAuth, requireOperator, async (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+
+    const body = req.body as { ageDays?: number | null; cost?: number | null; estimatedSale?: number | null; margin?: number | null };
+    const rc = db.prepare(
+      "SELECT age_days, cost, estimated_sale, margin FROM repair_cases WHERE id = ?",
+    ).get(repairCaseId) as { age_days: number | null; cost: number | null; estimated_sale: number | null; margin: number | null } | undefined;
+    if (!rc) return res.status(404).json({ error: "Caso não encontrado." });
+
+    const num = (v: unknown): number | null => {
+      if (v === null || v === undefined || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const ageDays = "ageDays" in body ? num(body.ageDays) : rc.age_days;
+    const cost = "cost" in body ? num(body.cost) : rc.cost;
+    const estimatedSale = "estimatedSale" in body ? num(body.estimatedSale) : rc.estimated_sale;
+    // margem é derivada (venda − custo); só aceita valor direto se algum dos dois faltar
+    const margin = cost !== null && estimatedSale !== null
+      ? estimatedSale - cost
+      : ("margin" in body ? num(body.margin) : rc.margin);
+
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const userName = (req as Request).sessionUser?.displayName ?? null;
+
+    db.prepare(
+      "UPDATE repair_cases SET age_days = ?, cost = ?, estimated_sale = ?, margin = ?, updated_by_user_id = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(ageDays, cost, estimatedSale, margin, userId, repairCaseId);
+
+    recordOperationalEvent(db, {
+      repairCaseId,
+      eventType: "DADOS_SCORE_EDITADOS",
+      responsibleName: userName,
+      notes: `Idade/custo/venda corrigidos: idade ${rc.age_days ?? "—"}→${ageDays ?? "—"}, custo ${rc.cost ?? "—"}→${cost ?? "—"}, venda ${rc.estimated_sale ?? "—"}→${estimatedSale ?? "—"}`,
+    });
+    db.prepare(
+      "INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata_json) VALUES (?, 'EDIT_SCORE_DATA', 'repair_case', ?, ?)",
+    ).run(userId, String(repairCaseId), JSON.stringify({ before: rc, after: { ageDays, cost, estimatedSale, margin } }));
+
+    // O card retorna imediatamente ao motor
+    requestMatchRecompute(db, `SCORE_DATA_EDIT_${repairCaseId}`, "repair_case", repairCaseId);
+    const recompute = await processPendingRecompute(db).catch(() => null);
+
+    const updated = db.prepare(
+      "SELECT id, workflow_status, age_days, cost, estimated_sale, margin FROM repair_cases WHERE id = ?",
+    ).get(repairCaseId);
+    res.json({ ok: true, case: updated, recompute });
   } catch (err) { next(err); }
 });
 
 // ─── Mover para depósito ──────────────────────────────────────────────────
 
-repairQueueRouter.patch("/fila-reparos/:id/deposito", requireAuth, requireOperator, (req, res, next) => {
+repairQueueRouter.patch("/fila-reparos/:id/deposito", requireAuth, requireOperator, async (req, res, next) => {
   try {
     const db = getDb();
     const repairCaseId = parseInt(req.params.id);
     if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
     const { deposito } = req.body as { deposito?: string | null };
+
+    const rc = db.prepare("SELECT deposito_atual FROM repair_cases WHERE id = ?").get(repairCaseId) as
+      | { deposito_atual: string | null }
+      | undefined;
+    if (!rc) return res.status(404).json({ error: "Caso não encontrado." });
+    const previous = rc.deposito_atual;
+    const newValue = deposito?.trim() || null;
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const userName = (req as Request).sessionUser?.displayName ?? null;
+
     db.prepare(
       "UPDATE repair_cases SET deposito_atual = ?, updated_at = datetime('now') WHERE id = ?",
-    ).run(deposito?.trim() || null, repairCaseId);
+    ).run(newValue, repairCaseId);
+
+    // Auditoria: usuário, data e valor anterior
     recordOperationalEvent(db, {
       repairCaseId,
-      eventType: "NOTE_ADDED",
-      responsibleName: (req as Request).sessionUser?.displayName ?? null,
-      notes: deposito?.trim() ? `Depósito alterado para: ${deposito.trim()}` : "Depósito removido.",
+      eventType: "DEPOSITO_ALTERADO",
+      previousStatus: previous,
+      newStatus: newValue,
+      responsibleName: userName,
+      notes: `Depósito alterado manualmente: ${previous ?? "(vazio)"} → ${newValue ?? "(vazio)"}`,
     });
-    res.json({ ok: true });
+    db.prepare(
+      "INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata_json) VALUES (?, 'DEPOSITO_MANUAL', 'repair_case', ?, ?)",
+    ).run(userId, String(repairCaseId), JSON.stringify({ previous, newValue }));
+
+    // O card retorna imediatamente ao motor
+    requestMatchRecompute(db, `DEPOSITO_MANUAL_${repairCaseId}`, "repair_case", repairCaseId);
+    const recompute = await processPendingRecompute(db).catch(() => null);
+
+    const updated = db.prepare("SELECT workflow_status, deposito_atual FROM repair_cases WHERE id = ?").get(repairCaseId);
+    res.json({ ok: true, case: updated, recompute });
   } catch (err) { next(err); }
 });
 
@@ -757,7 +873,6 @@ repairQueueRouter.post("/match-rules/:id/activate", requireAuth, requireAdmin, a
     const userId = (req as Request).sessionUser?.id ?? null;
     const { reason } = req.body as { reason: string };
     const updated = activateRuleSet(db, parseInt(req.params.id), { reason, userId });
-    const { requestMatchRecompute, processPendingRecompute } = await import("../../match/engine-orchestrator.js");
     requestMatchRecompute(db, `RULE_ACTIVATED_v${updated.version}`, "match_rule_set", updated.id);
     const result = await processPendingRecompute(db);
     res.json({
@@ -786,7 +901,6 @@ repairQueueRouter.post("/match-rules/backfill-priority", requireAuth, requireAdm
   try {
     const db = getDb();
     const { backfillRepairCasePriorityFields } = await import("../../match/priority-backfill-service.js");
-    const { requestMatchRecompute, processPendingRecompute } = await import("../../match/engine-orchestrator.js");
     const backfillResult = backfillRepairCasePriorityFields(db);
     requestMatchRecompute(db, "PRIORITY_BACKFILL", "system", 0);
     const recomputeResult = await processPendingRecompute(db);

@@ -31,6 +31,23 @@ interface HistoryEvent {
   created_at: string;
 }
 
+interface MatchCaseResult {
+  runId: number;
+  eligible: boolean;
+  resultStatus: string;
+  verifyReasons: string[];
+  margin: number | null;
+  marginPoints: number | null;
+  agePoints: number | null;
+  score: number | null;
+  priorityRank: number | null;
+  ruleSetId: number | null;
+  ruleSetVersion: number | null;
+  ruleName: string | null;
+  depositoAtual: string | null;
+  computedAt: string;
+}
+
 interface CaseDetail {
   id: number;
   imei: string | null;
@@ -49,6 +66,7 @@ interface CaseDetail {
   manualPriorityActive: boolean;
   notes: string | null;
   depositoAtual: string | null;
+  matchCaseResult: MatchCaseResult | null;
   parts: PartInfo[];
   nextAction: { code: string; label: string; description: string; enabled: boolean };
   technician: { id: number; name: string } | null;
@@ -87,6 +105,29 @@ const EVENT_LABELS: Record<string, string> = {
   MATCH_STATUS_CHANGED: "Status de match alterado",
   KIT_RESERVED: "Kit reservado",
 };
+
+const VERIFY_REASON_LABELS: Record<string, string> = {
+  IMEI_AUSENTE: "IMEI ausente",
+  MODELO_AUSENTE: "Modelo ausente",
+  CUSTO_AUSENTE: "Custo ausente",
+  VENDA_ESTIMADA_AUSENTE: "Venda estimada ausente",
+  IDADE_AUSENTE: "Idade ausente",
+  DEPOSITO_NAO_IDENTIFICADO: "Depósito não identificado (não consta no Rel. Seriais Com Saldo)",
+  DEPOSITO_FORA_DO_FLUXO: "Depósito fora do fluxo (só AGUARDANDO PEÇA e MANUTENÇÃO INTERNA participam)",
+  PECA_NECESSARIA_AUSENTE: "Nenhuma peça necessária cadastrada",
+  REFERENCIA_PECA_NAO_RESOLVIDA: "Referência de peça não resolvida",
+  MAIS_DE_UMA_REFERENCIA_POSSIVEL: "Mais de uma referência possível — vincule a compatibilidade correta",
+};
+
+function verifyReasonLabel(code: string): string {
+  return VERIFY_REASON_LABELS[code] ?? code.replace(/_/g, " ");
+}
+
+/** Formata número decimal do motor para exibição (não altera o valor usado no cálculo). */
+function fmtPts(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return v.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+}
 
 function eventLabel(type: string): string {
   return EVENT_LABELS[type] ?? type.replace(/_/g, " ").toLowerCase().replace(/^\w/, c => c.toUpperCase());
@@ -431,6 +472,27 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
         {/* Corpo rolável */}
         <div className="drawer-body" style={{ overflowY: "auto", flex: 1 }}>
           {loading && <div className="loading-state"><Loader2 size={18} className="spin" /></div>}
+
+          {/* Motivos de VERIFICAR — o card nunca é um buraco negro */}
+          {!loading && data && data.matchCaseResult && data.matchCaseResult.verifyReasons.length > 0 && (
+            <div style={{
+              margin: "0.75rem 0", padding: "0.75rem 1rem",
+              border: "1px solid var(--warn-border, rgba(245,158,11,0.4))",
+              background: "rgba(245,158,11,0.08)", borderRadius: "var(--r-md)",
+            }}>
+              <div style={{ fontWeight: 600, fontSize: "0.85rem", marginBottom: "0.35rem" }}>
+                Pendências para participar do match
+              </div>
+              <ul style={{ margin: 0, paddingLeft: "1.1rem", fontSize: "0.82rem", display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+                {data.matchCaseResult.verifyReasons.map((r) => (
+                  <li key={r}>{verifyReasonLabel(r)}</li>
+                ))}
+              </ul>
+              <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginTop: "0.4rem" }}>
+                Corrija os campos na aba Prioridade (custo/venda/idade), no depósito acima ou na análise — o card volta ao motor automaticamente.
+              </div>
+            </div>
+          )}
           {error && <div className="error-banner">{error}</div>}
 
           {!loading && data && tab === "parts" && (
@@ -659,6 +721,22 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
                       </span>
                     </div>
                     <div className="score-row"><span>Técnico</span><span>{data.technician?.name ?? data.directedTechnician?.name ?? "—"}</span></div>
+                    {data.matchCaseResult && (
+                      <>
+                        <div className="score-row" style={{ borderTop: "1px solid var(--border)", marginTop: "0.5rem", paddingTop: "0.5rem" }}>
+                          <span>Pontos de margem</span><span>{fmtPts(data.matchCaseResult.marginPoints)}</span>
+                        </div>
+                        <div className="score-row"><span>Pontos de idade</span><span>{fmtPts(data.matchCaseResult.agePoints)}</span></div>
+                        <div className="score-row"><span style={{ fontWeight: 600 }}>Score total</span><span style={{ fontWeight: 600 }}>{fmtPts(data.matchCaseResult.score)}</span></div>
+                        <div className="score-row"><span>Posição na disputa</span><span>{data.matchCaseResult.priorityRank != null ? `#${data.matchCaseResult.priorityRank}` : "—"}</span></div>
+                        <div className="score-row">
+                          <span>Regra utilizada</span>
+                          <span>{data.matchCaseResult.ruleName ?? "—"} (v{data.matchCaseResult.ruleSetVersion ?? "?"})</span>
+                        </div>
+                        <div className="score-row"><span>Resultado do motor</span><span>{data.matchCaseResult.resultStatus}</span></div>
+                        <div className="score-row"><span>Depósito na avaliação</span><span>{data.matchCaseResult.depositoAtual ?? "—"}</span></div>
+                      </>
+                    )}
                     {data.notes && (
                       <div className="score-row" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.25rem" }}>
                         <span>Observações</span>
@@ -670,7 +748,7 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
                       {scoreMsg && <span style={{ fontSize: "0.8rem", color: "var(--success)" }}>{scoreMsg}</span>}
                     </div>
                     <p style={{ fontSize: "0.75rem", color: "var(--muted)", marginTop: "0.75rem" }}>
-                      Score e pontos detalhados disponíveis nos resultados do motor (Auditoria do Motor).
+                      Margem = venda estimada − custo. O score usa a precisão decimal completa (nunca é arredondado no cálculo) — a formatação acima é apenas visual.
                     </p>
                   </>
                 ) : (
