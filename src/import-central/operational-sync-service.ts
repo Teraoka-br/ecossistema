@@ -217,17 +217,29 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
     "NOVOS DISPONIVEIS":         "CONCLUIDO",
   };
 
-  // Estados que não devem ser regredidos por EM_ANALISE ou APTO_REPARO via Datasys.
-  // CONCLUIDO é sempre aplicado (Datasys é autoritativo para aparelhos fora do fluxo).
+  // Estados que não devem ser regredidos por APTO_REPARO via Datasys.
+  // CONCLUIDO/VENDA_ESTADO/CANCELADO podem ser reabertos se o aparelho voltou ao fluxo.
   const LOCKED_FROM_DEMOTION = new Set([
     "EM_SEPARACAO", "EM_REPARO", "REPARO_EXECUTADO",
     "TRIAGEM_FINAL", "RETORNO_TECNICO",
     "CONCLUIDO", "VENDA_ESTADO", "CANCELADO",
   ]);
+  // Estados terminais que podem ser reabertos quando o aparelho volta ao depósito de reparo
+  const TERMINAL_STATUSES = new Set(["CONCLUIDO", "VENDA_ESTADO", "CANCELADO"]);
 
   const markConcluido = db.prepare(
     `UPDATE repair_cases SET workflow_status = 'CONCLUIDO',
        updated_at = datetime('now') WHERE id = ?`,
+  );
+  const reopenCase = db.prepare(
+    `UPDATE repair_cases SET workflow_status = 'EM_ANALISE',
+       updated_at = datetime('now') WHERE id = ?`,
+  );
+  const markVerificar = db.prepare(
+    `UPDATE repair_cases SET workflow_status = 'VERIFICAR', updated_at = datetime('now')
+     WHERE (deposito_atual IS NULL OR deposito_atual = '')
+       AND workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO','VERIFICAR',
+         'EM_SEPARACAO','EM_REPARO','REPARO_EXECUTADO','TRIAGEM_FINAL','RETORNO_TECNICO','DIRECIONADO_TECNICO')`,
   );
   const markAptoReparo = db.prepare(
     `UPDATE repair_cases SET workflow_status = 'APTO_REPARO',
@@ -302,7 +314,10 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
 
       switch (action) {
         case "FLUXO_NORMAL":
-          // Mantém status atual — case segue no pipeline de match/peças
+          // Se caso estava encerrado e aparelho voltou ao depósito de reparo → reabrir
+          if (TERMINAL_STATUSES.has(rc.workflow_status)) {
+            reopenCase.run(rc.id);
+          }
           break;
 
         case "CONCLUIDO":
@@ -328,6 +343,8 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
         }
       }
     }
+    // Casos sem depósito determinado (IMEI ausente de qualquer relatório) → VERIFICAR
+    markVerificar.run();
     db.prepare("COMMIT").run();
   } catch (err) {
     try { db.prepare("ROLLBACK").run(); } catch { /* */ }

@@ -599,6 +599,20 @@ repairQueueRouter.patch("/fila-reparos/:id/deposito", requireAuth, requireOperat
   } catch (err) { next(err); }
 });
 
+// ─── Lista de depósitos conhecidos (do Com Saldo) ────────────────────────
+
+repairQueueRouter.get("/depositos", requireAuth, (_req, res, next) => {
+  try {
+    const db = getDb();
+    const rows = db.prepare(
+      `SELECT deposito_atual, COUNT(*) as c FROM rel_seriais_saldo_current
+       WHERE deposito_atual IS NOT NULL AND deposito_atual != ''
+       GROUP BY deposito_atual ORDER BY c DESC`,
+    ).all() as { deposito_atual: string; c: number }[];
+    res.json(rows.map(r => r.deposito_atual));
+  } catch (err) { next(err); }
+});
+
 // ─── Observação ───────────────────────────────────────────────────────────
 
 repairQueueRouter.post("/fila-reparos/:id/notes", requireAuth, (req, res, next) => {

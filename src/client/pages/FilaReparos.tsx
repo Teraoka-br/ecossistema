@@ -213,15 +213,6 @@ function RepairCard({
         </div>
       </div>
 
-      {/* Problema */}
-      {item.problema && (
-        <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginBottom: "0.35rem",
-          display: "flex", alignItems: "center", gap: "0.3rem" }}>
-          <Tag size={10} style={{ flexShrink: 0, opacity: 0.6 }} />
-          <span style={{ fontStyle: "italic" }}>{item.problema}</span>
-        </div>
-      )}
-
       {/* Depósito / Técnico */}
       {(tecnico || deposito) && (
         <div style={{ display: "flex", alignItems: "center", gap: "0.3rem",
@@ -273,35 +264,38 @@ function RepairCard({
 
 function VerificarList({
   items,
-  depositoMap,
   onCaseClick,
   onRefresh,
 }: {
   items: QueueItem[];
-  depositoMap: Record<string, string>;
   onCaseClick: (id: number) => void;
   onRefresh: () => void;
 }) {
-  const [editMap, setEditMap] = useState<Record<number, string>>({});
-  const [saving, setSaving] = useState<Record<number, string>>({});
   const [closing, setClosing] = useState<number | null>(null);
   const [closeNotes, setCloseNotes] = useState("");
   const [closeError, setCloseError] = useState<string | null>(null);
+  const [depositoEditMap, setDepositoEditMap] = useState<Record<number, string>>({});
+  const [savingDep, setSavingDep] = useState<Record<number, string>>({});
+  const [depositoOpts, setDepositoOpts] = useState<string[]>([]);
 
-  function setProblema(id: number, val: string) {
-    setEditMap(p => ({ ...p, [id]: val }));
-  }
+  useEffect(() => {
+    fetch("/api/depositos")
+      .then(r => r.ok ? r.json() : [])
+      .then((d: string[]) => setDepositoOpts(d))
+      .catch(() => {});
+  }, []);
 
-  async function saveProblema(item: QueueItem) {
-    const val = editMap[item.id] ?? item.problema ?? "";
-    setSaving(p => ({ ...p, [item.id]: "saving" }));
-    await fetch(`/api/fila-reparos/${item.id}/info`, {
+  async function saveDeposito(item: QueueItem) {
+    const val = depositoEditMap[item.id] ?? "";
+    if (!val.trim()) return;
+    setSavingDep(p => ({ ...p, [item.id]: "saving" }));
+    await fetch(`/api/fila-reparos/${item.id}/deposito`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ problema: val || null }),
+      body: JSON.stringify({ deposito: val.trim().toUpperCase() }),
     });
-    setSaving(p => ({ ...p, [item.id]: "done" }));
-    setTimeout(() => setSaving(p => { const n = { ...p }; delete n[item.id]; return n; }), 1500);
+    setSavingDep(p => ({ ...p, [item.id]: "done" }));
+    setTimeout(() => setSavingDep(p => { const n = { ...p }; delete n[item.id]; return n; }), 1500);
     onRefresh();
   }
 
@@ -328,18 +322,21 @@ function VerificarList({
       <div className="empty-state">
         <CheckCircle2 size={36} style={{ opacity: 0.25 }} />
         <div style={{ fontWeight: 600 }}>Nenhum aparelho para verificar</div>
-        <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Tudo certo — nenhum aparelho com Disponível=NÃO pendente.</div>
+        <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Tudo certo — nenhum caso com depósito indeterminado.</div>
       </div>
     );
   }
 
   return (
     <div>
+      <datalist id="deposito-opts">
+        {depositoOpts.map(d => <option key={d} value={d} />)}
+      </datalist>
+
       <div style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginBottom: "0.75rem", padding: "0.5rem 0.75rem",
         background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "var(--r-md)" }}>
         <AlertTriangle size={12} style={{ display: "inline", marginRight: "0.4rem", color: "var(--err-text)" }} />
-        Estes aparelhos aparecem como <strong>Disponível = NÃO</strong> no Datasys — saíram do estoque.
-        Confirme o desfecho de cada um antes de fechar.
+        Depósito atual <strong>não determinado</strong> — informe manualmente onde o aparelho está ou finalize o caso.
       </div>
 
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
@@ -348,17 +345,15 @@ function VerificarList({
             <tr style={{ background: "var(--surface-alt)", borderBottom: "1px solid var(--border)" }}>
               <th style={{ padding: "0.625rem 1rem", textAlign: "left", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.05em" }}>APARELHO</th>
               <th style={{ padding: "0.625rem 0.75rem", textAlign: "left", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.05em" }}>IMEI</th>
-              <th style={{ padding: "0.625rem 0.75rem", textAlign: "left", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.05em" }}>ÚLTIMO DEPÓSITO</th>
-              <th style={{ padding: "0.625rem 0.75rem", textAlign: "left", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.05em" }}>PROBLEMA / MOTIVO</th>
+              <th style={{ padding: "0.625rem 0.75rem", textAlign: "left", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.05em", minWidth: 220 }}>DEFINIR DEPÓSITO</th>
               <th style={{ padding: "0.625rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.05em" }}>AÇÃO</th>
             </tr>
           </thead>
           <tbody>
             {items.map((item, idx) => {
               const modelStr = [item.brand, item.model, item.capacity, item.color].filter(Boolean).join(" · ");
-              const tecnico = item.depositoAtual ? (depositoMap[item.depositoAtual] ?? null) : null;
-              const problemaVal = item.id in editMap ? editMap[item.id] : (item.problema ?? "");
-              const isSaving = saving[item.id];
+              const depVal = item.id in depositoEditMap ? depositoEditMap[item.id] : (item.depositoAtual ?? "");
+              const isSavingDep = savingDep[item.id];
               const isClosing = closing === item.id;
 
               return (
@@ -386,44 +381,28 @@ function VerificarList({
                     </span>
                   </td>
                   <td style={{ padding: "0.75rem 0.75rem", verticalAlign: "top" }}>
-                    {tecnico
-                      ? <div><span style={{ color: "var(--accent)", fontWeight: 600, fontSize: "0.8rem" }}>{tecnico}</span><div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>{item.depositoAtual}</div></div>
-                      : <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{item.depositoAtual ?? "—"}</span>
-                    }
-                  </td>
-                  <td style={{ padding: "0.75rem 0.75rem", verticalAlign: "top", minWidth: 180 }}>
-                    {isClosing ? (
-                      <textarea
-                        value={closeNotes}
-                        onChange={e => setCloseNotes(e.target.value)}
-                        placeholder="Observação (opcional)…"
-                        rows={2}
-                        style={{ width: "100%", fontSize: "0.78rem", resize: "vertical",
+                    <div style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
+                      <input
+                        list="deposito-opts"
+                        value={depVal}
+                        onChange={e => setDepositoEditMap(p => ({ ...p, [item.id]: e.target.value.toUpperCase() }))}
+                        placeholder="Selecione ou digite o depósito…"
+                        style={{ flex: 1, fontSize: "0.78rem",
                           background: "var(--surface-alt)", border: "1px solid var(--border)",
                           borderRadius: "var(--r-sm)", padding: "0.3rem 0.5rem", color: "var(--text)" }}
                       />
-                    ) : (
-                      <div style={{ display: "flex", gap: "0.3rem", alignItems: "center" }}>
-                        <input
-                          value={problemaVal}
-                          onChange={e => setProblema(item.id, e.target.value)}
-                          placeholder="Descreva o problema…"
-                          style={{ flex: 1, fontSize: "0.78rem",
-                            background: "var(--surface-alt)", border: "1px solid var(--border)",
-                            borderRadius: "var(--r-sm)", padding: "0.3rem 0.5rem", color: "var(--text)" }}
-                        />
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          style={{ padding: "0.25rem 0.4rem", flexShrink: 0 }}
-                          title="Salvar problema"
-                          onClick={() => saveProblema(item)}
-                        >
-                          {isSaving === "saving" ? <Loader2 size={11} className="spin" />
-                            : isSaving === "done" ? <CheckCircle2 size={11} style={{ color: "var(--ok-text)" }} />
-                            : <Save size={11} />}
-                        </button>
-                      </div>
-                    )}
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        style={{ padding: "0.25rem 0.4rem", flexShrink: 0 }}
+                        title="Confirmar depósito"
+                        onClick={() => saveDeposito(item)}
+                        disabled={!(depositoEditMap[item.id] ?? "").trim()}
+                      >
+                        {isSavingDep === "saving" ? <Loader2 size={11} className="spin" />
+                          : isSavingDep === "done" ? <CheckCircle2 size={11} style={{ color: "var(--ok-text)" }} />
+                          : <Save size={11} />}
+                      </button>
+                    </div>
                   </td>
                   <td style={{ padding: "0.75rem 0.75rem", verticalAlign: "top", textAlign: "right" }}>
                     {isClosing ? (
@@ -1022,7 +1001,6 @@ export function FilaReparos() {
           {filter === "VERIFICAR" ? (
             <VerificarList
               items={items}
-              depositoMap={depositoMap}
               onCaseClick={setSelectedId}
               onRefresh={loadItems}
             />
