@@ -1,6 +1,6 @@
 # Contexto do projeto — Sistema de Peças (Outlet do Celular)
 
-> Atualizado em: 2026-07-10, após correções beta de 5 bugs bloqueantes (commit d73cd9c).
+> Atualizado em: 2026-07-16, após consolidação do motor único de match (migration 038).
 > Mantenha este documento enxuto — veja "Regras de manutenção" no final antes de editar.
 
 ## 1. Projeto
@@ -17,9 +17,9 @@
   fonte operacional oficial e novas importações ficam bloqueadas (`system_state.initialized`).
   Implementados: bipagem operacional (snapshot oficial), solicitações de compra aprovadas,
   pedidos de compra, recebimento (com movimentações de estoque), estoque operacional
-  (base oficial + movimentações posteriores), **motor de match** (`src/match/`, migration 007,
-  API `/api/match-runs/*`, tela `/match`), **separação operacional** (`src/separation/`,
-  migration 009, API `/api/separation-batches/*`, tela `/separacao`),
+  (base oficial + movimentações posteriores), **motor único de match** (`src/match/`,
+  função pura `calculateMatch` + migration 038 — o motor legado id_pedido/migration 007 e a
+  separação antiga/migration 009 foram aposentados),
   **autenticação/sessões** (migration 010, `src/auth/`, `src/audit/`, `src/staff/`),
   **domínio de reparo** (`repair_cases`/`part_requests`/`repair_case_priorities`, migration 011,
   `src/repair/`, API `/api/repair-cases/*`), **intake do Datasys**
@@ -71,33 +71,38 @@ Ver detalhes completos em [docs/regras-negocio.md](regras-negocio.md) e
   preservados na importação, normalizados com/sem acento, nunca apagados por reimportação.
 - **Status/prioridade de kit:** `KIT POSSÍVEL`=1, `MATCH PARCIAL`=2, `KIT INCOMPLETO`=9,
   `VERIFICAR`=9. Implementado como leitura/preservação do valor legado da planilha.
-- **Margem** = VENDA − CUSTO; ausência de custo/venda → margem `null` + warning não fatal.
-  Implementado em `src/domain/scoring.ts` (puro, testado), mas **não é recalculado** sobre os
-  dados importados nesta fase — os valores legados das planilhas são preservados como estão.
-- **Nota de idade** = `floor(IDADE/30)`, teto 15. **Nota de margem** = `INT(MARGEM/150)`
-  (estilo Excel, arredonda para −∞; margem negativa pune). **Score** = soma das duas.
-  Parâmetros configuráveis via tabela `decision_rules` (não fixos no código) — implementado
-  como módulo de domínio testado; **ainda não há UI** para editar a regra nem motor que
-  recalcule pedidos com ela.
+- **Margem** = venda estimada − custo, calculada pelo motor com precisão decimal completa.
+  Score **sem arredondamento** (o `floor`/INT estilo Excel foi aposentado junto com
+  `src/domain/scoring.ts` e `decision_rules`): parâmetros vivem em `match_rule_sets`
+  (nome, versão, margem/pt, dias/pt, teto de idade, pesos, margem negativa), editáveis na
+  tela `/admin/regras-match`, exatamente UMA regra ativa (índice único parcial).
 - **`QTDE DE PEÇAS`**: é o total de linhas necessárias para o aparelho (repete em todas as
   linhas do mesmo aparelho na planilha) — semântica apenas documentada/preservada como valor
   legado; não há validação cruzada automática contra a contagem real de linhas do IMEI nesta
   fase.
-- **Ordem de prioridade dos aparelhos** (implementada no motor de match): menor qtd. de
-  peças abertas → maior score → maior margem → menor `id_pedido` estável como desempate.
-  Implementada em `runMatchEngine` e usa `comparePriority` de `src/domain/scoring.ts`.
+- **Ordem de prioridade dos aparelhos** (motor único): prioridade manual → maior score →
+  maior margem → maior idade → menor id do caso (desempate determinístico). Quantidade de
+  peças NÃO é critério de prioridade — só determina se o kit fecha naquele momento.
 - **Bipagem e finalização** (implementadas — ver seção dedicada em
   [docs/regras-negocio.md](regras-negocio.md)): classificação de referência (RECOGNIZED/
   UNKNOWN_REFERENCE/MISSING_KEY/CONFLICT), bloqueadores absolutos vs. proteção de cobertura
   mínima (`COUNT_MIN_COMPLETENESS_RATIO`, padrão 0.80, bypassável só com força + justificativa
   ≥10 caracteres), finalização transacional com rollback completo e idempotência.
-- **Motor de match/distribuição** (implementado em `src/match/`): 1ª passagem atende só
-  kits completos (tudo ou nada, status `MATCH`, fase `FULL`); 2ª passagem usa saldo restante
-  (`MATCH PARCIAL`/`PEDIR PEÇA`/`SEM SALDO`/`VERIFICAR`); ordem de consumo por `CHAVEPECA`,
-  reiniciando em 1 para cada peça diferente. Consume `getCurrentOperationalStock()` (base
-  oficial + movimentações posteriores). **Nunca** cria `stock_movements` nem
-  `operational_events` — é recomendação calculada apenas. Fingerprint SHA-256 detecta
-  reutilização (`force=false`) e staleness.
+- **Motor de match ÚNICO** (consolidado em 2026-07-16): a decisão vive EXCLUSIVAMENTE na
+  função pura `calculateMatch` (`src/match/calculate-match.ts`) — sem banco, sem HTTP,
+  determinística, **sem arredondamento** (score decimal exato: margem/`marginPerPoint`×peso +
+  min(idade/`diasPorPonto`, teto)×peso). Elegibilidade com motivos de VERIFICAR (IMEI/modelo/
+  custo/venda/idade/depósito/peça/referência); depósito elegível só `AGUARDANDO PECA` e
+  `MANUTENCAO INTERNA` (normalizado), fonte automática exclusiva = Rel. Seriais Com Saldo.
+  Ordenação: prioridade manual → maior score → maior margem → maior idade → menor id.
+  1ª passagem kits completos (atômico), 2ª passagem parciais com sobras virtuais.
+  Motor real (`engine-orchestrator.ts` = loader `engine-loader.ts` + persistência
+  transacional) e simulador (`simulate-service.ts`) usam a MESMA função — testado.
+  **Nunca** cria reservas/movimentações/pedidos — apenas sinaliza; a reserva real é a
+  separação manual. Resultado por caso persistido em `repair_match_case_results`
+  (motivos JSON, pontos decimais, rank, regra/versão). Motor legado id_pedido
+  (`match_runs`/`match_results`/`decision_rules`) foi aposentado — tabelas mantidas como
+  histórico, código removido.
 
 ## 4. Arquitetura atual
 
@@ -123,9 +128,10 @@ src/
   counting/    counting-service.ts
   system/      system-service.ts
   operational/ stock-service.ts, procurement-service.ts, receiving-service.ts
-  match/       match-engine.ts, match-fingerprint.ts, match-repository.ts, match-service.ts
-  separation/  separation-types.ts, separation-status.ts, separation-repository.ts,
-               separation-service.ts
+  match/       calculate-match.ts (função pura ÚNICA), engine-loader.ts,
+               engine-orchestrator.ts (persistência), simulate-service.ts (dry-run),
+               match-rule-service.ts (CRUD/ativação), next-action-service.ts,
+               priority-backfill-service.ts
   auth/        auth-service.ts — PIN hashing (scryptSync), sessões, usuários, roles
   audit/       audit-service.ts — logAudit (silencioso), getAuditLog
   staff/       staff-service.ts — técnicos (TECHNICIAN, activate/deactivate)
@@ -164,15 +170,15 @@ de separação a partir de runs de match, confirmar ou cancelar por peça/aparel
 - `POST /api/purchase-orders/:id/receipts/{preview,confirm}`, `GET .../receipts`,
   `GET /api/goods-receipts/:id`.
 - `GET /api/stock/current`, `GET /api/stock/movements`.
-- `POST /api/match-runs` (executa ou reutiliza), `GET /api/match-runs` (lista),
-  `GET /api/match-runs/latest`, `GET /api/match-runs/:id`,
-  `GET /api/match-runs/:id/{devices,results,stock-summary,comparison,export-csv}`,
-  `GET /api/match-runs/current-state`, `GET /api/decision-rules/active`.
-- `POST /api/separation-batches` (criar lote), `GET /api/separation-batches` (listar),
-  `GET /api/separation-batches/:id/state`,
-  `POST /api/separation-batches/:id/{confirm-all,cancel}`,
-  `POST /api/separation-batches/:id/devices/:deviceId/{confirm,cancel}`,
-  `POST /api/separation-batches/:id/items/:itemId/{confirm,cancel}`.
+- `GET/POST /api/match-rules`, `PATCH /api/match-rules/:id`,
+  `POST /api/match-rules/:id/activate` (transacional + recálculo),
+  `POST /api/match-rules/simulate` (dry-run, mesma função do motor),
+  `GET /api/engine/state`, `POST /api/engine/run`.
+- `GET/POST/DELETE /api/part-key-aliases` (compatibilidade manual; muta → recálculo).
+- `PATCH /api/fila-reparos/:id/{deposito,score,info}` — correções de VERIFICAR com
+  auditoria (valor anterior + usuário) e retorno automático ao motor.
+- (aposentados em 2026-07-16: `/api/match-runs/*`, `/api/decision-rules/active`,
+  `/api/separation-batches/*` — motor legado id_pedido e separação antiga.)
 - `GET /api/repair-cases/chave-peca-search?q=&limit=` — autocomplete CHAVEPECA (union de `part_requests` + `source_order_parts`, com `stockAvailable` do último snapshot OFFICIAL).
 - `GET /api/repair-cases/search?imei=&os=&repairDate=` — busca por caso (IMEI/OS/data).
 - `POST /api/repair-cases/save-analysis` — criar/atualizar caso + peças em transação única.
@@ -489,72 +495,27 @@ reimportação.
 
 ## 10. Pendências
 
-**Bloqueadores:** nenhum conhecido. 615 testes + typecheck + build limpos.
+**Bloqueadores:** nenhum conhecido. 586 testes + typecheck + build limpos.
 
 **Últimas mudanças relevantes (mais recentes primeiro, máx. 5):**
-1. **Integridade transacional da análise** (commit 87f4156, 2026-07-10): (a) `src/analise/analise-service.ts` (novo): reconciliação de `part_requests` por `chave_peca_norm` em transação única — reeditar não duplica peças, peças travadas (`AGUARDANDO_RECEBIMENTO`/`INDICADA`/`RESERVADA`/`SEPARADA`/`CONSUMIDA`) nunca alteradas/canceladas, idempotência garantida. (b) Reedição de caso `COMPLETED` permitida (sem `WHERE analysis_status='DRAFT'`). (c) Ownership check: `ADMIN` edita todos; `OPERATOR` só o próprio (404/403). (d) `POST /api/analise/save-draft` substitui múltiplos fetches soltos — draft save agora é atômico. (e) Wildcards `%` e `_` escapados com `ESCAPE '\\'` em todas as queries LIKE de sugestões. (f) `ANALYSIS_COMPLETED` na 1ª finalização; `ANALYSIS_UPDATED` nas reediçôes. 23 novos testes de integração em `tests/analise-complete.test.ts`.
+1. **Consolidação do motor único de match** (2026-07-16, migration 038): função pura
+   `calculateMatch` é a ÚNICA implementação (motor real, simulador, testes) — sem
+   arredondamento (score decimal exato), elegibilidade com motivos de VERIFICAR
+   persistidos em `repair_match_case_results`, gate de depósito (só AGUARDANDO PECA/
+   MANUTENCAO INTERNA; fonte automática = Rel. Seriais Com Saldo), ordenação
+   score→margem→idade→id (prioridade manual antes), kits atômicos + parciais com sobras.
+   Regras: `match_rule_sets` ganhou `name`; ativação transacional; 0 ou >1 ativas aborta o
+   motor sem tocar cards. Aposentados: motor legado id_pedido (match-engine/service/
+   repository/fingerprint/match-routes, tela `/match`), separação antiga (0 itens),
+   `domain/scoring.ts`, `decision_rules` (tabela mantida, código desconectado). Novos:
+   `PATCH /fila-reparos/:id/score` (corrigir custo/venda/idade, auditado + recálculo),
+   depósito manual auditado com valor anterior, UI de compatibilidades em
+   `/estoque/referencias` (part_key_aliases), drawer com motivos/score decomposto/regra.
+   Validação na cópia do beta: `docs/MATCH_BETA_VALIDATION.md`
+   (713 avaliados → MATCH 11, PARCIAL 24, VERIFICAR 106; idempotente; simulação=motor).
+   Backup pré-mudança: `data/backups/app-beta-pre-match-consolidation-2026-07-16T12-20-17.sqlite`.
+2. **Integridade transacional da análise** (commit 87f4156, 2026-07-10): (a) `src/analise/analise-service.ts` (novo): reconciliação de `part_requests` por `chave_peca_norm` em transação única — reeditar não duplica peças, peças travadas (`AGUARDANDO_RECEBIMENTO`/`INDICADA`/`RESERVADA`/`SEPARADA`/`CONSUMIDA`) nunca alteradas/canceladas, idempotência garantida. (b) Reedição de caso `COMPLETED` permitida (sem `WHERE analysis_status='DRAFT'`). (c) Ownership check: `ADMIN` edita todos; `OPERATOR` só o próprio (404/403). (d) `POST /api/analise/save-draft` substitui múltiplos fetches soltos — draft save agora é atômico. (e) Wildcards `%` e `_` escapados com `ESCAPE '\\'` em todas as queries LIKE de sugestões. (f) `ANALYSIS_COMPLETED` na 1ª finalização; `ANALYSIS_UPDATED` nas reediçôes. 23 novos testes de integração em `tests/analise-complete.test.ts`.
 1. **Correções beta 5 bugs bloqueantes** (commit d73cd9c, 2026-07-10): (a) `analise-routes.ts`: INSERT em `operational_events` com coluna inexistente `created_by_user_id` substituído por `recordOperationalEvent` — `ANALYSIS_COMPLETED` grava corretamente. (b) `Analise.tsx`: CHAVEPECA tipo "chave" com cor — preview e payload incluem a cor (`FRONTAL K61 BRANCO`), sem forçar `incluirCor=false`. (c) `Analise.tsx`: prefill SH tem precedência sobre repair_case antigo — busca exata por IMEI/OS via `/api/repair-cases/search`, prefill aplicado primeiro, peças carregadas do caso sem sobrescrever campos principais. (d) Histórico operacional: corrigido como consequência do fix (a). (e) `repair-queue-routes.ts` + `AdminMatchRules.tsx`: ativação de regra retorna `casesEvaluated/casesChanged/fullKitsFound/partialKitsFound/runId`; mensagem distingue mudança real de reordenação de prioridade.
 1. **Correções MVP operacional** (migration 022): (a) `ensurePurchaseRequestForPart` corrigido para usar apenas colunas reais de `purchase_requests` (`id_pedido`, `chave_peca`, `chave_peca_norm`, `referencia`, `referencia_norm`, `quantidade`, `origin_status`, `status=APPROVED`, `part_request_id`) — eliminado INSERT com colunas inexistentes `source`/`descricao` e status errado `APROVADO`. (b) Migration 022 recria `uidx_pr_part_request_active` com `status != 'CANCELLED'` correto (021 usava `'CANCELADO'/'CANCELADA'`). (c) `applyAnaliseMiToRepairCases`: novos casos criados com `analysis_status='COMPLETED'` e `workflow_status` baseado na validade da chave (`PEDIR_PECA` ou `VERIFICAR`); casos existentes só têm workflow atualizado se não estiverem em estado avançado. (d) `processPendingRecompute` chamado automaticamente após importações HIS/ANALISE_MI/PEDIDOS e após confirmação de recebimento — resposta inclui `matchTriggered`, `matchExecuted`, `matchStats`. (e) `createPurchaseOrder` atualiza `part_requests.status=AGUARDANDO_RECEBIMENTO` (se PEDIR_PECA) e `repair_cases.workflow_status=AGUARDANDO_RECEBIMENTO` (se não houver reserva ativa e não em estado preservado). (f) `/admin/pessoas` exibe página combinada (`AdminPessoas`) com tabs Usuários/Técnicos. (g) Modal de direcionamento exibe mensagem quando não há técnicos ativos e botão "Cadastrar técnico" para admins. (h) Busca da fila adiciona `allocated_reference` e `purchase_requests.referencia`. Migrations 021+022 aplicadas no banco operacional.
 2. **Central de Dados — correções pós-validação** (migration 020): (a) PEACS: chave natural trocada de FAMÍLIA+MEMÓRIA para MARCA/MODELO normalizado (`marca_modelo_norm`) — elimina colisões quando MEMÓRIA diverge de MARCA/MODELO; detecta duplicidade de MARCA/MODELO (última ocorrência vence, warning gerado) e divergência de capacidade (`PEACS_CAPACITY_MISMATCH`); coluna `MARCA/MODELO` agora obrigatória. (b) BIFF2/3/4: `validateFileForSource` aceita arquivos `.xls` com assinatura BIFF2 (`09 00`), BIFF3 (`09 02`) e BIFF4 (`09 04`) além de OLE2/XLSX — resolve rejeição do `sH (5).xls`. (c) `persistIssues` aplicado em todas as 7 fontes (antes só `his`); `issues_count` atualizado no `UPDATE` final de cada confirm. (d) Preview do BKP agora calcula `rowsValid` ≠ `rowsFound` (antes eram iguais, ignorando as 21 linhas não inseridas por idempotência). (e) Retomada de staging no frontend: `PendingDrawer` permite listar previews pendentes por fonte, abrir, confirmar, cancelar e ver status expirado — acessível pelo card quando `pendingStaging > 0`. Script temporário `scripts/test-migration-019.mjs` removido. 451 testes.
 2. **Central de Dados** (migration 018 + `src/import-central/`): tela `/admin/dados` substituída por hub de 7 fontes de dados com fluxo upload → preview → confirmar para: `rel-seriais` (CSV IMEI/técnico/custo), `sh` (SH Oficina xlsx), `his` (CONTROLE DE ENTRADA TRADE-IN xlsx), `bkp` (BKP SISTEMICO xlsx — 3 abas), `triagem-saida` (TRIAGEM SAIDA xlsx), `peacs` (catálogo de preços). Legado (PEDIDOS+ANALISE MI) fica read-only mostrando lote inicial. Rotas em `/api/import-central/` (requireAdmin). `DELETE /datasys/import/:id` corrigido com requireAdmin. 400 testes.
-1. **Beta fixes** (commit ff1399b, 2026-07-08): `ReceberModal` reescrito — 1100px, header/footer fixos, thead sticky, botões "Receber saldo"/"Zerar tudo", status por linha (completo/parcial/excedente/sem recebimento), exibe `matchStats` após confirmação, bloqueia confirm em excedente sem justificativa. `part-suggestions`: usa `COALESCE(peca_nome, description)` + `analise_mi_rows.peca_solicitada` (resolve bug onde peca_nome era NULL para todos os 1387 registros legados). Migration 026: `repair_started_at`, `repair_started_by_user_id`, `repair_completed_at`, `repair_completed_by_user_id` em `repair_cases`; `startRepair`/`completeRepair` populam esses campos. 14 novos testes (`receipt-motor.test.ts`): recebimento→stock_movement, recebimento→MATCH, MATCH_PARCIAL, saldo operacional, timestamps, autocomplete fallback.
-2. **Macrofase 2 concluída** (migration 016 + engine rewrite): `repair_cases.workflow_status` expandido com `DIRECIONADO_TECNICO`, `EM_REPARO`, `REPARO_EXECUTADO`, `TRIAGEM_FINAL`, `RETORNO_TECNICO`; `part_requests.status` com `CONSUMIDA`. Runner de migrations suporta `PRAGMA legacy_alter_table = ON` (fora de BEGIN). Motor de match reescrito: REF-based (`chaveNorm → refNorm → qty`), completamente atômico (compute in-memory, um BEGIN/COMMIT no final). `getCurrentOperationalStock` passa a usar `operational_reservations` ACTIVE + `separation_items` RESERVED para `reservedQuantity` e `count_divergences` PENDING/APPROVED para `blockedQuantity`. `reserveKit` transiciona para `APTO_REPARO` (não mais `EM_SEPARACAO`). `directToTechnician` exige `APTO_REPARO`. Auto-trigger de `processPendingRecompute` no boot do servidor. Script `cleanup:invalid-reservations`. 400 testes.
-2. **Macrofase 2 WIP** (migrations 013–015): motor de match para `repair_cases`, fila de reparo, reservas operacionais em `operational_reservations`, importações sistêmicas (SH/HIS/PEACS/BKP). Motor de match com regras configuráveis, engine state, fila de recompute, rotas `/api/repair-queue/*`.
-3. **Macrofase 1 concluída** (migration 012): identidade temporal `repair_date`; autocomplete `GET /api/repair-cases/chave-peca-search`; save-analysis transacional; `migrate:repair-domain` ao DB operacional (1108 casos, 1387 peças). 78 novos testes.
-4. **Auth, staff, repair domain, Datasys intake e shell visual** (migrations 010–011): autenticação PIN scryptSync, sessões cookie, middleware global; técnicos CRUD; `repair_cases`/`part_requests`/prioridades; intake `RELATORIO.xlsx`. 45 testes.
-5. **Separação operacional** (migration 009): reserva lógica via `separation_items`, confirmação com `REPAIR_CONSUMPTION`+`PART_SEPARATED`, cancelamento sem movimento, stale-check. 57 testes.
-
-**Melhorias futuras (fora do escopo das tarefas já concluídas):**
-- `confirm()` (importação) re-lê os arquivos copiados no diretório do lote; se o servidor
-  reiniciar entre a prévia e a confirmação, a confirmação falha com `410`.
-- A regra de margem/score/idade ainda não é recalculada sobre os dados reais — só os valores
-  legados das planilhas são preservados; o motor de decisão (`src/domain/scoring.ts`) existe e
-  é testado isoladamente, mas nada na importação o invoca ainda.
-- Tela/endpoint para editar a `decision_rules` ativa.
-- Validar `QTDE DE PEÇAS` contra a contagem real de linhas do IMEI (hoje é só um valor legado
-  preservado, sem checagem cruzada).
-- A leitura de Excel ainda reabre o arquivo várias vezes por importação; reaproveitar um único
-  buffer/parse por arquivo reduziria ainda mais o tempo de prévia em arquivos grandes.
-- Bipagem: a busca de CHAVEPECA do catálogo (`/api/reference-catalog/keys`) não é testada com
-  volume real (~525 referências); paginação/relevância podem precisar de ajuste no uso real.
-
-## 11. Próxima fase
-
-Com o motor de match REF-based e o fluxo MATCH → APTO_REPARO → DIRECIONADO_TECNICO implementados,
-as próximas fases possíveis são:
-- **Fluxo pós-DIRECIONADO_TECNICO** — transições EM_REPARO → REPARO_EXECUTADO → TRIAGEM_FINAL →
-  RETORNO_TECNICO → CONCLUIDO; UI de acompanhamento técnico; consumo de peças (CONSUMIDA).
-- **Estorno de separação** (`separation_items`) — desfazer confirmação com `stock_movements` de crédito.
-- **UI da fila de reparos** — tela `/reparo` consumindo `/api/repair-queue/*` com drawer por caso.
-- **Importações sistêmicas** — SH Oficina, His Estoque, PEACS, BKP (migrations 015 já criam as tabelas).
-
-Nenhuma dessas fases deve ser implementada sem solicitação explícita.
-
-## 12. Comandos
-
-```bash
-npm install        # instalar dependências
-npm test           # rodar a suíte Vitest
-npm run typecheck  # tsc --noEmit (server + client + scripts)
-npm run build      # compilar server (tsc) + client (vite build)
-npm run dev         # ambiente de desenvolvimento (Vite :5173 + API :127.0.0.1:3001, proxy /api)
-npm start           # produção: serve a API e o client compilado em 127.0.0.1:3001 (requer build antes)
-npm run audit:real -- --orders "<PEDIDOS.xlsx>" --analysis "<ANALISE MI.xlsx>"  # auditoria com dados reais
-```
-
----
-
-## Regras de manutenção deste documento
-
-- Atualize este arquivo **depois de cada tarefa relevante** (não a cada commit pequeno).
-- Mantenha **estado atual**, não um diário — descreva "como o sistema é agora", não a
-  sequência cronológica de mudanças.
-- Na seção "Pendências"/mudanças recentes, mantenha **no máximo as últimas cinco** mudanças
-  relevantes; remova o que ficou superado em vez de acumular histórico.
-- Não copie logs extensos, prompts do usuário, nem arquivos de código inteiros aqui — descreva
-  responsabilidade e comportamento, não implementação linha a linha.
-- Marque explicitamente o que é **regra futura/não implementada** vs. o que está **verificado
-  no código** — nunca apresente uma regra como implementada só porque está documentada em
-  `docs/regras-negocio.md`.
-- Mantenha o documento abaixo de ~12.000 tokens; se crescer demais, corte detalhe histórico
-  primeiro, nunca a seção de decisões definitivas.
