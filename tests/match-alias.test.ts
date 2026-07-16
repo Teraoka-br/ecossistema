@@ -1,6 +1,7 @@
 /**
- * Testes de alias de chave de peça no motor e simulador.
- * Spec F — 10 cenários.
+ * Testes de compatibilidade simétrica de chave de peça no motor e simulador.
+ * Substituem os testes de aliases direcionais (migration 039 — grupos simétricos).
+ * Spec F — 10 cenários adaptados.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -8,12 +9,15 @@ import { createDb } from "./helpers.js";
 import type { Db } from "../src/db/database.js";
 import { runRepairMatchEngine } from "../src/match/engine-orchestrator.js";
 import { simulateMatchRules } from "../src/match/simulate-service.js";
+import {
+  createCompatibilityGroup,
+  addGroupMember,
+} from "../src/operational/part-compatibility-service.js";
 
 let db: Db;
 
 beforeEach(async () => {
   db = await createDb();
-  // createDb() runs all migrations, which inserts the default active match rule
 });
 
 // ---------------------------------------------------------------------------
@@ -55,23 +59,22 @@ function addStock(chaveNorm: string, qty: number): void {
   `).run(snapId, ref, refNorm, chaveNorm.toUpperCase(), chaveNorm, qty);
 }
 
-function addAlias(reqNorm: string, stockNorm: string): void {
-  db.prepare(`
-    INSERT INTO part_key_aliases
-      (requested_chave_peca, requested_chave_peca_norm, stock_chave_peca, stock_chave_peca_norm, active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 1, datetime('now'), datetime('now'))
-  `).run(reqNorm, reqNorm, stockNorm, stockNorm);
+/** Cria grupo de compatibilidade com dois membros. */
+function addGroupCompat(keyA: string, keyB: string): void {
+  const g = createCompatibilityGroup(db, { name: `${keyA} ↔ ${keyB}` });
+  addGroupMember(db, g.id, { chavePeca: keyA });
+  addGroupMember(db, g.id, { chavePeca: keyB });
 }
 
 // ---------------------------------------------------------------------------
-// Cenário 1: sem alias, sem estoque → nenhum match
+// Cenário 1: sem grupo, sem estoque → nenhum match
 // ---------------------------------------------------------------------------
 
-describe("cenário 1 — sem alias, sem estoque correspondente", () => {
-  it("não produz match quando chave_peca_norm não existe no estoque", async () => {
+describe("cenário 1 — sem grupo, sem estoque correspondente", () => {
+  it("não produz match quando chave_peca_norm não existe no estoque e não há grupo", async () => {
     const c = addCase();
     addPart(c, "BATERIA IPHONE 12");
-    addStock("BATERIA IPHONE 12 PRO", 3); // chave diferente
+    addStock("BATERIA IPHONE 12 PRO", 3); // chave diferente, sem grupo
 
     const result = await runRepairMatchEngine(db);
     const row = db.prepare(
@@ -84,13 +87,13 @@ describe("cenário 1 — sem alias, sem estoque correspondente", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Cenário 2: com alias → MATCH
+// Cenário 2: com grupo → MATCH via membro compatível
 // ---------------------------------------------------------------------------
 
-describe("cenário 2 — alias mapeia chave solicitada para chave do estoque", () => {
-  it("produz MATCH via alias", async () => {
+describe("cenário 2 — grupo mapeia chave solicitada para chave do estoque", () => {
+  it("produz MATCH via grupo de compatibilidade simétrica", async () => {
     addStock("BATERIA IPHONE 12 PRO", 2);
-    addAlias("BATERIA IPHONE 12", "BATERIA IPHONE 12 PRO");
+    addGroupCompat("BATERIA IPHONE 12", "BATERIA IPHONE 12 PRO");
     const c = addCase();
     addPart(c, "BATERIA IPHONE 12");
 
@@ -104,13 +107,13 @@ describe("cenário 2 — alias mapeia chave solicitada para chave do estoque", (
 });
 
 // ---------------------------------------------------------------------------
-// Cenário 3: alias consome estoque corretamente
+// Cenário 3: grupo deduz estoque do membro corretamente
 // ---------------------------------------------------------------------------
 
-describe("cenário 3 — alias deduz do estoque da chave destino", () => {
-  it("esgota o estoque da chave destino após alocação via alias", async () => {
+describe("cenário 3 — grupo deduz do estoque do membro compatível", () => {
+  it("esgota o estoque do membro após alocação via grupo", async () => {
     addStock("TELA SAMSUNG A32", 1);
-    addAlias("DISPLAY A32", "TELA SAMSUNG A32");
+    addGroupCompat("DISPLAY A32", "TELA SAMSUNG A32");
 
     const c1 = addCase("IMEI-A1");
     addPart(c1, "DISPLAY A32");
@@ -129,22 +132,31 @@ describe("cenário 3 — alias deduz do estoque da chave destino", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Cenário 4: alias inativo não é usado
+// Cenário 4: membro removido do grupo não é usado
 // ---------------------------------------------------------------------------
 
-describe("cenário 4 — alias inativo não produz match", () => {
-  it("não resolve via alias quando active = 0", async () => {
+describe("cenário 4 — membro inativo (removed_at) não produz match", () => {
+  it("não resolve via grupo quando membro foi removido", async () => {
     addStock("BATERIA MODELO X", 2);
+    // Insere membro já removido diretamente (sem usar o service)
+    const g = db.prepare("INSERT INTO part_compatibility_groups (name) VALUES ('G4')").run();
     db.prepare(`
-      INSERT INTO part_key_aliases
-        (requested_chave_peca, requested_chave_peca_norm, stock_chave_peca, stock_chave_peca_norm, active, created_at, updated_at)
-      VALUES ('BAT X OLD', 'BAT X OLD', 'BATERIA MODELO X', 'BATERIA MODELO X', 0, datetime('now'), datetime('now'))
-    `).run();
+      INSERT INTO part_compatibility_group_members
+        (group_id, chave_peca, chave_peca_norm, removed_at)
+      VALUES (?, 'BAT X OLD', 'BAT X OLD', datetime('now'))
+    `).run(g.lastInsertRowid);
+    db.prepare(`
+      INSERT INTO part_compatibility_group_members
+        (group_id, chave_peca, chave_peca_norm)
+      VALUES (?, 'BATERIA MODELO X', 'BATERIA MODELO X')
+    `).run(g.lastInsertRowid);
 
     const c = addCase();
     addPart(c, "BAT X OLD");
 
     await runRepairMatchEngine(db);
+    // Com apenas 1 membro ativo no grupo (BATERIA MODELO X), BAT X OLD não pertence
+    // a nenhum grupo ativo — sem match.
     const row = db.prepare(
       "SELECT result_status FROM repair_match_results WHERE repair_case_id = ?",
     ).get(c) as { result_status: string } | undefined;
@@ -156,10 +168,10 @@ describe("cenário 4 — alias inativo não produz match", () => {
 // Cenário 5: repair_match_results grava alias_stock_chave_norm
 // ---------------------------------------------------------------------------
 
-describe("cenário 5 — alias_stock_chave_norm gravado na tabela", () => {
-  it("campo alias_stock_chave_norm é preenchido quando alocação usa alias", async () => {
+describe("cenário 5 — alias_stock_chave_norm gravado quando grupo é usado", () => {
+  it("campo alias_stock_chave_norm é preenchido quando alocação usa membro do grupo", async () => {
     addStock("CONECTOR CARGA A53", 5);
-    addAlias("FLEX CARGA A53", "CONECTOR CARGA A53");
+    addGroupCompat("FLEX CARGA A53", "CONECTOR CARGA A53");
     const c = addCase();
     addPart(c, "FLEX CARGA A53");
 
@@ -176,7 +188,7 @@ describe("cenário 5 — alias_stock_chave_norm gravado na tabela", () => {
 // ---------------------------------------------------------------------------
 
 describe("cenário 6 — alocação direta deixa alias_stock_chave_norm nulo", () => {
-  it("campo alias_stock_chave_norm é NULL em alocação sem alias", async () => {
+  it("campo alias_stock_chave_norm é NULL em alocação sem compatibilidade", async () => {
     addStock("BATERIA DIRETA", 3);
     const c = addCase();
     addPart(c, "BATERIA DIRETA");
@@ -191,15 +203,15 @@ describe("cenário 6 — alocação direta deixa alias_stock_chave_norm nulo", (
 });
 
 // ---------------------------------------------------------------------------
-// Cenário 7: kit completo com alias em todas as peças
+// Cenário 7: kit completo com grupo em múltiplas peças
 // ---------------------------------------------------------------------------
 
-describe("cenário 7 — kit completo via alias em múltiplas peças", () => {
-  it("MATCH em kit de 2 peças ambas via alias", async () => {
+describe("cenário 7 — kit completo via grupo em múltiplas peças", () => {
+  it("MATCH em kit de 2 peças ambas via grupo de compatibilidade", async () => {
     addStock("TELA X10", 1);
     addStock("CONECTOR X10", 1);
-    addAlias("DISPLAY X10", "TELA X10");
-    addAlias("FLEX X10", "CONECTOR X10");
+    addGroupCompat("DISPLAY X10", "TELA X10");
+    addGroupCompat("FLEX X10", "CONECTOR X10");
 
     const c = addCase();
     addPart(c, "DISPLAY X10");
@@ -221,7 +233,7 @@ describe("cenário 7 — kit completo via alias em múltiplas peças", () => {
 describe("cenário 8 — simulação dry-run não persiste dados", () => {
   it("simulate não cria repair_match_results", async () => {
     addStock("BATERIA SIM", 2);
-    addAlias("BAT SIM", "BATERIA SIM");
+    addGroupCompat("BAT SIM", "BATERIA SIM");
     const c = addCase();
     addPart(c, "BAT SIM");
 
@@ -233,13 +245,13 @@ describe("cenário 8 — simulação dry-run não persiste dados", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Cenário 9: simulação reporta fullKitsFound via alias
+// Cenário 9: simulação reporta fullKitsFound via grupo
 // ---------------------------------------------------------------------------
 
-describe("cenário 9 — simulação conta kits resolvidos via alias", () => {
-  it("fullKitsFound > 0 quando alias viabiliza o kit", async () => {
+describe("cenário 9 — simulação conta kits resolvidos via grupo", () => {
+  it("fullKitsFound > 0 quando grupo viabiliza o kit", async () => {
     addStock("TELA SIM-TEST", 3);
-    addAlias("DISPLAY SIM-TEST", "TELA SIM-TEST");
+    addGroupCompat("DISPLAY SIM-TEST", "TELA SIM-TEST");
     const c = addCase();
     addPart(c, "DISPLAY SIM-TEST");
 
@@ -252,10 +264,10 @@ describe("cenário 9 — simulação conta kits resolvidos via alias", () => {
 // Cenário 10: motor e simulador concordam nos resultados
 // ---------------------------------------------------------------------------
 
-describe("cenário 10 — motor e simulador produzem o mesmo status para alias", () => {
-  it("resultado do motor e da simulação concordam", async () => { // eslint-disable-line
+describe("cenário 10 — motor e simulador produzem o mesmo status via grupo", () => {
+  it("resultado do motor e da simulação concordam", async () => {
     addStock("BATERIA CONCORD", 1);
-    addAlias("BAT CONCORD", "BATERIA CONCORD");
+    addGroupCompat("BAT CONCORD", "BATERIA CONCORD");
     const c = addCase();
     addPart(c, "BAT CONCORD");
 

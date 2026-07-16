@@ -8,6 +8,7 @@ import { dataRouter } from "./routes/data-routes.js";
 import { countingRouter } from "./routes/counting-routes.js";
 import { procurementRouter } from "./routes/procurement-routes.js";
 import { partKeyAliasRouter } from "./routes/part-key-alias-routes.js";
+import { partCompatibilityRouter } from "./routes/part-compatibility-routes.js";
 import { authRouter } from "./routes/auth-routes.js";
 import { staffRouter } from "./routes/staff-routes.js";
 import { repairRouter } from "./routes/repair-routes.js";
@@ -70,6 +71,7 @@ export function createApp(): Express {
   app.use("/api", requireAuth, countingRouter);
   app.use("/api", requireAuth, procurementRouter);
   app.use("/api", requireAuth, partKeyAliasRouter);
+  app.use("/api", requireAuth, partCompatibilityRouter);
   app.use("/api", staffRouter);          // middleware requireAuth aplicado internamente
   app.use("/api", repairRouter);         // idem
   app.use("/api", datasysRouter);        // idem

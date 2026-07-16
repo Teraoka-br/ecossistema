@@ -18,6 +18,7 @@ export interface MatchRuleSet {
   allowNegativeMarginScore: boolean;
   marginWeight: number;
   ageWeight: number;
+  manualPriorityEnabled: boolean;
   active: boolean;
   reason: string | null;
   createdByUserId: number | null;
@@ -34,6 +35,7 @@ export interface MatchRuleSetInput {
   allowNegativeMarginScore?: boolean;
   marginWeight?: number;
   ageWeight?: number;
+  manualPriorityEnabled?: boolean;
   reason?: string | null;
   createdByUserId?: number | null;
 }
@@ -43,6 +45,52 @@ export class MatchRuleError extends Error {
     super(message);
     this.name = "MatchRuleError";
   }
+}
+
+/**
+ * Valida os parâmetros numéricos de uma regra.
+ * Retorna a mensagem de erro ou null se tudo ok.
+ * Proíbe: NaN, Infinity, zero nos divisores, negativos onde inválido.
+ */
+export function validateActiveRule(rule: Pick<ActiveRule, "marginAmountPerPoint" | "ageDaysPerPoint" | "ageMaxPoints" | "marginWeight" | "ageWeight">): string | null {
+  if (!Number.isFinite(rule.marginAmountPerPoint) || rule.marginAmountPerPoint <= 0)
+    return `marginAmountPerPoint deve ser finito e > 0 (recebido: ${rule.marginAmountPerPoint})`;
+  if (!Number.isFinite(rule.ageDaysPerPoint) || rule.ageDaysPerPoint <= 0)
+    return `ageDaysPerPoint deve ser finito e > 0 (recebido: ${rule.ageDaysPerPoint})`;
+  if (!Number.isFinite(rule.ageMaxPoints) || rule.ageMaxPoints < 0)
+    return `ageMaxPoints deve ser finito e >= 0 (recebido: ${rule.ageMaxPoints})`;
+  if (!Number.isFinite(rule.marginWeight) || rule.marginWeight < 0)
+    return `marginWeight deve ser finito e >= 0 (recebido: ${rule.marginWeight})`;
+  if (!Number.isFinite(rule.ageWeight) || rule.ageWeight < 0)
+    return `ageWeight deve ser finito e >= 0 (recebido: ${rule.ageWeight})`;
+  return null;
+}
+
+function validateInput(input: MatchRuleSetInput): void {
+  const check = {
+    marginAmountPerPoint: input.marginAmountPerPoint,
+    ageDaysPerPoint: input.ageDaysPerPoint,
+    ageMaxPoints: input.ageMaxPoints,
+    marginWeight: input.marginWeight,
+    ageWeight: input.ageWeight,
+  };
+  // Só valida campos fornecidos
+  if (input.marginAmountPerPoint !== undefined &&
+      (!Number.isFinite(input.marginAmountPerPoint) || input.marginAmountPerPoint <= 0))
+    throw new MatchRuleError("INVALID_PARAM", `marginAmountPerPoint deve ser finito e > 0 (recebido: ${input.marginAmountPerPoint})`);
+  if (input.ageDaysPerPoint !== undefined &&
+      (!Number.isFinite(input.ageDaysPerPoint) || input.ageDaysPerPoint <= 0))
+    throw new MatchRuleError("INVALID_PARAM", `ageDaysPerPoint deve ser finito e > 0 (recebido: ${input.ageDaysPerPoint})`);
+  if (input.ageMaxPoints !== undefined &&
+      (!Number.isFinite(input.ageMaxPoints) || input.ageMaxPoints < 0))
+    throw new MatchRuleError("INVALID_PARAM", `ageMaxPoints deve ser finito e >= 0 (recebido: ${input.ageMaxPoints})`);
+  if (input.marginWeight !== undefined &&
+      (!Number.isFinite(input.marginWeight) || input.marginWeight < 0))
+    throw new MatchRuleError("INVALID_PARAM", `marginWeight deve ser finito e >= 0 (recebido: ${input.marginWeight})`);
+  if (input.ageWeight !== undefined &&
+      (!Number.isFinite(input.ageWeight) || input.ageWeight < 0))
+    throw new MatchRuleError("INVALID_PARAM", `ageWeight deve ser finito e >= 0 (recebido: ${input.ageWeight})`);
+  void check; // suppress unused warning
 }
 
 function toRuleSet(r: Record<string, unknown>): MatchRuleSet {
@@ -56,6 +104,7 @@ function toRuleSet(r: Record<string, unknown>): MatchRuleSet {
     allowNegativeMarginScore: (r.allow_negative_margin_score as number) === 1,
     marginWeight: r.margin_weight as number,
     ageWeight: r.age_weight as number,
+    manualPriorityEnabled: (r.manual_priority_enabled as number | undefined ?? 0) === 1,
     active: (r.active as number) === 1,
     reason: r.reason as string | null,
     createdByUserId: r.created_by_user_id as number | null,
@@ -77,6 +126,7 @@ export function toActiveRule(rs: MatchRuleSet): ActiveRule {
     allowNegativeMarginScore: rs.allowNegativeMarginScore,
     marginWeight: rs.marginWeight,
     ageWeight: rs.ageWeight,
+    manualPriorityEnabled: rs.manualPriorityEnabled,
   };
 }
 
@@ -103,12 +153,14 @@ export function listRuleSets(db: Db): MatchRuleSet[] {
 }
 
 export function createDraftRuleSet(db: Db, input: MatchRuleSetInput): MatchRuleSet {
+  validateInput(input);
   const maxVersion = (db.prepare("SELECT MAX(version) as v FROM match_rule_sets").get() as { v: number | null }).v ?? 0;
   const res = db.prepare(`
     INSERT INTO match_rule_sets
       (version, name, margin_amount_per_point, age_days_per_point, age_max_points,
-       allow_negative_margin_score, margin_weight, age_weight, active, reason, created_by_user_id)
-    VALUES (?,?,?,?,?,?,?,?,0,?,?)
+       allow_negative_margin_score, margin_weight, age_weight, manual_priority_enabled,
+       active, reason, created_by_user_id)
+    VALUES (?,?,?,?,?,?,?,?,?,0,?,?)
   `).run(
     maxVersion + 1,
     input.name?.trim() || `Regra v${maxVersion + 1}`,
@@ -118,6 +170,7 @@ export function createDraftRuleSet(db: Db, input: MatchRuleSetInput): MatchRuleS
     input.allowNegativeMarginScore !== false ? 1 : 0,
     input.marginWeight ?? 1.0,
     input.ageWeight ?? 1.0,
+    input.manualPriorityEnabled ? 1 : 0,
     input.reason ?? null,
     input.createdByUserId ?? null,
   );
@@ -128,6 +181,7 @@ export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput,
   const rs = getRuleSetById(db, id);
   if (!rs) throw new MatchRuleError("NOT_FOUND", "Regra não encontrada.");
   if (rs.active) throw new MatchRuleError("ALREADY_ACTIVE", "Regra ativa não pode ser editada. Crie uma nova versão.");
+  validateInput(input);
 
   db.prepare(`
     UPDATE match_rule_sets SET
@@ -138,6 +192,7 @@ export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput,
       allow_negative_margin_score = COALESCE(?, allow_negative_margin_score),
       margin_weight = COALESCE(?, margin_weight),
       age_weight = COALESCE(?, age_weight),
+      manual_priority_enabled = COALESCE(?, manual_priority_enabled),
       reason = COALESCE(?, reason)
     WHERE id = ?
   `).run(
@@ -148,6 +203,7 @@ export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput,
     input.allowNegativeMarginScore !== undefined ? (input.allowNegativeMarginScore ? 1 : 0) : null,
     input.marginWeight ?? null,
     input.ageWeight ?? null,
+    input.manualPriorityEnabled !== undefined ? (input.manualPriorityEnabled ? 1 : 0) : null,
     input.reason ?? null,
     id,
   );
@@ -169,6 +225,11 @@ export function activateRuleSet(
   if (!params.reason || params.reason.trim().length < 5) {
     throw new MatchRuleError("REASON_TOO_SHORT", "Justificativa deve ter pelo menos 5 caracteres.");
   }
+
+  // Valida os parâmetros antes de ativar.
+  const rule = toActiveRule(rs);
+  const paramError = validateActiveRule(rule);
+  if (paramError) throw new MatchRuleError("INVALID_PARAM", `Parâmetros inválidos: ${paramError}`);
 
   db.exec("BEGIN");
   try {

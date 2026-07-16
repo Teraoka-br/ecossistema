@@ -75,6 +75,10 @@ export interface RepairMatchRunResult {
   verificarCount: number;
   casesChanged: number;
   durationMs: number;
+  /** Casos com todas as peças em status avançado (SEPARADA/RESERVADA/CONSUMIDA) — protegidos, não alterados. */
+  advancedProtectedCount: number;
+  /** Desses, quantos têm workflow inconsistente com o status avançado das peças. */
+  inconsistentWorkflowCount: number;
 }
 
 export async function processPendingRecompute(db: Db): Promise<RepairMatchRunResult | null> {
@@ -142,12 +146,16 @@ export async function runRepairMatchEngine(
     const output = calculateMatch(input);
     const persisted = persistDecisions(db, runId, input, output.cases);
 
+    const inconsistentCount = input.advancedOnlyCases.filter((c) => c.workflowInconsistent).length;
+
     const result = {
       casesEvaluated: output.stats.casesEvaluated,
       fullKitsFound: output.stats.match,
       partialKitsFound: output.stats.matchParcial,
       verificarCount: output.stats.verificar,
       casesChanged: persisted.casesChanged,
+      advancedProtectedCount: input.advancedOnlyCases.length,
+      inconsistentWorkflowCount: inconsistentCount,
     };
 
     db.prepare(`
@@ -156,6 +164,21 @@ export async function runRepairMatchEngine(
         cases_evaluated = ?, full_kits_found = ?, partial_kits_found = ?, cases_changed = ?
       WHERE id = ?
     `).run(result.casesEvaluated, result.fullKitsFound, result.partialKitsFound, result.casesChanged, runId);
+
+    // Registra diagnóstico de casos protegidos com workflow inconsistente.
+    if (inconsistentCount > 0) {
+      const list = input.advancedOnlyCases
+        .filter((c) => c.workflowInconsistent)
+        .map((c) => `#${c.caseId}(${c.workflowStatus})`)
+        .join(", ");
+      db.prepare(
+        "INSERT INTO match_recompute_requests (reason, entity_type, entity_id, processed_at) VALUES (?,?,?,datetime('now'))"
+      ).run(
+        `ADVANCED_PART_STATUS_WITH_INCONSISTENT_WORKFLOW: ${list}`,
+        "diagnostic",
+        runId,
+      );
+    }
 
     db.prepare(`
       UPDATE match_engine_state SET

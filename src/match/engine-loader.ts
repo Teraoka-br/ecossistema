@@ -4,6 +4,15 @@
  * Única fonte de input para calculateMatch — usado tanto pelo motor real
  * (engine-orchestrator) quanto pelo simulador (simulate-service). Somente
  * LEITURA: nunca escreve no banco.
+ *
+ * Regras de carregamento de peças (correção de auditoria 2025-07):
+ *   - Peças CANCELADAS (cancelled_at IS NOT NULL) são sempre excluídas.
+ *   - Peças AVANÇADAS (SEPARADA | RESERVADA | CONSUMIDA) são registradas mas
+ *     nunca entram na disputa — o motor não pode regredí-las.
+ *   - Caso com TODAS as peças avançadas: protegido, não entra no motor.
+ *   - Caso com peças avançadas + abertas: só as abertas participam da disputa.
+ *   - PECA_NECESSARIA_AUSENTE é emitido somente quando não há nenhuma peça
+ *     aberta real (partes.length === 0 no input do motor).
  */
 
 import type { Db } from "../db/database.js";
@@ -14,12 +23,14 @@ import type {
   MatchCaseInput,
   MatchPartInput,
   StockGroupInput,
+  CompatibilityGroup,
   CompatibilityInput,
 } from "./calculate-match.js";
+import { validateActiveRule } from "./match-rule-service.js";
 
 export class MatchRuleStateError extends Error {
   constructor(
-    public readonly code: "NO_ACTIVE_RULE" | "MULTIPLE_ACTIVE_RULES",
+    public readonly code: "NO_ACTIVE_RULE" | "MULTIPLE_ACTIVE_RULES" | "INVALID_RULE_PARAMS",
     message: string,
   ) {
     super(message);
@@ -44,9 +55,18 @@ export const ENGINE_LOCKED_STATUSES = [
   "CANCELADO",
 ] as const;
 
+/** Status de peça que indica fluxo avançado (já encaminhada ou consumida). */
+const ADVANCED_PART_STATUSES = ["SEPARADA", "RESERVADA", "CONSUMIDA"] as const;
+type AdvancedPartStatus = (typeof ADVANCED_PART_STATUSES)[number];
+
+function isAdvanced(status: string): status is AdvancedPartStatus {
+  return (ADVANCED_PART_STATUSES as readonly string[]).includes(status);
+}
+
 /**
  * Regra ativa ESTRITA: exatamente uma. Zero ou mais de uma regra ativa
  * aborta o motor sem alterar cards (erro administrativo explícito).
+ * Também valida os parâmetros numéricos da regra antes de retornar.
  */
 export function loadActiveRuleStrict(db: Db): ActiveRule {
   const rows = db
@@ -65,7 +85,7 @@ export function loadActiveRuleStrict(db: Db): ActiveRule {
     );
   }
   const r = rows[0];
-  return {
+  const rule: ActiveRule = {
     id: r.id as number,
     version: r.version as number,
     name: (r.name as string | null) ?? null,
@@ -75,7 +95,19 @@ export function loadActiveRuleStrict(db: Db): ActiveRule {
     allowNegativeMarginScore: (r.allow_negative_margin_score as number) === 1,
     marginWeight: r.margin_weight as number,
     ageWeight: r.age_weight as number,
+    manualPriorityEnabled: (r.manual_priority_enabled as number | undefined ?? 0) === 1,
   };
+
+  // Valida parâmetros — regra corrompida aborta o motor como erro de configuração.
+  const paramError = validateActiveRule(rule);
+  if (paramError) {
+    throw new MatchRuleStateError(
+      "INVALID_RULE_PARAMS",
+      `Regra ativa (id=${rule.id}) possui parâmetros inválidos: ${paramError}`,
+    );
+  }
+
+  return rule;
 }
 
 interface CaseRow {
@@ -98,6 +130,15 @@ interface PartRow {
   status: string;
 }
 
+/** Caso protegido: todas as peças em status avançado — motor não avalia nem altera. */
+export interface AdvancedOnlyCase {
+  caseId: number;
+  workflowStatus: string;
+  /** Se o workflow_status é incompatível com o estado avançado das peças. */
+  workflowInconsistent: boolean;
+  advancedParts: Array<{ partRequestId: number; status: AdvancedPartStatus }>;
+}
+
 export interface LoadedEngineInput extends CalculateMatchInput {
   /** part_request_id → status atual (para a camada de persistência). */
   partStatusById: Map<number, string>;
@@ -105,12 +146,17 @@ export interface LoadedEngineInput extends CalculateMatchInput {
   workflowByCase: Map<number, string>;
   /** part_request_id com pedido de compra ativo aguardando chegada. */
   activeOrderPartIds: Set<number>;
+  /**
+   * Casos com TODAS as peças em status avançado (SEPARADA/RESERVADA/CONSUMIDA).
+   * O motor os protege: não altera workflow, apenas registra o diagnóstico.
+   */
+  advancedOnlyCases: AdvancedOnlyCase[];
 }
 
 /**
  * Carrega todos os cards operacionais elegíveis para avaliação (análise
  * COMPLETED e fora dos estados travados), suas peças abertas, o estoque
- * disponível atual e as resoluções de compatibilidade.
+ * disponível atual e os grupos de compatibilidade.
  */
 export function loadEngineInput(db: Db, activeRule: ActiveRule): LoadedEngineInput {
   const lockedList = ENGINE_LOCKED_STATUSES.map((s) => `'${s}'`).join(",");
@@ -128,27 +174,32 @@ export function loadEngineInput(db: Db, activeRule: ActiveRule): LoadedEngineInp
 
   const partStatusById = new Map<number, string>();
   const workflowByCase = new Map<number, string>();
-  const partsByCase = new Map<number, PartRow[]>();
 
+  // Carrega TODAS as peças não canceladas (incluindo SEPARADA/RESERVADA/CONSUMIDA)
+  // para detectar casos com status avançado.
+  const allPartsByCase = new Map<number, PartRow[]>();
   if (caseRows.length > 0) {
     const caseIds = caseRows.map((c) => c.id);
     const placeholders = caseIds.map(() => "?").join(",");
-    const partRows = db
+    const allPartRows = db
       .prepare(
         `SELECT id, repair_case_id, chave_peca, chave_peca_norm, status
          FROM part_requests
          WHERE repair_case_id IN (${placeholders})
            AND cancelled_at IS NULL
-           AND status NOT IN ('CANCELADA','SEPARADA','CONSUMIDA','RESERVADA')
          ORDER BY id`,
       )
       .all(...caseIds) as unknown as PartRow[];
 
-    for (const p of partRows) {
-      partStatusById.set(p.id, p.status);
-      const arr = partsByCase.get(p.repair_case_id) ?? [];
+    for (const p of allPartRows) {
+      // Registra status de TODAS as peças abertas (não canceladas, não avançadas)
+      // para que persistDecisions possa atualizar somente as abertas.
+      if (!isAdvanced(p.status)) {
+        partStatusById.set(p.id, p.status);
+      }
+      const arr = allPartsByCase.get(p.repair_case_id) ?? [];
       arr.push(p);
-      partsByCase.set(p.repair_case_id, arr);
+      allPartsByCase.set(p.repair_case_id, arr);
     }
   }
 
@@ -169,15 +220,48 @@ export function loadEngineInput(db: Db, activeRule: ActiveRule): LoadedEngineInp
     ).map((r) => r.part_request_id),
   );
 
-  const cases: MatchCaseInput[] = caseRows.map((c) => {
+  const cases: MatchCaseInput[] = [];
+  const advancedOnlyCases: AdvancedOnlyCase[] = [];
+
+  for (const c of caseRows) {
     workflowByCase.set(c.id, c.workflow_status);
-    const parts: MatchPartInput[] = (partsByCase.get(c.id) ?? []).map((p) => ({
+
+    const allParts = allPartsByCase.get(c.id) ?? [];
+    const advancedParts = allParts.filter((p) => isAdvanced(p.status));
+    const openParts = allParts.filter((p) => !isAdvanced(p.status));
+
+    if (advancedParts.length > 0 && openParts.length === 0) {
+      // Todas as peças avançadas — caso protegido, fora do motor.
+      const lockedWorkflowStatuses = new Set<string>(ENGINE_LOCKED_STATUSES);
+      // Workflows esperados quando partes estão avançadas:
+      const expectedAdvancedWorkflows = new Set([
+        "APTO_REPARO", "EM_SEPARACAO", "DIRECIONADO_TECNICO",
+        "EM_REPARO", "REPARO_EXECUTADO",
+      ]);
+      advancedOnlyCases.push({
+        caseId: c.id,
+        workflowStatus: c.workflow_status,
+        workflowInconsistent:
+          !lockedWorkflowStatuses.has(c.workflow_status) &&
+          !expectedAdvancedWorkflows.has(c.workflow_status),
+        advancedParts: advancedParts.map((p) => ({
+          partRequestId: p.id,
+          status: p.status as AdvancedPartStatus,
+        })),
+      });
+      continue;
+    }
+
+    // Caso normal (sem peças avançadas) ou misto (avançadas + abertas):
+    // só as peças ABERTAS participam da disputa.
+    const partsForMotor: MatchPartInput[] = openParts.map((p) => ({
       partRequestId: p.id,
       chavePeca: p.chave_peca,
       chavePecaNorm: p.chave_peca_norm && p.chave_peca_norm !== "" ? p.chave_peca_norm : null,
       hasActiveOrder: activeOrderPartIds.has(p.id),
     }));
-    return {
+
+    cases.push({
       caseId: c.id,
       imei: c.imei,
       model: c.model,
@@ -187,15 +271,15 @@ export function loadEngineInput(db: Db, activeRule: ActiveRule): LoadedEngineInp
       depositoAtual: c.deposito_atual,
       workflowStatus: c.workflow_status,
       manualPriority: c.manual_priority_active === 1,
-      parts,
-    };
-  });
+      parts: partsForMotor,
+    });
+  }
 
   // ── Estoque disponível (físico − reservado − bloqueado) ──────────────────
-  const { groups } = getCurrentOperationalStock(db);
+  const { groups: stockGroups } = getCurrentOperationalStock(db);
   const availableStock: StockGroupInput[] = [];
   const refNormToStockChaves = new Map<string, Set<string>>();
-  for (const g of groups) {
+  for (const g of stockGroups) {
     if (!g.chavePecaNorm || g.availableQuantity <= 0) continue;
     availableStock.push({
       chavePecaNorm: g.chavePecaNorm,
@@ -214,8 +298,7 @@ export function loadEngineInput(db: Db, activeRule: ActiveRule): LoadedEngineInp
   }
 
   // ── Compatibilidade ──────────────────────────────────────────────────────
-  // Catálogo: chave solicitada → chaves de estoque possíveis, via referência
-  // física registrada no catálogo importado (source_inventory_items).
+  // Catálogo: chave solicitada → chaves de estoque possíveis, via referência física.
   const catalog = new Map<string, string[]>();
   const catalogRows = db
     .prepare(
@@ -236,20 +319,31 @@ export function loadEngineInput(db: Db, activeRule: ActiveRule): LoadedEngineInp
     for (const t of targets) if (!arr.includes(t)) arr.push(t);
   }
 
-  // Aliases manuais ativos (compatibilidade autorizada — prioridade máxima)
-  const aliases = new Map<string, string>();
+  // Grupos de compatibilidade simétrica (migration 039).
+  const compatGroups: CompatibilityGroup[] = [];
   try {
-    const aliasRows = db
-      .prepare(
-        "SELECT requested_chave_peca_norm, stock_chave_peca_norm FROM part_key_aliases WHERE active = 1",
-      )
-      .all() as { requested_chave_peca_norm: string; stock_chave_peca_norm: string }[];
-    for (const a of aliasRows) aliases.set(a.requested_chave_peca_norm, a.stock_chave_peca_norm);
+    const groupRows = db
+      .prepare("SELECT id, name FROM part_compatibility_groups ORDER BY id")
+      .all() as { id: number; name: string | null }[];
+    for (const g of groupRows) {
+      const memberRows = db
+        .prepare(
+          `SELECT chave_peca_norm FROM part_compatibility_group_members
+           WHERE group_id = ? AND removed_at IS NULL ORDER BY added_at`,
+        )
+        .all(g.id) as { chave_peca_norm: string }[];
+      if (memberRows.length >= 2) {
+        compatGroups.push({
+          groupId: g.id,
+          members: memberRows.map((m) => m.chave_peca_norm),
+        });
+      }
+    }
   } catch {
-    /* tabela pode não existir em banco antigo */
+    /* tabela pode não existir em banco legado anterior à migration 039 */
   }
 
-  const compatibility: CompatibilityInput = { aliases, catalog };
+  const compatibility: CompatibilityInput = { groups: compatGroups, catalog };
 
   return {
     cases,
@@ -259,5 +353,6 @@ export function loadEngineInput(db: Db, activeRule: ActiveRule): LoadedEngineInp
     partStatusById,
     workflowByCase,
     activeOrderPartIds,
+    advancedOnlyCases,
   };
 }

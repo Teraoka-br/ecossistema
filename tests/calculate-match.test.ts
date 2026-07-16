@@ -35,6 +35,7 @@ const REGRA1: ActiveRule = {
   allowNegativeMarginScore: true,
   marginWeight: 1,
   ageWeight: 1,
+  manualPriorityEnabled: false,
 };
 
 let nextPartId = 1000;
@@ -76,7 +77,7 @@ function run(cases: MatchCaseInput[], stockGroups: StockGroupInput[], rule: Acti
     cases,
     availableStock: stockGroups,
     activeRule: rule,
-    compatibility: compat ?? { aliases: new Map(), catalog: new Map() },
+    compatibility: compat ?? { groups: [], catalog: new Map() },
   });
 }
 
@@ -417,54 +418,70 @@ describe("primeira passagem — kit completo atômico; segunda — parciais com 
 });
 
 // ---------------------------------------------------------------------------
-// 35-37: compatibilidade manual
+// 35-37: compatibilidade simétrica por grupos
 // ---------------------------------------------------------------------------
 
-describe("compatibilidade manual de referências", () => {
-  it("35. compatibilidade manual permite utilizar referência vinculada", () => {
-    const c = makeCase({ caseId: 1, chaves: ["BATERIA IPHONE 12"] });
-    const aliases = new Map([["BATERIA IPHONE 12", "BATERIA IPHONE 12/12 PRO"]]);
-    const out = run([c], stock([["BATERIA IPHONE 12/12 PRO", "RFIS", 3]]), REGRA1, { aliases, catalog: new Map() });
-    const dec = out.cases[0];
-    expect(dec.result).toBe("MATCH");
-    expect(dec.virtuallyAllocatedParts[0].aliasStockChaveNorm).toBe("BATERIA IPHONE 12/12 PRO");
-    expect(dec.compatibilityResolutions).toEqual([
-      expect.objectContaining({ requestedChaveNorm: "BATERIA IPHONE 12", stockChaveNorm: "BATERIA IPHONE 12/12 PRO", via: "ALIAS" }),
+describe("compatibilidade simétrica por grupos", () => {
+  it("35. grupo de compatibilidade: pedido de A usa estoque de B (e vice-versa)", () => {
+    const groups = [{ groupId: 1, members: ["BATERIA IPHONE 12", "BATERIA IPHONE 12/12 PRO"] }];
+    const cA = makeCase({ caseId: 1, chaves: ["BATERIA IPHONE 12"] });
+    const outA = run([cA], stock([["BATERIA IPHONE 12/12 PRO", "RFIS", 3]]), REGRA1, { groups, catalog: new Map() });
+    expect(outA.cases[0].result).toBe("MATCH");
+    expect(outA.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBe("BATERIA IPHONE 12/12 PRO");
+    expect(outA.cases[0].compatibilityResolutions).toEqual([
+      expect.objectContaining({ requestedChaveNorm: "BATERIA IPHONE 12", stockChaveNorm: "BATERIA IPHONE 12/12 PRO", via: "GROUP" }),
     ]);
+
+    // pedido de B usa estoque de A
+    const cB = makeCase({ caseId: 2, chaves: ["BATERIA IPHONE 12/12 PRO"] });
+    const outB = run([cB], stock([["BATERIA IPHONE 12", "RFIS", 2]]), REGRA1, { groups, catalog: new Map() });
+    expect(outB.cases[0].result).toBe("MATCH");
+    expect(outB.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBe("BATERIA IPHONE 12");
   });
 
-  it("36. sem compatibilidade, referências diferentes não são presumidas compatíveis", () => {
+  it("35b. estoque direto continua sendo considerado (a própria chave tem prioridade)", () => {
+    const groups = [{ groupId: 1, members: ["BATERIA IPHONE 12", "BATERIA IPHONE 12/12 PRO"] }];
+    const c = makeCase({ caseId: 1, chaves: ["BATERIA IPHONE 12"] });
+    // Ambos têm saldo — deve usar o direto primeiro
+    const out = run([c], stock([["BATERIA IPHONE 12", "RF1", 1], ["BATERIA IPHONE 12/12 PRO", "RF2", 1]]), REGRA1, { groups, catalog: new Map() });
+    expect(out.cases[0].result).toBe("MATCH");
+    expect(out.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBeNull(); // usou a própria chave
+  });
+
+  it("36. sem grupo, referências diferentes não são presumidas compatíveis", () => {
     const c = makeCase({ caseId: 1, chaves: ["BATERIA IPHONE 12"] });
     const out = run([c], stock([["BATERIA IPHONE 12/12 PRO", "RFIS", 3]]));
     expect(out.cases[0].result).toBe("PEDIR_PECA"); // texto parecido NÃO cria compatibilidade
   });
 
-  it("37. grupo de compatibilidade não duplica saldo (duas chaves no mesmo pool)", () => {
-    const aliases = new Map([
-      ["BATERIA IPHONE 12", "BATERIA 12/12PRO"],
-      ["BATERIA IPHONE 12 PRO", "BATERIA 12/12PRO"],
-    ]);
+  it("37. grupo não duplica saldo — duas unidades físicas geram no máximo dois matches", () => {
+    const groups = [{ groupId: 1, members: ["BATERIA IPHONE 12", "BATERIA IPHONE 12 PRO", "BATERIA 12/12PRO"] }];
     const c1 = makeCase({ caseId: 1, cost: 0, estimatedSale: 900, ageDays: 0, chaves: ["BATERIA IPHONE 12"] });
     const c2 = makeCase({ caseId: 2, cost: 0, estimatedSale: 600, ageDays: 0, chaves: ["BATERIA IPHONE 12 PRO"] });
-    const out = run([c1, c2], stock([["BATERIA 12/12PRO", "RF", 1]]), REGRA1, { aliases, catalog: new Map() });
-    const matches = out.cases.filter((c) => c.result === "MATCH");
-    expect(matches).toHaveLength(1); // 1 unidade física = 1 match, nunca 2
-    expect(matches[0].caseId).toBe(1);
-    expect(out.cases.find((c) => c.caseId === 2)!.result).toBe("PEDIR_PECA");
+    // 1 unidade física — apenas 1 match possível
+    const out1 = run([c1, c2], stock([["BATERIA 12/12PRO", "RF", 1]]), REGRA1, { groups, catalog: new Map() });
+    const matches1 = out1.cases.filter((c) => c.result === "MATCH");
+    expect(matches1).toHaveLength(1);
+    expect(matches1[0].caseId).toBe(1); // maior score vence
+
+    // 2 unidades físicas — dois matches possíveis
+    const out2 = run([c1, c2], stock([["BATERIA 12/12PRO", "RF", 2]]), REGRA1, { groups, catalog: new Map() });
+    const matches2 = out2.cases.filter((c) => c.result === "MATCH");
+    expect(matches2).toHaveLength(2);
   });
 
-  it("resolução ambígua via catálogo (2+ alvos, sem alias) → VERIFICAR MAIS_DE_UMA_REFERENCIA_POSSIVEL", () => {
+  it("resolução ambígua via catálogo (2+ alvos, sem grupo) → VERIFICAR MAIS_DE_UMA_REFERENCIA_POSSIVEL", () => {
     const catalog = new Map([["CHAVE AMBIGUA", ["TELA A", "TELA B"]]]);
     const c = makeCase({ caseId: 1, chaves: ["CHAVE AMBIGUA"] });
-    const out = run([c], stock([["TELA A", "R1", 1], ["TELA B", "R2", 1]]), REGRA1, { aliases: new Map(), catalog });
+    const out = run([c], stock([["TELA A", "R1", 1], ["TELA B", "R2", 1]]), REGRA1, { groups: [], catalog });
     expect(out.cases[0].result).toBe("VERIFICAR");
     expect(out.cases[0].verifyReasons).toContain(VERIFY_REASONS.MAIS_DE_UMA_REFERENCIA_POSSIVEL);
   });
 
-  it("catálogo com alvo único resolve sem alias (via CATALOG)", () => {
+  it("catálogo com alvo único resolve sem grupo (via CATALOG)", () => {
     const catalog = new Map([["FRONTAL K61", ["FRONTAL K61 PRETO"]]]);
     const c = makeCase({ caseId: 1, chaves: ["FRONTAL K61"] });
-    const out = run([c], stock([["FRONTAL K61 PRETO", "R9", 1]]), REGRA1, { aliases: new Map(), catalog });
+    const out = run([c], stock([["FRONTAL K61 PRETO", "R9", 1]]), REGRA1, { groups: [], catalog });
     expect(out.cases[0].result).toBe("MATCH");
     expect(out.cases[0].compatibilityResolutions[0]?.via).toBe("CATALOG");
   });
@@ -543,11 +560,21 @@ describe("estrutura do resultado", () => {
     expect(dec.rank).toBe(1);
   });
 
-  it("prioridade manual antecede a disputa, mantendo o restante da ordenação", () => {
+  it("prioridade manual antecede a disputa quando manualPriorityEnabled=true na regra", () => {
+    const regraComPrio: ActiveRule = { ...REGRA1, manualPriorityEnabled: true };
+    const normal = makeCase({ caseId: 1, cost: 0, estimatedSale: 1500, ageDays: 300, chaves: ["TELA X"] });
+    const prioridade = makeCase({ caseId: 2, cost: 0, estimatedSale: 150, ageDays: 0, manualPriority: true, chaves: ["TELA X"] });
+    const out = run([normal, prioridade], stock([["TELA X", "R1", 1]]), regraComPrio);
+    expect(out.cases.find((c) => c.caseId === 2)!.result).toBe("MATCH");
+  });
+
+  it("prioridade manual é IGNORADA quando manualPriorityEnabled=false (default)", () => {
+    // REGRA1 tem manualPriorityEnabled=false — score canônico governa
     const normal = makeCase({ caseId: 1, cost: 0, estimatedSale: 1500, ageDays: 300, chaves: ["TELA X"] });
     const prioridade = makeCase({ caseId: 2, cost: 0, estimatedSale: 150, ageDays: 0, manualPriority: true, chaves: ["TELA X"] });
     const out = run([normal, prioridade], stock([["TELA X", "R1", 1]]));
-    expect(out.cases.find((c) => c.caseId === 2)!.result).toBe("MATCH");
+    expect(out.cases.find((c) => c.caseId === 1)!.result).toBe("MATCH"); // score maior vence
+    expect(out.cases.find((c) => c.caseId === 2)!.result).not.toBe("MATCH");
   });
 
   it("disputa: demanda acima da disponibilidade aparece em disputedKeys", () => {
@@ -556,5 +583,69 @@ describe("estrutura do resultado", () => {
     const c3 = makeCase({ caseId: 3, chaves: ["TELA X"] });
     const out = run([c1, c2, c3], stock([["TELA X", "R1", 1]]));
     expect(out.disputedKeys).toEqual([{ stockChaveNorm: "TELA X", demanded: 3, available: 1 }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auditoria — correções de peças avançadas e validação de parâmetros
+// ---------------------------------------------------------------------------
+
+describe("correções de auditoria — peças avançadas e parâmetros", () => {
+  it("caso sem peças abertas gera PECA_NECESSARIA_AUSENTE (parts=[]) ", () => {
+    const out = run([makeCase({ caseId: 1, parts: [] })], stock([["TELA X", "R1", 1]]));
+    expect(out.cases[0].verifyReasons).toContain(VERIFY_REASONS.PECA_NECESSARIA_AUSENTE);
+    expect(out.cases[0].result).toBe("VERIFICAR");
+  });
+
+  it("caso com peças abertas nunca gera PECA_NECESSARIA_AUSENTE mesmo sem estoque", () => {
+    // Simula o que o loader entrega: peças abertas = ainda em PEDIR_PECA, INDICADA, etc.
+    const out = run([makeCase({ caseId: 1, chaves: ["TELA DESCONHECIDA"] })], []);
+    expect(out.cases[0].verifyReasons).not.toContain(VERIFY_REASONS.PECA_NECESSARIA_AUSENTE);
+    expect(out.cases[0].result).toBe("PEDIR_PECA");
+  });
+
+  it("grupos simétricos: A e B no mesmo grupo — pedido de A usa estoque de B", () => {
+    const groups = [{ groupId: 10, members: ["CHAVE-A", "CHAVE-B"] }];
+    const c = makeCase({ caseId: 1, chaves: ["CHAVE-A"] });
+    const out = run([c], stock([["CHAVE-B", "REF1", 2]]), REGRA1, { groups, catalog: new Map() });
+    expect(out.cases[0].result).toBe("MATCH");
+    expect(out.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBe("CHAVE-B");
+    expect(out.cases[0].compatibilityResolutions[0]?.via).toBe("GROUP");
+  });
+
+  it("grupos simétricos: pedido de B usa estoque de A (simetria real)", () => {
+    const groups = [{ groupId: 10, members: ["CHAVE-A", "CHAVE-B"] }];
+    const c = makeCase({ caseId: 1, chaves: ["CHAVE-B"] });
+    const out = run([c], stock([["CHAVE-A", "REF1", 2]]), REGRA1, { groups, catalog: new Map() });
+    expect(out.cases[0].result).toBe("MATCH");
+    expect(out.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBe("CHAVE-A");
+  });
+
+  it("grupos: estoque direto tem prioridade sobre membro do grupo", () => {
+    const groups = [{ groupId: 10, members: ["CHAVE-A", "CHAVE-B"] }];
+    const c = makeCase({ caseId: 1, chaves: ["CHAVE-A"] });
+    const out = run([c], stock([["CHAVE-A", "REF_DIRETO", 1], ["CHAVE-B", "REF_B", 1]]), REGRA1, { groups, catalog: new Map() });
+    expect(out.cases[0].result).toBe("MATCH");
+    // Usou a chave direta, não o membro do grupo
+    expect(out.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBeNull();
+  });
+
+  it("grupos: 2 unidades físicas geram no máximo 2 sinalizações (sem duplicar saldo)", () => {
+    const groups = [{ groupId: 10, members: ["CHAVE-A", "CHAVE-B"] }];
+    const c1 = makeCase({ caseId: 1, cost: 0, estimatedSale: 900, ageDays: 0, chaves: ["CHAVE-A"] });
+    const c2 = makeCase({ caseId: 2, cost: 0, estimatedSale: 600, ageDays: 0, chaves: ["CHAVE-B"] });
+    const c3 = makeCase({ caseId: 3, cost: 0, estimatedSale: 300, ageDays: 0, chaves: ["CHAVE-A"] });
+    const out = run([c1, c2, c3], stock([["CHAVE-A", "R1", 1], ["CHAVE-B", "R2", 1]]), REGRA1, { groups, catalog: new Map() });
+    const matches = out.cases.filter((c) => c.result === "MATCH");
+    expect(matches).toHaveLength(2); // 2 unidades físicas = máximo 2 matches
+    expect(matches.find((c) => c.caseId === 3)).toBeUndefined(); // menor score fica sem
+  });
+
+  it("validação: computeRuleScore não aceita NaN ou Infinity (resultado seria NaN)", () => {
+    // Estes são inputs inválidos — a validação no service bloqueia antes de chegar aqui.
+    // Verificamos que o resultado seria inválido se passasse:
+    const badRule: ActiveRule = { ...REGRA1, marginAmountPerPoint: 0 };
+    const r = computeRuleScore(badRule, 100, 30);
+    expect(Number.isFinite(r.marginPoints)).toBe(false); // Infinity ou NaN
   });
 });

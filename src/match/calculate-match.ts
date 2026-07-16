@@ -37,6 +37,12 @@ export interface ActiveRule {
   allowNegativeMarginScore: boolean;
   marginWeight: number;
   ageWeight: number;
+  /**
+   * Se true, cards com manual_priority_active=1 são avaliados antes dos demais
+   * (dentro deste sub-grupo, o critério canônico score→margem→idade→ID se aplica).
+   * default false: a ordem canônica pure score→margem→idade→ID governa tudo.
+   */
+  manualPriorityEnabled: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,14 +79,22 @@ export interface StockGroupInput {
 }
 
 /**
- * Resolução de chave solicitada → chave de estoque.
- *  - aliases: vínculos manuais de compatibilidade (prioridade máxima);
- *  - catalog: mapeamento via catálogo (chave → chaves de estoque possíveis,
- *    derivado de referência física). Mais de um alvo distinto sem alias é
- *    ambiguidade ⇒ VERIFICAR (nunca escolher silenciosamente).
+ * Grupo de compatibilidade simétrica: todos os membros são intercompatíveis.
+ * Um pedido de qualquer membro pode ser atendido pelo saldo de qualquer outro.
+ */
+export interface CompatibilityGroup {
+  groupId: number;
+  members: readonly string[]; // chaveNorm values, somente membros ativos
+}
+
+/**
+ * Resolução de chave solicitada → chave(s) de estoque.
+ *  - groups: grupos simétricos (compatibilidade M:M — prioridade máxima);
+ *  - catalog: mapeamento via referência física (chave → chaves de estoque).
+ *    Mais de um alvo distinto sem grupo é ambiguidade ⇒ VERIFICAR.
  */
 export interface CompatibilityInput {
-  aliases: ReadonlyMap<string, string>;
+  groups: readonly CompatibilityGroup[];
   catalog: ReadonlyMap<string, readonly string[]>;
 }
 
@@ -137,19 +151,19 @@ export type PartResultStatus =
   | "PEDIR_PECA"
   | "AGUARDANDO_RECEBIMENTO";
 
-export type ResolutionVia = "DIRECT" | "ALIAS" | "CATALOG" | "NONE" | "AMBIGUOUS" | "MISSING_KEY";
+export type ResolutionVia = "DIRECT" | "GROUP" | "CATALOG" | "NONE" | "AMBIGUOUS" | "MISSING_KEY";
 
 export interface PartDecision {
   partRequestId: number;
   chavePeca: string | null;
   chavePecaNorm: string | null;
-  /** Chave de estoque efetivamente consultada (null se não resolvida). */
+  /** Chave de estoque efetivamente usada (null se não resolvida). */
   resolvedStockKey: string | null;
   resolutionVia: ResolutionVia;
   resultStatus: PartResultStatus;
   allocatedReference: string | null;
   allocatedReferenceNorm: string | null;
-  /** Preenchida quando a alocação usou alias/compatibilidade (≠ chave original). */
+  /** Preenchida quando a alocação usou chave de grupo diferente da original. */
   aliasStockChaveNorm: string | null;
 }
 
@@ -292,12 +306,31 @@ function allocateOne(
   return null;
 }
 
+/**
+ * Tenta alocar de cada candidato na ordem até o primeiro com saldo.
+ * Retorna também qual chave física foi usada (usedKey).
+ */
+function allocateFirstAvailable(
+  stock: VirtualStock,
+  candidates: readonly string[],
+): { ref: string; refNorm: string; usedKey: string } | null {
+  for (const key of candidates) {
+    const got = allocateOne(stock, key);
+    if (got) return { ...got, usedKey: key };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
-// Resolução de referência (compatibilidade)
+// Resolução de referência (compatibilidade simétrica)
 // ---------------------------------------------------------------------------
 
 interface KeyResolution {
-  stockKey: string | null;
+  /**
+   * Chaves a tentar (em ordem de preferência: direta primeiro, depois grupo,
+   * depois catálogo). Vazia apenas para MISSING_KEY e AMBIGUOUS.
+   */
+  stockCandidates: readonly string[];
   via: ResolutionVia;
   ambiguousTargets?: string[];
 }
@@ -307,24 +340,41 @@ function resolveKey(
   stockKeys: ReadonlySet<string>,
   compat: CompatibilityInput,
 ): KeyResolution {
-  if (!chaveNorm) return { stockKey: null, via: "MISSING_KEY" };
+  if (!chaveNorm) return { stockCandidates: [], via: "MISSING_KEY" };
 
-  // 1. Alias manual tem prioridade absoluta (compatibilidade autorizada).
-  const alias = compat.aliases.get(chaveNorm);
-  if (alias) return { stockKey: alias, via: "ALIAS" };
+  // 1. Verifica se pertence a um grupo de compatibilidade.
+  const group = compat.groups.find((g) => g.members.includes(chaveNorm)) ?? null;
 
-  // 2. A própria chave existe no estoque.
-  if (stockKeys.has(chaveNorm)) return { stockKey: chaveNorm, via: "DIRECT" };
+  if (group) {
+    const candidates: string[] = [];
+    // Chave direta primeiro (se tiver saldo).
+    if (stockKeys.has(chaveNorm)) candidates.push(chaveNorm);
+    // Demais membros do grupo com saldo (ordem determinística = posição no array).
+    for (const member of group.members) {
+      if (member !== chaveNorm && stockKeys.has(member) && !candidates.includes(member)) {
+        candidates.push(member);
+      }
+    }
+    if (candidates.length === 0) {
+      // Sem saldo em nenhum membro — registra a própria chave para a tentativa falhar.
+      return { stockCandidates: [chaveNorm], via: "NONE" };
+    }
+    const via: ResolutionVia = candidates[0] === chaveNorm ? "DIRECT" : "GROUP";
+    return { stockCandidates: candidates, via };
+  }
+
+  // 2. A própria chave existe no estoque (sem grupo).
+  if (stockKeys.has(chaveNorm)) return { stockCandidates: [chaveNorm], via: "DIRECT" };
 
   // 3. Catálogo: chave → chaves de estoque via referência física.
   const targets = Array.from(
     new Set((compat.catalog.get(chaveNorm) ?? []).filter((t) => t && t !== chaveNorm && stockKeys.has(t))),
   ).sort();
-  if (targets.length === 1) return { stockKey: targets[0], via: "CATALOG" };
-  if (targets.length > 1) return { stockKey: null, via: "AMBIGUOUS", ambiguousTargets: targets };
+  if (targets.length === 1) return { stockCandidates: targets, via: "CATALOG" };
+  if (targets.length > 1) return { stockCandidates: [], via: "AMBIGUOUS", ambiguousTargets: targets };
 
-  // 4. Sem correspondência no estoque — chave resolvida para si mesma (sem saldo).
-  return { stockKey: chaveNorm, via: "NONE" };
+  // 4. Sem correspondência — tenta a própria chave (resultado esperado: null no estoque).
+  return { stockCandidates: [chaveNorm], via: "NONE" };
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +414,8 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
     else if (!(DEPOSITOS_VALIDOS as readonly string[]).includes(depositoNorm))
       reasons.push(VERIFY_REASONS.DEPOSITO_FORA_DO_FLUXO);
 
+    // PECA_NECESSARIA_AUSENTE: somente quando não há nenhuma peça aberta.
+    // (Peças em SEPARADA/RESERVADA/CONSUMIDA já foram excluídas pelo loader.)
     if (c.parts.length === 0) reasons.push(VERIFY_REASONS.PECA_NECESSARIA_AUSENTE);
 
     const resolutions = new Map<number, KeyResolution>();
@@ -396,12 +448,14 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
   });
 
   // ── 2. Ordenação dos elegíveis ───────────────────────────────────────────
-  // Prioridade manual (recurso operacional existente) antecede a disputa;
-  // dentro dela e do restante: maior score → maior margem → maior idade →
-  // menor ID do caso (desempate técnico determinístico).
+  // Ordem canônica obrigatória: maior score → maior margem → maior idade → menor ID.
+  // Prioridade manual (manualPriorityEnabled) só antecede este critério quando
+  // explicitamente habilitado na regra ativa — default false.
   const eligibleCases = evaluated.filter((e) => e.eligible && e.breakdown !== null);
   eligibleCases.sort((a, b) => {
-    if (a.input.manualPriority !== b.input.manualPriority) return a.input.manualPriority ? -1 : 1;
+    if (activeRule.manualPriorityEnabled) {
+      if (a.input.manualPriority !== b.input.manualPriority) return a.input.manualPriority ? -1 : 1;
+    }
     const sa = a.breakdown!.score;
     const sb = b.breakdown!.score;
     if (sb !== sa) return sb - sa;
@@ -420,33 +474,33 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
   for (const e of eligibleCases) {
     for (const p of e.input.parts) {
       const r = e.resolutions.get(p.partRequestId)!;
-      if (r.stockKey) demandByKey.set(r.stockKey, (demandByKey.get(r.stockKey) ?? 0) + 1);
+      const primaryKey = r.stockCandidates[0];
+      if (primaryKey) demandByKey.set(primaryKey, (demandByKey.get(primaryKey) ?? 0) + 1);
     }
   }
 
   // ── 3. Primeira passagem — kits completos (alocação atômica) ────────────
-  const fullKitAllocations = new Map<number, Map<number, { ref: string; refNorm: string }>>();
+  // Resultado: partRequestId → { ref, refNorm, usedKey }
+  const fullKitAllocations = new Map<number, Map<number, { ref: string; refNorm: string; usedKey: string }>>();
 
   for (const e of eligibleCases) {
-    const keysNeeded = new Set<string>();
-    let allResolvable = true;
-    for (const p of e.input.parts) {
+    const allResolvable = e.input.parts.every((p) => {
       const r = e.resolutions.get(p.partRequestId)!;
-      if (!r.stockKey) {
-        allResolvable = false;
-        break;
-      }
-      keysNeeded.add(r.stockKey);
-    }
+      return r.via !== "MISSING_KEY" && r.via !== "AMBIGUOUS";
+    });
     if (!allResolvable) continue;
 
-    // Simula em cópia — nada é preso se qualquer peça faltar.
+    // Simula em cópia — nada é consumido se qualquer peça faltar.
+    const keysNeeded = new Set<string>();
+    for (const p of e.input.parts) {
+      for (const k of e.resolutions.get(p.partRequestId)!.stockCandidates) keysNeeded.add(k);
+    }
     const temp = cloneStockKeys(virtualStock, keysNeeded);
-    const allocs = new Map<number, { ref: string; refNorm: string }>();
+    const allocs = new Map<number, { ref: string; refNorm: string; usedKey: string }>();
     let complete = true;
     for (const p of e.input.parts) {
       const r = e.resolutions.get(p.partRequestId)!;
-      const got = allocateOne(temp, r.stockKey!);
+      const got = allocateFirstAvailable(temp, r.stockCandidates);
       if (!got) {
         complete = false;
         break;
@@ -461,15 +515,15 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
   }
 
   // ── 4. Segunda passagem — parciais somente com as sobras ────────────────
-  const partialAllocations = new Map<number, Map<number, { ref: string; refNorm: string }>>();
+  const partialAllocations = new Map<number, Map<number, { ref: string; refNorm: string; usedKey: string }>>();
 
   for (const e of eligibleCases) {
     if (fullKitAllocations.has(e.input.caseId)) continue;
-    const allocs = new Map<number, { ref: string; refNorm: string }>();
+    const allocs = new Map<number, { ref: string; refNorm: string; usedKey: string }>();
     for (const p of e.input.parts) {
       const r = e.resolutions.get(p.partRequestId)!;
-      if (!r.stockKey) continue;
-      const got = allocateOne(virtualStock, r.stockKey);
+      if (r.via === "MISSING_KEY" || r.via === "AMBIGUOUS") continue;
+      const got = allocateFirstAvailable(virtualStock, r.stockCandidates);
       if (got) allocs.set(p.partRequestId, got);
     }
     if (allocs.size > 0) partialAllocations.set(e.input.caseId, allocs);
@@ -479,19 +533,25 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
   const decisions: CaseDecision[] = evaluated.map((e) => {
     const c = e.input;
 
-    const makePart = (p: MatchPartInput, resultStatus: PartResultStatus, alloc?: { ref: string; refNorm: string } | null): PartDecision => {
+    const makePart = (
+      p: MatchPartInput,
+      resultStatus: PartResultStatus,
+      alloc?: { ref: string; refNorm: string; usedKey: string } | null,
+    ): PartDecision => {
       const r = e.resolutions.get(p.partRequestId)!;
-      const aliasUsed = r.stockKey !== null && p.chavePecaNorm !== null && r.stockKey !== p.chavePecaNorm;
+      const usedKey = alloc?.usedKey ?? r.stockCandidates[0] ?? null;
+      const groupUsed = alloc !== null && alloc !== undefined &&
+        p.chavePecaNorm !== null && alloc.usedKey !== p.chavePecaNorm;
       return {
         partRequestId: p.partRequestId,
         chavePeca: p.chavePeca,
         chavePecaNorm: p.chavePecaNorm,
-        resolvedStockKey: r.stockKey,
+        resolvedStockKey: usedKey,
         resolutionVia: r.via,
         resultStatus,
         allocatedReference: alloc?.ref ?? null,
         allocatedReferenceNorm: alloc?.refNorm ?? null,
-        aliasStockChaveNorm: alloc && aliasUsed ? r.stockKey : null,
+        aliasStockChaveNorm: groupUsed ? alloc!.usedKey : null,
       };
     };
 
@@ -506,7 +566,7 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
       const allocs = fullKitAllocations.get(c.caseId)!;
       parts = c.parts.map((p) => makePart(p, "MATCH", allocs.get(p.partRequestId)));
     } else {
-      const allocs = partialAllocations.get(c.caseId) ?? new Map<number, { ref: string; refNorm: string }>();
+      const allocs = partialAllocations.get(c.caseId) ?? new Map<number, { ref: string; refNorm: string; usedKey: string }>();
       parts = c.parts.map((p) => {
         const alloc = allocs.get(p.partRequestId);
         if (alloc) return makePart(p, "MATCH_PARCIAL", alloc);
@@ -526,18 +586,15 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
     const virtuallyAllocatedParts = parts.filter((p) => p.allocatedReference !== null);
     const missingParts = parts.filter((p) => p.allocatedReference === null);
 
-    const compatibilityResolutions = c.parts
-      .map((p) => {
-        const r = e.resolutions.get(p.partRequestId)!;
-        if (!r.stockKey || !p.chavePecaNorm || r.stockKey === p.chavePecaNorm) return null;
-        return {
-          partRequestId: p.partRequestId,
-          requestedChaveNorm: p.chavePecaNorm,
-          stockChaveNorm: r.stockKey,
-          via: r.via,
-        };
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null);
+    // Registra resoluções via grupo/catálogo para explicabilidade no card.
+    const compatibilityResolutions = parts
+      .filter((p) => p.aliasStockChaveNorm !== null && p.chavePecaNorm !== null)
+      .map((p) => ({
+        partRequestId: p.partRequestId,
+        requestedChaveNorm: p.chavePecaNorm!,
+        stockChaveNorm: p.aliasStockChaveNorm!,
+        via: p.resolutionVia,
+      }));
 
     return {
       caseId: c.caseId,
