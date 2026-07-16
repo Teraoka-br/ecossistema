@@ -124,17 +124,18 @@ export function applyHisToRepairCases(db: Db, _importId?: number): HisSyncResult
 // ---------------------------------------------------------------------------
 
 export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSeriaisSyncResult {
-  // "Com Saldo" (rel_seriais_saldo_current) tem prioridade sobre "Todos" (rel_seriais_current)
-  // para deposito_atual e filial_atual. Demais campos vêm do "Todos" como fallback.
+  // deposito_atual vem EXCLUSIVAMENTE do "Com Saldo" (rel_seriais_saldo_current).
+  // Aparelhos ausentes do "Com Saldo" não existem mais fisicamente — o caso é CONCLUIDO.
+  // "Todos" (rel_seriais_current) serve apenas para enriquecimento de serial/marca/modelo.
   const rows = db.prepare(
     `SELECT
        COALESCE(c.imei_norm, s.imei_norm) AS imei_norm,
        COALESCE(c.serial, s.serial)       AS serial,
-       COALESCE(s.deposito_atual, c.deposito_atual) AS deposito_atual,
-       COALESCE(s.filial_atual, c.filial_atual)     AS filial_atual,
-       COALESCE(c.disponivel, s.disponivel)         AS disponivel,
-       COALESCE(c.fabricante, s.fabricante)         AS fabricante,
-       COALESCE(c.descricao, s.descricao)           AS descricao
+       s.deposito_atual,                              -- NULL se ausente do Com Saldo
+       s.filial_atual,                                -- NULL se ausente do Com Saldo
+       COALESCE(c.disponivel, s.disponivel)           AS disponivel,
+       COALESCE(c.fabricante, s.fabricante)           AS fabricante,
+       COALESCE(c.descricao, s.descricao)             AS descricao
      FROM rel_seriais_current c
      LEFT JOIN rel_seriais_saldo_current s ON s.imei_norm = c.imei_norm
      UNION
@@ -265,6 +266,17 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
           result.criados++;
         } else {
           result.semVinculo++;
+        }
+        continue;
+      }
+
+      // Ausente do Com Saldo = não existe mais fisicamente → concluir caso
+      if (row.deposito_atual === null || row.deposito_atual === undefined) {
+        updateLocation.run(null, null, row.disponivel, rc.id);
+        result.atualizados++;
+        if (!LOCKED_FROM_DEMOTION.has(rc.workflow_status)) {
+          markConcluido.run(rc.id);
+          result.concluidos++;
         }
         continue;
       }
