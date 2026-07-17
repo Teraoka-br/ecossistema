@@ -429,6 +429,13 @@ export function closeRepairCase(
 
 export function getPartsByCase(db: Db, repairCaseId: number): PartRequest[] {
   const rows = db
+    .prepare("SELECT * FROM part_requests WHERE repair_case_id = ? AND cancelled_at IS NULL ORDER BY created_at")
+    .all(repairCaseId) as unknown as PartRequestRow[];
+  return rows.map(toPartRequest);
+}
+
+export function getAllPartsByCase(db: Db, repairCaseId: number): PartRequest[] {
+  const rows = db
     .prepare("SELECT * FROM part_requests WHERE repair_case_id = ? ORDER BY created_at")
     .all(repairCaseId) as unknown as PartRequestRow[];
   return rows.map(toPartRequest);

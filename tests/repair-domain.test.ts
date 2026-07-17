@@ -12,6 +12,7 @@ import {
   saveAnalysis, searchRepairCases, searchChavePeca,
   completeAnalysis, closeRepairCase, addPart, cancelPart,
   setManualPriority, removeManualPriority, getPrioritiesByCase,
+  getAllPartsByCase,
   RepairError,
 } from "../src/repair/repair-service.js";
 
@@ -112,10 +113,14 @@ describe("repair_cases", () => {
     const rc = createRepairCase(db, { createdByUserId: userId });
     const part = addPart(db, rc.id, { description: "Tela", createdByUserId: userId });
     cancelPart(db, part.id, userId);
+    // getRepairCaseWithParts só retorna peças ativas (não canceladas)
     const updated = getRepairCaseWithParts(db, rc.id);
-    expect(updated!.parts.length).toBe(1);
-    expect(updated!.parts[0].status).toBe("CANCELADA");
-    expect(updated!.parts[0].cancelledAt).not.toBeNull();
+    expect(updated!.parts.length).toBe(0);
+    // getAllPartsByCase confirma que o registro não foi deletado — apenas cancelado
+    const all = getAllPartsByCase(db, rc.id);
+    expect(all.length).toBe(1);
+    expect(all[0].status).toBe("CANCELADA");
+    expect(all[0].cancelledAt).not.toBeNull();
   });
 
   it("auditoria registra usuário na criação", () => {
