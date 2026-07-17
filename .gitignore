@@ -33,6 +33,10 @@ npm-debug.log*
 # beta runtime
 .beta-pids
 
+# claude worktrees internas (não fazem parte do projeto)
+.claude/worktrees/
+.claire/
+
 # editor / OS
 .DS_Store
 Thumbs.db
