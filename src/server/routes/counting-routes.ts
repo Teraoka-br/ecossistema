@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { z } from "zod";
 import { getDb } from "../../db/database.js";
 import { getActiveBatch } from "../../db/repository.js";
@@ -6,6 +6,7 @@ import * as svc from "../../counting/counting-service.js";
 import { CountingError } from "../../counting/counting-service.js";
 import * as q from "../../db/counting-queries.js";
 import * as partKeysSvc from "../../operational/part-keys-service.js";
+import { requirePermissionOrAdmin } from "../middleware/auth-middleware.js";
 import type { CountScanRow, CountSessionRow, StockSnapshotRow } from "../../db/counting-repository.js";
 import type { CountScan, CountSession, StockSnapshot, StockSnapshotItem } from "../../shared/types.js";
 
@@ -392,11 +393,12 @@ const partKeyUpdateSchema = z.object({
   notes: z.string().optional(),
 });
 
-countingRouter.patch("/part-keys/:id", (req, res, next) => {
+countingRouter.patch("/part-keys/:id", requirePermissionOrAdmin("MANAGE_PART_REFERENCES"), (req, res, next) => {
   try {
     const id = idParam(req.params.id);
     const body = partKeyUpdateSchema.parse(req.body);
-    const key = partKeysSvc.updatePartKey(getDb(), id, body);
+    const editedBy = (req as Request).sessionUser?.displayName ?? body.editedBy;
+    const key = partKeysSvc.updatePartKey(getDb(), id, { ...body, editedBy });
     res.json({ key });
   } catch (err) {
     if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
@@ -408,7 +410,7 @@ countingRouter.patch("/part-keys/:id", (req, res, next) => {
   }
 });
 
-// Editar chave importada (por chave_peca_norm) — cria/atualiza entrada custom
+// Editar chave importada (por chave_peca_norm) — cria/atualiza entrada custom preservando original
 const partKeyImportedEditSchema = z.object({
   chavePeca: z.string().min(1).optional(),
   descricao: z.string().nullable().optional(),
@@ -416,18 +418,37 @@ const partKeyImportedEditSchema = z.object({
   notes: z.string().optional(),
 });
 
-countingRouter.patch("/part-keys/imported/:norm", (req, res, next) => {
+countingRouter.patch("/part-keys/imported/:norm", requirePermissionOrAdmin("MANAGE_PART_REFERENCES"), (req, res, next) => {
   try {
     const norm = req.params.norm;
     const body = partKeyImportedEditSchema.parse(req.body);
     const db = getDb();
     const batch = getActiveBatch(db);
-    const key = partKeysSvc.editImportedKey(db, norm, body, batch?.id ?? null);
+    const editedBy = (req as Request).sessionUser?.displayName ?? body.editedBy;
+    const key = partKeysSvc.editImportedKey(db, norm, { ...body, editedBy }, batch?.id ?? null);
     res.json({ key });
   } catch (err) {
     if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
     if ((err as NodeJS.ErrnoException).message?.includes("UNIQUE")) {
       res.status(409).json({ error: "CHAVEPECA já existe no catálogo." }); return;
+    }
+    next(err);
+  }
+});
+
+// Restaurar chave importada ao valor original (remove o override)
+countingRouter.delete("/part-keys/imported/:norm/override", requirePermissionOrAdmin("MANAGE_PART_REFERENCES"), (req, res, next) => {
+  try {
+    const norm = req.params.norm;
+    const db = getDb();
+    const editedBy = (req as Request).sessionUser?.displayName ?? undefined;
+    const notes = typeof (req.body as Record<string, unknown>)?.notes === "string" ? (req.body as Record<string, unknown>).notes as string : undefined;
+    partKeysSvc.restoreImportedKey(db, norm, { editedBy, notes });
+    res.json({ ok: true });
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (msg.includes("não encontrada") || msg.includes("não é um override")) {
+      res.status(404).json({ error: msg }); return;
     }
     next(err);
   }
@@ -440,7 +461,7 @@ countingRouter.get("/part-keys/history/:norm", (req, res) => {
   res.json({ history });
 });
 
-countingRouter.delete("/part-keys/:id", (req, res, next) => {
+countingRouter.delete("/part-keys/:id", requirePermissionOrAdmin("MANAGE_PART_REFERENCES"), (req, res, next) => {
   try {
     const id = idParam(req.params.id);
     partKeysSvc.deletePartKey(getDb(), id);

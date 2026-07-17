@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-import { Plus, Pencil, Trash2, Search, History, X, Check, RefreshCw, Wand2, Info } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, History, X, Check, RefreshCw, Wand2, Info, RotateCcw } from "lucide-react";
 import { useAuth } from "../auth.js";
 import {
   FORNECEDORES, MARCAS, MODELOS, CORES, PECAS,
@@ -14,6 +14,9 @@ interface PartKey {
   source: "IMPORTADA" | "MANUAL";
   created_by: string | null;
   created_at: string | null;
+  isOverride: boolean;
+  originalChavePeca: string | null;
+  originalDescricao: string | null;
 }
 
 interface EditRow {
@@ -412,7 +415,7 @@ export function Referencias() {
       editedBy: user?.displayName ?? user?.username ?? "sistema",
       notes: editModal.notes.trim() || undefined,
     };
-    const url = k.source === "MANUAL" && k.id !== null
+    const url = k.source === "MANUAL" && k.id !== null && !k.isOverride
       ? `/api/part-keys/${k.id}`
       : `/api/part-keys/imported/${encodeURIComponent(k.chave_peca_norm)}`;
     const r = await fetch(url, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -425,6 +428,28 @@ export function Referencias() {
     } else {
       const d = await r.json() as { error?: string };
       setError(d.error ?? "Erro ao salvar.");
+      setEditModal(prev => prev ? { ...prev, saving: false } : null);
+    }
+  }
+
+  async function restoreKey() {
+    if (!editModal) return;
+    const k = editModal.key;
+    if (!k.isOverride) return;
+    setEditModal(prev => prev ? { ...prev, saving: true } : null);
+    setError(null);
+    const r = await fetch(`/api/part-keys/imported/${encodeURIComponent(k.chave_peca_norm)}/override`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notes: editModal.notes.trim() || undefined }),
+    });
+    if (r.ok) {
+      setMsg("Valor original restaurado.");
+      setEditModal(null);
+      void load(search || undefined);
+    } else {
+      const d = await r.json() as { error?: string };
+      setError(d.error ?? "Erro ao restaurar.");
       setEditModal(prev => prev ? { ...prev, saving: false } : null);
     }
   }
@@ -561,14 +586,16 @@ export function Referencias() {
                   <td>
                     {k.source === "MANUAL"
                       ? <span className="badge badge-ok">Manual</span>
-                      : <span className="badge badge-muted">Importada</span>}
+                      : k.isOverride
+                        ? <span className="badge badge-info">Importada (editada)</span>
+                        : <span className="badge badge-muted">Importada</span>}
                   </td>
                   <td className="muted small">{k.created_by ?? "—"}</td>
                   <td className="small muted">{k.created_at?.slice(0, 10) ?? "—"}</td>
                   <td>
                     <div className="gap-row">
                       <button className="btn btn-ghost btn-sm" onClick={() => void openEdit(k)} title="Editar"><Pencil size={12} /></button>
-                      {k.source === "MANUAL" && k.id !== null && (
+                      {k.source === "MANUAL" && k.id !== null && !k.isOverride && (
                         <button
                           className={`btn btn-sm ${deletingId === k.id ? "btn-primary" : "btn-ghost"}`}
                           style={deletingId !== k.id ? { color: "var(--err-text, #f87171)" } : {}}
@@ -601,11 +628,25 @@ export function Referencias() {
               <button className="btn btn-ghost btn-sm" onClick={() => setEditModal(null)}><X size={14} /></button>
             </div>
 
-            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", fontSize: "0.82rem" }}>
-              {editModal.key.source === "MANUAL"
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", fontSize: "0.82rem", flexWrap: "wrap" }}>
+              {editModal.key.source === "MANUAL" && !editModal.key.isOverride
                 ? <span className="badge badge-ok">Manual</span>
-                : <span className="badge badge-muted" style={{ fontSize: "0.75rem" }}>Importada → será promovida a Manual ao salvar</span>}
+                : editModal.key.isOverride
+                  ? <span className="badge badge-info">Importada (editada)</span>
+                  : <span className="badge badge-muted" style={{ fontSize: "0.75rem" }}>Importada — override local preserva valor original</span>}
             </div>
+
+            {editModal.key.isOverride && (editModal.key.originalChavePeca || editModal.key.originalDescricao) && (
+              <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)", borderRadius: "var(--r)", padding: "0.6rem 0.85rem", fontSize: "0.82rem" }}>
+                <span className="muted">Valor original importado: </span>
+                {editModal.key.originalChavePeca && editModal.key.originalChavePeca !== editModal.key.chave_peca && (
+                  <span style={{ fontFamily: "monospace", fontWeight: 600, marginRight: "0.5rem" }}>{editModal.key.originalChavePeca}</span>
+                )}
+                {editModal.key.originalDescricao && (
+                  <span className="muted">{editModal.key.originalDescricao}</span>
+                )}
+              </div>
+            )}
 
             <div className="form-group">
               <label>CHAVEPECA</label>
@@ -646,6 +687,17 @@ export function Referencias() {
               <button className="btn btn-primary btn-sm" onClick={() => void saveEdit()} disabled={editModal.saving || !editModal.chavePeca.trim()}>
                 {editModal.saving ? "Salvando…" : "Salvar"}
               </button>
+              {editModal.key.isOverride && (
+                <button
+                  className="btn btn-ghost btn-sm"
+                  style={{ color: "var(--warn-text, #fbbf24)" }}
+                  onClick={() => void restoreKey()}
+                  disabled={editModal.saving}
+                  title="Remove o override e volta a exibir o valor importado original"
+                >
+                  <RotateCcw size={11} /> Restaurar valor importado
+                </button>
+              )}
               <button className="btn btn-ghost btn-sm" onClick={() => setEditModal(null)}>Cancelar</button>
             </div>
 
