@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Plus, RotateCcw, UserCheck, UserX, Pencil, ShieldCheck } from "lucide-react";
+import { Plus, RotateCcw, UserCheck, UserX, Pencil, ShieldCheck, ShieldOff } from "lucide-react";
 
 interface User {
   id: number;
@@ -20,6 +20,11 @@ interface StaffMember {
 const ROLE_LABEL: Record<string, string> = { ADMIN: "Admin", OPERATOR: "Operador", TECHNICIAN: "Técnico" };
 const ROLE_BADGE: Record<string, string> = { ADMIN: "badge-warn", OPERATOR: "badge-muted", TECHNICIAN: "badge-info" };
 
+const PERM_LABELS: Record<string, string> = {
+  OVERRIDE_REPAIR_STATUS: "Alterar fase",
+  MANAGE_PART_REFERENCES: "Editar referências",
+};
+
 export function AdminUsuarios() {
   const [users, setUsers] = useState<User[]>([]);
   const [staff, setStaff] = useState<StaffMember[]>([]);
@@ -32,8 +37,12 @@ export function AdminUsuarios() {
   const [msg, setMsg] = useState<string | null>(null);
 
   // edição de depósito
-  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [editingDeposito, setEditingDeposito] = useState<User | null>(null);
   const [depositoValue, setDepositoValue] = useState("");
+
+  // edição de usuário (nome + papel)
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [editForm, setEditForm] = useState({ displayName: "", role: "OPERATOR" as "ADMIN" | "OPERATOR" | "TECHNICIAN" });
 
   async function load() {
     setLoading(true);
@@ -70,6 +79,18 @@ export function AdminUsuarios() {
     else { const d = await r.json(); setError(d.error); }
   }
 
+  async function saveEditUser() {
+    if (!editingUser) return;
+    setError(null);
+    const r = await fetch(`/api/auth/users/${editingUser.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(editForm),
+    });
+    if (r.ok) { setMsg("Usuário atualizado."); setEditingUser(null); load(); }
+    else { const d = await r.json(); setError(d.error); }
+  }
+
   async function toggleActive(u: User) {
     const r = await fetch(`/api/auth/users/${u.id}`, {
       method: "PATCH",
@@ -100,16 +121,16 @@ export function AdminUsuarios() {
   }
 
   async function saveDeposito() {
-    if (!editingUser) return;
+    if (!editingDeposito) return;
     setError(null);
-    const sm = staffFor(editingUser.id);
+    const sm = staffFor(editingDeposito.id);
     if (!sm) { setError("Técnico não encontrado na lista de despacho. Vincule-o em Administração → Técnicos."); return; }
     const r = await fetch(`/api/staff/${sm.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ datasysDeposito: depositoValue.trim() || null }),
     });
-    if (r.ok) { setMsg("Depósito atualizado."); setEditingUser(null); setDepositoValue(""); load(); }
+    if (r.ok) { setMsg("Depósito atualizado."); setEditingDeposito(null); setDepositoValue(""); load(); }
     else { const d = await r.json(); setError(d.error); }
   }
 
@@ -150,6 +171,28 @@ export function AdminUsuarios() {
         </div>
       )}
 
+      {editingUser && (
+        <div className="card" style={{ maxWidth: 420, marginBottom: "1rem" }}>
+          <h2>Editar — {editingUser.displayName}</h2>
+          <div className="form-group">
+            <label>Nome de exibição</label>
+            <input value={editForm.displayName} onChange={(e) => setEditForm((f) => ({ ...f, displayName: e.target.value }))} autoFocus />
+          </div>
+          <div className="form-group">
+            <label>Papel</label>
+            <select value={editForm.role} onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value as "ADMIN" | "OPERATOR" | "TECHNICIAN" }))}>
+              <option value="OPERATOR">Operador</option>
+              <option value="ADMIN">Administrador</option>
+              <option value="TECHNICIAN">Técnico</option>
+            </select>
+          </div>
+          <div className="gap-row">
+            <button className="btn btn-primary btn-sm" onClick={saveEditUser}>Salvar</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditingUser(null)}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
       {resetPinUser && (
         <div className="card" style={{ maxWidth: 320, marginBottom: "1rem" }}>
           <h2>Redefinir PIN — usuário #{resetPinUser}</h2>
@@ -161,9 +204,9 @@ export function AdminUsuarios() {
         </div>
       )}
 
-      {editingUser && (
+      {editingDeposito && (
         <div className="card" style={{ maxWidth: 420, marginBottom: "1rem" }}>
-          <h2>Depósito Datasys — {editingUser.displayName}</h2>
+          <h2>Depósito Datasys — {editingDeposito.displayName}</h2>
           <div className="form-group">
             <label>Nome do depósito no Datasys</label>
             <input
@@ -178,7 +221,7 @@ export function AdminUsuarios() {
           </div>
           <div className="gap-row">
             <button className="btn btn-primary btn-sm" onClick={saveDeposito}>Salvar</button>
-            <button className="btn btn-ghost btn-sm" onClick={() => setEditingUser(null)}>Cancelar</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditingDeposito(null)}>Cancelar</button>
           </div>
         </div>
       )}
@@ -192,13 +235,13 @@ export function AdminUsuarios() {
                 <th>Usuário</th>
                 <th>Papel</th>
                 <th>Depósito Datasys</th>
-                <th>Alterar fase</th>
+                <th>Permissões</th>
                 <th>Status</th>
                 <th>Ações</th>
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={6} className="muted">Carregando…</td></tr>}
+              {loading && <tr><td colSpan={7} className="muted">Carregando…</td></tr>}
               {users.map((u) => {
                 const sm = staffFor(u.id);
                 return (
@@ -215,31 +258,46 @@ export function AdminUsuarios() {
                         <span className="muted" style={{ fontSize: "0.78rem" }}>—</span>
                       )}
                     </td>
-                    <td style={{ textAlign: "center" }}>
+                    <td>
                       {u.role === "ADMIN" ? (
-                        <span className="badge badge-warn" title="Admins têm todas as permissões">Admin</span>
+                        <span className="badge badge-warn" title="Admins têm todas as permissões">Todas (Admin)</span>
                       ) : (
-                        <button
-                          className={`btn btn-sm ${u.permissions?.includes("OVERRIDE_REPAIR_STATUS") ? "btn-primary" : "btn-ghost"}`}
-                          onClick={() => togglePermission(u, "OVERRIDE_REPAIR_STATUS")}
-                          title={u.permissions?.includes("OVERRIDE_REPAIR_STATUS") ? "Clique para revogar" : "Clique para conceder"}
-                          style={{ fontSize: "0.75rem", gap: "4px" }}
-                        >
-                          <ShieldCheck size={12} />
-                          {u.permissions?.includes("OVERRIDE_REPAIR_STATUS") ? "Sim" : "Não"}
-                        </button>
+                        <div className="gap-row" style={{ flexWrap: "wrap", gap: "4px" }}>
+                          {(["OVERRIDE_REPAIR_STATUS", "MANAGE_PART_REFERENCES"] as const).map((perm) => {
+                            const has = u.permissions?.includes(perm) ?? false;
+                            return (
+                              <button
+                                key={perm}
+                                className={`btn btn-sm ${has ? "btn-primary" : "btn-ghost"}`}
+                                onClick={() => togglePermission(u, perm)}
+                                title={`${PERM_LABELS[perm]}: ${has ? "clique para revogar" : "clique para conceder"}`}
+                                style={{ fontSize: "0.72rem", gap: "3px", padding: "2px 7px" }}
+                              >
+                                {has ? <ShieldCheck size={11} /> : <ShieldOff size={11} />}
+                                {PERM_LABELS[perm]}
+                              </button>
+                            );
+                          })}
+                        </div>
                       )}
                     </td>
                     <td><span className={`badge ${u.active ? "badge-ok" : "badge-err"}`}>{u.active ? "Ativo" : "Inativo"}</span></td>
                     <td>
                       <div className="gap-row">
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => { setEditingUser(u); setEditForm({ displayName: u.displayName, role: u.role }); }}
+                          title="Editar nome e papel"
+                        >
+                          <Pencil size={12} />
+                        </button>
                         {u.role === "TECHNICIAN" && (
                           <button
                             className="btn btn-ghost btn-sm"
-                            onClick={() => { setEditingUser(u); setDepositoValue(sm?.datasysDeposito ?? ""); }}
+                            onClick={() => { setEditingDeposito(u); setDepositoValue(sm?.datasysDeposito ?? ""); }}
                             title="Configurar depósito Datasys"
                           >
-                            <Pencil size={12} /> Depósito
+                            <Pencil size={12} /> Dep.
                           </button>
                         )}
                         <button className="btn btn-ghost btn-sm" onClick={() => { setResetPinUser(u.id); setNewPin(""); }} title="Redefinir PIN"><RotateCcw size={12} /></button>

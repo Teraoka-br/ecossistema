@@ -4,6 +4,7 @@ import { Plus, Check, ChevronDown, ChevronUp, Loader2, AlertTriangle, Play, Refr
 interface MatchRuleSet {
   id: number;
   version: number;
+  name: string | null;
   marginAmountPerPoint: number;
   ageDaysPerPoint: number;
   ageMaxPoints: number;
@@ -48,21 +49,32 @@ interface PriorityCoverage {
 
 interface SimulateResult {
   ruleId: number;
+  ruleVersion: number;
   casesEvaluated: number;
   fullKitsFound: number;
   partialKitsFound: number;
   pedirPecaCount: number;
   aguardandoCount: number;
+  verificarCount: number;
   changedComparedToActive: number | null;
   changedFullMatchMembership: number | null;
   changedPartialMembership: number | null;
+  enteringMatch: number[];
+  leavingMatch: number[];
+  positionChanges: number;
   topChangedCases: Array<{
     caseId: number;
     prevStatusActive: string;
     newStatusSimulated: string;
-    scoreActive: number;
-    scoreSimulated: number;
+    scoreActive: number | null;
+    scoreSimulated: number | null;
   }>;
+  disputedKeys: Array<{ stockChaveNorm: string; demanded: number; available: number }>;
+}
+
+function fmtScore(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return v.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 2 });
 }
 
 interface ActivateStats { casesEvaluated: number; casesChanged: number; runId: number | null }
@@ -222,11 +234,13 @@ function SimResult({ result, onClose }: { result: SimulateResult; onClose: () =>
         <strong> quem recebe peça primeiro</strong>, não necessariamente quantos recebem.
       </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.5rem", marginBottom: "0.75rem" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "0.5rem", marginBottom: "0.75rem" }}>
         {[
           { label: "Match completo", value: result.fullKitsFound },
           { label: "Match parcial", value: result.partialKitsFound },
           { label: "Pedir peça", value: result.pedirPecaCount },
+          { label: "Aguard. receb.", value: result.aguardandoCount },
+          { label: "Verificar", value: result.verificarCount },
         ].map(({ label, value }) => (
           <div key={label} style={{
             textAlign: "center", padding: "0.5rem",
@@ -244,11 +258,12 @@ function SimResult({ result, onClose }: { result: SimulateResult; onClose: () =>
           <div style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.4rem" }}>
             Comparação com a regra ativa
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.4rem", marginBottom: "0.5rem" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem", marginBottom: "0.5rem" }}>
             {[
               { label: "Casos com status diferente", value: result.changedComparedToActive },
               { label: "Mudança em MATCH completo", value: result.changedFullMatchMembership ?? 0 },
               { label: "Mudança em MATCH parcial", value: result.changedPartialMembership ?? 0 },
+              { label: "Mudança de posição na disputa", value: result.positionChanges },
             ].map(({ label, value }) => (
               <div key={label} style={{ textAlign: "center", padding: "0.4rem", background: "var(--surface-1)", borderRadius: "var(--r-sm)", border: "1px solid var(--border)" }}>
                 <div style={{ fontSize: "1.1rem", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: value > 0 ? "var(--accent)" : undefined }}>{value}</div>
@@ -273,14 +288,43 @@ function SimResult({ result, onClose }: { result: SimulateResult; onClose: () =>
                       <td style={{ padding: "0.2rem 0.4rem", fontVariantNumeric: "tabular-nums" }}>#{c.caseId}</td>
                       <td style={{ padding: "0.2rem 0.4rem", color: "var(--muted)" }}>{c.prevStatusActive}</td>
                       <td style={{ padding: "0.2rem 0.4rem", fontWeight: 600 }}>{c.newStatusSimulated}</td>
-                      <td style={{ padding: "0.2rem 0.4rem", fontVariantNumeric: "tabular-nums" }}>{c.scoreActive}</td>
-                      <td style={{ padding: "0.2rem 0.4rem", fontVariantNumeric: "tabular-nums" }}>{c.scoreSimulated}</td>
+                      <td style={{ padding: "0.2rem 0.4rem", fontVariantNumeric: "tabular-nums" }}>{fmtScore(c.scoreActive)}</td>
+                      <td style={{ padding: "0.2rem 0.4rem", fontVariantNumeric: "tabular-nums" }}>{fmtScore(c.scoreSimulated)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           )}
+
+          {(result.enteringMatch.length > 0 || result.leavingMatch.length > 0) && (
+            <div style={{ fontSize: "0.75rem", marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "0.2rem" }}>
+              {result.enteringMatch.length > 0 && (
+                <span>Entrariam em MATCH: {result.enteringMatch.map(id => `#${id}`).join(", ")}</span>
+              )}
+              {result.leavingMatch.length > 0 && (
+                <span>Sairiam de MATCH: {result.leavingMatch.map(id => `#${id}`).join(", ")}</span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {result.disputedKeys.length > 0 && (
+        <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem", marginTop: "0.75rem" }}>
+          <div style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.4rem" }}>
+            Referências mais disputadas (demanda &gt; disponível)
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+            {result.disputedKeys.map(d => (
+              <span key={d.stockChaveNorm} style={{
+                fontSize: "0.72rem", padding: "0.15rem 0.5rem", borderRadius: "999px",
+                border: "1px solid var(--border)", background: "var(--surface-1)",
+              }}>
+                {d.stockChaveNorm} — {d.demanded} pedem / {d.available} disp.
+              </span>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -343,6 +387,7 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
       <div className="rule-card-header" onClick={() => setExpanded(e => !e)}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
           <span className="rule-version">v{rule.version}</span>
+          <span style={{ fontWeight: 600, fontSize: "0.85rem" }}>{rule.name ?? `Regra v${rule.version}`}</span>
           {rule.active && <span className="rule-badge active"><Check size={11} /> Ativa</span>}
           {!rule.active && <span className="rule-badge draft">Rascunho</span>}
           <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>{rule.reason ?? "Sem justificativa"}</span>
@@ -362,9 +407,12 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
 
           <div className="rule-formula">
             <code>
-              score = floor(margem / {rule.marginAmountPerPoint}) × {rule.marginWeight}
-              {" + "}min(floor(idade / {rule.ageDaysPerPoint}), {rule.ageMaxPoints}) × {rule.ageWeight}
+              score = (margem / {rule.marginAmountPerPoint}) × {rule.marginWeight}
+              {" + "}min(idade / {rule.ageDaysPerPoint}, {rule.ageMaxPoints}) × {rule.ageWeight}
             </code>
+            <div style={{ fontSize: "0.7rem", color: "var(--muted)", marginTop: "0.25rem" }}>
+              Cálculo com precisão decimal completa — sem arredondamento. Ex.: margem R$ 735 → {(735 / rule.marginAmountPerPoint).toLocaleString("pt-BR", { maximumFractionDigits: 2 })} pts.
+            </div>
           </div>
 
           {/* Botão simular impacto */}
@@ -429,9 +477,10 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
 
 function NewRuleForm({ onCreated }: { onCreated: () => void }) {
   const [form, setForm] = useState({
+    name: "",
     marginAmountPerPoint: 150,
     ageDaysPerPoint: 30,
-    ageMaxPoints: 15,
+    ageMaxPoints: 12,
     allowNegativeMarginScore: true,
     marginWeight: 1,
     ageWeight: 1,
@@ -459,6 +508,10 @@ function NewRuleForm({ onCreated }: { onCreated: () => void }) {
     <div className="new-rule-form">
       <h3>Nova versão de regra</h3>
       <div className="form-grid-2">
+        <label className="field">
+          <span>Nome da regra</span>
+          <input className="input" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="ex: Regra 1, Foco em margem…" />
+        </label>
         <label className="field">
           <span>Margem / ponto (R$)</span>
           <input className="input" type="number" value={form.marginAmountPerPoint} onChange={e => f("marginAmountPerPoint", Number(e.target.value))} />

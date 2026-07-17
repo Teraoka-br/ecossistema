@@ -21,6 +21,7 @@ import {
 } from "../../operational/purchase-request-service.js";
 import {
   getEngineState, runRepairMatchEngine, getPendingRequestCount,
+  requestMatchRecompute, processPendingRecompute,
 } from "../../match/engine-orchestrator.js";
 import { getCurrentOperationalStock } from "../../operational/stock-service.js";
 
@@ -216,6 +217,123 @@ repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) 
   res.json({ items, total, page, limit, filter });
 });
 
+// ─── Exportação completa do filtro (sem paginação) ───────────────────────
+
+repairQueueRouter.get("/fila-reparos/export", requireAuth, requireOperator, (req, res) => {
+  const db = getDb();
+  const filter = (req.query.filter as QueueFilter) || "TODOS";
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+
+  const statuses = QUEUE_FILTER_STATUSES[filter] ?? null;
+
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (statuses && statuses.length > 0) {
+    conditions.push(`rc.workflow_status IN (${statuses.map(() => "?").join(",")})`);
+    params.push(...statuses);
+  }
+
+  if (q) {
+    const like = `%${q}%`;
+    conditions.push(
+      `(rc.imei LIKE ? OR rc.os LIKE ? OR rc.brand LIKE ? OR rc.model LIKE ?
+        OR rc.deposito_atual LIKE ?
+        OR EXISTS (
+          SELECT 1 FROM part_requests pr
+          WHERE pr.repair_case_id = rc.id AND pr.cancelled_at IS NULL
+            AND (pr.chave_peca LIKE ? OR pr.description LIKE ?
+                 OR pr.allocated_reference LIKE ?
+                 OR EXISTS (
+                   SELECT 1 FROM purchase_requests pur
+                   WHERE pur.part_request_id = pr.id AND pur.referencia LIKE ?
+                 ))
+        ))`,
+    );
+    params.push(like, like, like, like, like, like, like, like, like);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  // Busca todos os casos sem paginação, incluindo dados de score e peças
+  const rows = db.prepare(`
+    SELECT
+      rc.id,
+      rc.imei,
+      rc.os,
+      rc.brand,
+      rc.model,
+      rc.color,
+      rc.capacity,
+      rc.deposito_atual,
+      rc.workflow_status,
+      rc.age_days,
+      rc.cost,
+      rc.estimated_sale,
+      rc.margin,
+      rc.manual_priority_active,
+      (SELECT COUNT(*) FROM part_requests WHERE repair_case_id = rc.id AND cancelled_at IS NULL) AS total_parts,
+      (SELECT GROUP_CONCAT(chave_peca, ' | ') FROM part_requests WHERE repair_case_id = rc.id AND cancelled_at IS NULL) AS pecas,
+      (SELECT GROUP_CONCAT(allocated_reference, ' | ') FROM part_requests WHERE repair_case_id = rc.id AND cancelled_at IS NULL AND allocated_reference IS NOT NULL) AS referencias,
+      rmcr.score,
+      rmcr.result_status AS match_result,
+      mrs.name AS regra_ativa
+    FROM repair_cases rc
+    LEFT JOIN repair_match_case_results rmcr ON rmcr.repair_case_id = rc.id
+      AND rmcr.run_id = (SELECT MAX(run_id) FROM repair_match_case_results WHERE repair_case_id = rc.id)
+    LEFT JOIN match_rule_sets mrs ON mrs.id = rmcr.rule_set_id
+    ${where}
+    ORDER BY
+      CASE WHEN rc.manual_priority_active = 1 THEN 0 ELSE 1 END,
+      CASE rc.workflow_status
+        WHEN 'MATCH' THEN 1 WHEN 'APTO_REPARO' THEN 2 WHEN 'MATCH_PARCIAL' THEN 3
+        WHEN 'VERIFICAR' THEN 4 WHEN 'EM_SEPARACAO' THEN 5 WHEN 'PEDIR_PECA' THEN 6
+        WHEN 'AGUARDANDO_RECEBIMENTO' THEN 7 WHEN 'EM_ANALISE' THEN 8 ELSE 9
+      END,
+      rc.id ASC
+  `).all(...params) as Record<string, unknown>[];
+
+  // Gera CSV
+  const esc = (v: unknown): string => {
+    if (v == null) return "";
+    const s = String(v);
+    if (s.includes(",") || s.includes('"') || s.includes("\n")) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+
+  const header = [
+    "IMEI", "OS", "Marca", "Modelo", "Cor", "Capacidade",
+    "Depósito", "Status", "Score", "Margem (R$)", "Idade (dias)",
+    "Qtd peças", "Peças necessárias", "Referências alocadas", "Regra ativa",
+  ].join(",");
+
+  const lines = rows.map(r => [
+    esc(r.imei),
+    esc(r.os),
+    esc(r.brand),
+    esc(r.model),
+    esc(r.color),
+    esc(r.capacity),
+    esc(r.deposito_atual),
+    esc(r.workflow_status),
+    esc(r.score != null ? Number(r.score).toFixed(4) : ""),
+    esc(r.margin),
+    esc(r.age_days),
+    esc(r.total_parts),
+    esc(r.pecas),
+    esc(r.referencias),
+    esc(r.regra_ativa),
+  ].join(","));
+
+  const csv = [header, ...lines].join("\r\n");
+  const date = new Date().toISOString().slice(0, 10);
+  const fname = `fila-reparos-${filter.toLowerCase()}-${date}.csv`;
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
+  res.send("﻿" + csv); // BOM para Excel reconhecer UTF-8
+});
+
 // ─── Summary (KPIs reais) ─────────────────────────────────────────────────
 
 repairQueueRouter.get("/fila-reparos/summary", requireAuth, (_req, res) => {
@@ -277,6 +395,35 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
       WHERE rmr.repair_case_id = ?
         AND rmr.run_id = (SELECT MAX(run_id) FROM repair_match_results WHERE repair_case_id = ?)
     `).all(id, id) as Record<string, unknown>[];
+
+    // Resultado canônico por caso (explicabilidade: motivos, score decimal, regra)
+    const caseResultRow = db.prepare(`
+      SELECT rmcr.*, mrs.name AS rule_name
+      FROM repair_match_case_results rmcr
+      LEFT JOIN match_rule_sets mrs ON mrs.id = rmcr.rule_set_id
+      WHERE rmcr.repair_case_id = ?
+      ORDER BY rmcr.run_id DESC LIMIT 1
+    `).get(id) as Record<string, unknown> | undefined;
+    const matchCaseResult = caseResultRow
+      ? {
+          runId: caseResultRow.run_id,
+          eligible: caseResultRow.eligible === 1,
+          resultStatus: caseResultRow.result_status,
+          verifyReasons: caseResultRow.verify_reasons_json
+            ? (JSON.parse(caseResultRow.verify_reasons_json as string) as string[])
+            : [],
+          margin: caseResultRow.margin,
+          marginPoints: caseResultRow.margin_points,
+          agePoints: caseResultRow.age_points,
+          score: caseResultRow.score,
+          priorityRank: caseResultRow.priority_rank,
+          ruleSetId: caseResultRow.rule_set_id,
+          ruleSetVersion: caseResultRow.rule_set_version,
+          ruleName: caseResultRow.rule_name ?? null,
+          depositoAtual: caseResultRow.deposito_atual,
+          computedAt: caseResultRow.created_at,
+        }
+      : null;
 
     // Get stock for each chave
     const { groups: stockGroups } = getCurrentOperationalStock(db);
@@ -368,6 +515,7 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
       reservations,
       nextAction,
       matchResults,
+      matchCaseResult,
       history,
       technician,
       directedTechnician,
@@ -559,7 +707,7 @@ repairQueueRouter.post("/fila-reparos/:id/override-status", requireAuth, require
 
 // ─── Editar campos do caso ────────────────────────────────────────────────
 
-repairQueueRouter.patch("/fila-reparos/:id/info", requireAuth, requireAdmin, (req, res, next) => {
+repairQueueRouter.patch("/fila-reparos/:id/info", requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const db = getDb();
     const repairCaseId = parseInt(req.params.id);
@@ -574,28 +722,113 @@ repairQueueRouter.patch("/fila-reparos/:id/info", requireAuth, requireAdmin, (re
     if (sets.length === 0) return res.json({ ok: true });
     sets.push("updated_at = datetime('now')");
     db.prepare(`UPDATE repair_cases SET ${sets.join(", ")} WHERE id = ?`).run(...vals, repairCaseId);
+
+    // Correção de dado indispensável (ex.: modelo) devolve o card ao motor
+    if ("model" in body || "brand" in body) {
+      requestMatchRecompute(db, `INFO_EDIT_${repairCaseId}`, "repair_case", repairCaseId);
+      await processPendingRecompute(db).catch(() => null);
+    }
     res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ─── Corrigir dados de score (custo/venda/idade) — tela VERIFICAR ─────────
+
+repairQueueRouter.patch("/fila-reparos/:id/score", requireAuth, requireOperator, async (req, res, next) => {
+  try {
+    const db = getDb();
+    const repairCaseId = parseInt(req.params.id);
+    if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
+
+    const body = req.body as { ageDays?: number | null; cost?: number | null; estimatedSale?: number | null; margin?: number | null };
+    const rc = db.prepare(
+      "SELECT age_days, cost, estimated_sale, margin FROM repair_cases WHERE id = ?",
+    ).get(repairCaseId) as { age_days: number | null; cost: number | null; estimated_sale: number | null; margin: number | null } | undefined;
+    if (!rc) return res.status(404).json({ error: "Caso não encontrado." });
+
+    const num = (v: unknown): number | null => {
+      if (v === null || v === undefined || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const ageDays = "ageDays" in body ? num(body.ageDays) : rc.age_days;
+    const cost = "cost" in body ? num(body.cost) : rc.cost;
+    const estimatedSale = "estimatedSale" in body ? num(body.estimatedSale) : rc.estimated_sale;
+    // margem é derivada (venda − custo); só aceita valor direto se algum dos dois faltar
+    const margin = cost !== null && estimatedSale !== null
+      ? estimatedSale - cost
+      : ("margin" in body ? num(body.margin) : rc.margin);
+
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const userName = (req as Request).sessionUser?.displayName ?? null;
+
+    db.prepare(
+      "UPDATE repair_cases SET age_days = ?, cost = ?, estimated_sale = ?, margin = ?, updated_by_user_id = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(ageDays, cost, estimatedSale, margin, userId, repairCaseId);
+
+    recordOperationalEvent(db, {
+      repairCaseId,
+      eventType: "DADOS_SCORE_EDITADOS",
+      responsibleName: userName,
+      notes: `Idade/custo/venda corrigidos: idade ${rc.age_days ?? "—"}→${ageDays ?? "—"}, custo ${rc.cost ?? "—"}→${cost ?? "—"}, venda ${rc.estimated_sale ?? "—"}→${estimatedSale ?? "—"}`,
+    });
+    db.prepare(
+      "INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata_json) VALUES (?, 'EDIT_SCORE_DATA', 'repair_case', ?, ?)",
+    ).run(userId, String(repairCaseId), JSON.stringify({ before: rc, after: { ageDays, cost, estimatedSale, margin } }));
+
+    // O card retorna imediatamente ao motor
+    requestMatchRecompute(db, `SCORE_DATA_EDIT_${repairCaseId}`, "repair_case", repairCaseId);
+    const recompute = await processPendingRecompute(db).catch(() => null);
+
+    const updated = db.prepare(
+      "SELECT id, workflow_status, age_days, cost, estimated_sale, margin FROM repair_cases WHERE id = ?",
+    ).get(repairCaseId);
+    res.json({ ok: true, case: updated, recompute });
   } catch (err) { next(err); }
 });
 
 // ─── Mover para depósito ──────────────────────────────────────────────────
 
-repairQueueRouter.patch("/fila-reparos/:id/deposito", requireAuth, requireOperator, (req, res, next) => {
+repairQueueRouter.patch("/fila-reparos/:id/deposito", requireAuth, requireOperator, async (req, res, next) => {
   try {
     const db = getDb();
     const repairCaseId = parseInt(req.params.id);
     if (!repairCaseId) return res.status(400).json({ error: "ID inválido." });
     const { deposito } = req.body as { deposito?: string | null };
+
+    const rc = db.prepare("SELECT deposito_atual FROM repair_cases WHERE id = ?").get(repairCaseId) as
+      | { deposito_atual: string | null }
+      | undefined;
+    if (!rc) return res.status(404).json({ error: "Caso não encontrado." });
+    const previous = rc.deposito_atual;
+    const newValue = deposito?.trim() || null;
+    const userId = (req as Request).sessionUser?.id ?? null;
+    const userName = (req as Request).sessionUser?.displayName ?? null;
+
     db.prepare(
       "UPDATE repair_cases SET deposito_atual = ?, updated_at = datetime('now') WHERE id = ?",
-    ).run(deposito?.trim() || null, repairCaseId);
+    ).run(newValue, repairCaseId);
+
+    // Auditoria: usuário, data e valor anterior
     recordOperationalEvent(db, {
       repairCaseId,
-      eventType: "NOTE_ADDED",
-      responsibleName: (req as Request).sessionUser?.displayName ?? null,
-      notes: deposito?.trim() ? `Depósito alterado para: ${deposito.trim()}` : "Depósito removido.",
+      eventType: "DEPOSITO_ALTERADO",
+      previousStatus: previous,
+      newStatus: newValue,
+      responsibleName: userName,
+      notes: `Depósito alterado manualmente: ${previous ?? "(vazio)"} → ${newValue ?? "(vazio)"}`,
     });
-    res.json({ ok: true });
+    db.prepare(
+      "INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata_json) VALUES (?, 'DEPOSITO_MANUAL', 'repair_case', ?, ?)",
+    ).run(userId, String(repairCaseId), JSON.stringify({ previous, newValue }));
+
+    // O card retorna imediatamente ao motor
+    requestMatchRecompute(db, `DEPOSITO_MANUAL_${repairCaseId}`, "repair_case", repairCaseId);
+    const recompute = await processPendingRecompute(db).catch(() => null);
+
+    const updated = db.prepare("SELECT workflow_status, deposito_atual FROM repair_cases WHERE id = ?").get(repairCaseId);
+    res.json({ ok: true, case: updated, recompute });
   } catch (err) { next(err); }
 });
 
@@ -757,7 +990,6 @@ repairQueueRouter.post("/match-rules/:id/activate", requireAuth, requireAdmin, a
     const userId = (req as Request).sessionUser?.id ?? null;
     const { reason } = req.body as { reason: string };
     const updated = activateRuleSet(db, parseInt(req.params.id), { reason, userId });
-    const { requestMatchRecompute, processPendingRecompute } = await import("../../match/engine-orchestrator.js");
     requestMatchRecompute(db, `RULE_ACTIVATED_v${updated.version}`, "match_rule_set", updated.id);
     const result = await processPendingRecompute(db);
     res.json({
@@ -786,7 +1018,6 @@ repairQueueRouter.post("/match-rules/backfill-priority", requireAuth, requireAdm
   try {
     const db = getDb();
     const { backfillRepairCasePriorityFields } = await import("../../match/priority-backfill-service.js");
-    const { requestMatchRecompute, processPendingRecompute } = await import("../../match/engine-orchestrator.js");
     const backfillResult = backfillRepairCasePriorityFields(db);
     requestMatchRecompute(db, "PRIORITY_BACKFILL", "system", 0);
     const recomputeResult = await processPendingRecompute(db);

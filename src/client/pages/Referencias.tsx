@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-import { Plus, Pencil, Trash2, Search, History, X, Check, RefreshCw, Wand2, Info } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, History, X, Check, RefreshCw, Wand2, Info, RotateCcw } from "lucide-react";
 import { useAuth } from "../auth.js";
 import {
   FORNECEDORES, MARCAS, MODELOS, CORES, PECAS,
@@ -14,6 +14,9 @@ interface PartKey {
   source: "IMPORTADA" | "MANUAL";
   created_by: string | null;
   created_at: string | null;
+  isOverride: boolean;
+  originalChavePeca: string | null;
+  originalDescricao: string | null;
 }
 
 interface EditRow {
@@ -137,6 +140,196 @@ function DecodedBadge({ chave }: { chave: string }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Compatibilidade manual de referências (part_key_aliases)
+// ---------------------------------------------------------------------------
+
+interface AliasRow {
+  id: number;
+  requested_chave_peca: string;
+  requested_chave_peca_norm: string;
+  stock_chave_peca: string;
+  stock_chave_peca_norm: string;
+  reason: string | null;
+  active: number;
+  created_at: string;
+}
+
+function CompatSection({ allKeys, isAdmin }: { allKeys: PartKey[]; isAdmin: boolean }) {
+  const [aliases, setAliases] = useState<AliasRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [reqChave, setReqChave] = useState("");
+  const [stockChave, setStockChave] = useState("");
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [removingId, setRemovingId] = useState<number | null>(null);
+
+  async function load(query?: string) {
+    setLoading(true);
+    const qs = query ? `?q=${encodeURIComponent(query)}` : "";
+    const r = await fetch(`/api/part-key-aliases${qs}`);
+    if (r.ok) setAliases(((await r.json()) as { aliases: AliasRow[] }).aliases);
+    setLoading(false);
+  }
+
+  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    const t = setTimeout(() => { void load(q || undefined); }, 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  async function create() {
+    if (!reqChave.trim() || !stockChave.trim()) return;
+    setSaving(true);
+    setErr(null);
+    try {
+      const r = await fetch("/api/part-key-aliases", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requestedChavePeca: reqChave.trim(), stockChavePeca: stockChave.trim(), reason: reason.trim() || null }),
+      });
+      const d = await r.json() as { error?: string; recompute?: { casesChanged?: number } | null };
+      if (r.ok) {
+        setMsg(`Compatibilidade criada. Motor recalculado${d.recompute?.casesChanged != null ? ` — ${d.recompute.casesChanged} card(s) mudaram` : ""}.`);
+        setReqChave(""); setStockChave(""); setReason(""); setShowForm(false);
+        void load(q || undefined);
+      } else {
+        setErr(d.error ?? "Erro ao criar vínculo.");
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deactivate(id: number) {
+    if (removingId !== id) { setRemovingId(id); return; }
+    setRemovingId(null);
+    setErr(null);
+    const r = await fetch(`/api/part-key-aliases/${id}`, { method: "DELETE" });
+    const d = await r.json() as { error?: string; recompute?: { casesChanged?: number } | null };
+    if (r.ok) {
+      setMsg(`Vínculo desativado. Motor recalculado${d.recompute?.casesChanged != null ? ` — ${d.recompute.casesChanged} card(s) mudaram` : ""}.`);
+      void load(q || undefined);
+    } else {
+      setErr(d.error ?? "Erro ao desativar.");
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginTop: "1rem" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "0.5rem" }}>
+        <h2 style={{ margin: 0 }}>Compatibilidades entre referências</h2>
+        <span className="spacer" />
+        {isAdmin && (
+          <button className="btn btn-primary btn-sm" onClick={() => setShowForm(v => !v)}>
+            <Plus size={13} /> Novo vínculo
+          </button>
+        )}
+      </div>
+      <p className="subtitle" style={{ marginTop: 0 }}>
+        Vincula uma chave solicitada nos pedidos a uma chave compatível existente no estoque
+        (ex.: BATERIA IPHONE 12 → BATERIA IPHONE 12/12 PRO). O motor de match usa o vínculo com
+        prioridade e nunca presume compatibilidade por semelhança de texto. O saldo físico nunca
+        é duplicado. Criar ou desativar um vínculo recalcula o motor imediatamente.
+      </p>
+
+      {msg && <div className="alert alert-ok" onClick={() => setMsg(null)} style={{ cursor: "pointer" }}>{msg}</div>}
+      {err && <div className="alert alert-err">{err}</div>}
+
+      {showForm && (
+        <div style={{ border: "1px solid var(--border)", borderRadius: "var(--r)", padding: "0.75rem 1rem", marginBottom: "0.75rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label>Chave solicitada (como aparece no pedido)</label>
+            <input
+              value={reqChave}
+              onChange={e => setReqChave(e.target.value.toUpperCase())}
+              placeholder="ex: BATERIA IPHONE 12"
+              list="compat-keys-list"
+            />
+          </div>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label>Chave compatível no estoque (canônica do grupo)</label>
+            <input
+              value={stockChave}
+              onChange={e => setStockChave(e.target.value.toUpperCase())}
+              placeholder="ex: BATERIA IPHONE 12/12 PRO"
+              list="compat-keys-list"
+            />
+          </div>
+          <datalist id="compat-keys-list">
+            {allKeys.map((k, i) => (
+              <option key={k.id ?? `i-${i}`} value={k.chave_peca}>{k.descricao ?? ""}</option>
+            ))}
+          </datalist>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label>Justificativa (opcional)</label>
+            <input value={reason} onChange={e => setReason(e.target.value)} placeholder="ex: mesma peça física, embalagem 12/12 Pro" />
+          </div>
+          <div className="gap-row">
+            <button className="btn btn-primary btn-sm" onClick={() => void create()} disabled={saving || !reqChave.trim() || !stockChave.trim()}>
+              {saving ? "Salvando…" : "Criar vínculo"}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setShowForm(false)}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
+        <Search size={14} style={{ color: "var(--muted)" }} />
+        <input type="search" value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por chave…" style={{ flex: 1, fontSize: "0.9rem" }} />
+      </div>
+
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Chave solicitada</th>
+              <th></th>
+              <th>Chave no estoque</th>
+              <th>Justificativa</th>
+              <th>Situação</th>
+              <th>Criado em</th>
+              {isAdmin && <th>Ações</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {loading && <tr><td colSpan={7} className="muted">Carregando…</td></tr>}
+            {!loading && aliases.length === 0 && <tr><td colSpan={7} className="muted">Nenhuma compatibilidade cadastrada.</td></tr>}
+            {aliases.map(a => (
+              <tr key={a.id} style={a.active === 0 ? { opacity: 0.55 } : undefined}>
+                <td className="mono" style={{ fontWeight: 600 }}>{a.requested_chave_peca}</td>
+                <td className="muted">→</td>
+                <td className="mono">{a.stock_chave_peca}</td>
+                <td className="small muted">{a.reason ?? "—"}</td>
+                <td>{a.active === 1 ? <span className="badge badge-ok">Ativo</span> : <span className="badge badge-muted">Desativado</span>}</td>
+                <td className="small muted">{a.created_at?.slice(0, 10)}</td>
+                {isAdmin && (
+                  <td>
+                    {a.active === 1 && (
+                      <button
+                        className={`btn btn-sm ${removingId === a.id ? "btn-primary" : "btn-ghost"}`}
+                        style={removingId !== a.id ? { color: "var(--err-text, #f87171)" } : {}}
+                        onClick={() => void deactivate(a.id)}
+                        title={removingId === a.id ? "Confirmar desativação" : "Desativar vínculo"}
+                      >
+                        {removingId === a.id ? <Check size={12} /> : <Trash2 size={12} />}
+                      </button>
+                    )}
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function Referencias() {
   const { user } = useAuth();
   const [keys, setKeys] = useState<PartKey[]>([]);
@@ -222,7 +415,7 @@ export function Referencias() {
       editedBy: user?.displayName ?? user?.username ?? "sistema",
       notes: editModal.notes.trim() || undefined,
     };
-    const url = k.source === "MANUAL" && k.id !== null
+    const url = k.source === "MANUAL" && k.id !== null && !k.isOverride
       ? `/api/part-keys/${k.id}`
       : `/api/part-keys/imported/${encodeURIComponent(k.chave_peca_norm)}`;
     const r = await fetch(url, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -235,6 +428,28 @@ export function Referencias() {
     } else {
       const d = await r.json() as { error?: string };
       setError(d.error ?? "Erro ao salvar.");
+      setEditModal(prev => prev ? { ...prev, saving: false } : null);
+    }
+  }
+
+  async function restoreKey() {
+    if (!editModal) return;
+    const k = editModal.key;
+    if (!k.isOverride) return;
+    setEditModal(prev => prev ? { ...prev, saving: true } : null);
+    setError(null);
+    const r = await fetch(`/api/part-keys/imported/${encodeURIComponent(k.chave_peca_norm)}/override`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notes: editModal.notes.trim() || undefined }),
+    });
+    if (r.ok) {
+      setMsg("Valor original restaurado.");
+      setEditModal(null);
+      void load(search || undefined);
+    } else {
+      const d = await r.json() as { error?: string };
+      setError(d.error ?? "Erro ao restaurar.");
       setEditModal(prev => prev ? { ...prev, saving: false } : null);
     }
   }
@@ -371,14 +586,16 @@ export function Referencias() {
                   <td>
                     {k.source === "MANUAL"
                       ? <span className="badge badge-ok">Manual</span>
-                      : <span className="badge badge-muted">Importada</span>}
+                      : k.isOverride
+                        ? <span className="badge badge-info">Importada (editada)</span>
+                        : <span className="badge badge-muted">Importada</span>}
                   </td>
                   <td className="muted small">{k.created_by ?? "—"}</td>
                   <td className="small muted">{k.created_at?.slice(0, 10) ?? "—"}</td>
                   <td>
                     <div className="gap-row">
                       <button className="btn btn-ghost btn-sm" onClick={() => void openEdit(k)} title="Editar"><Pencil size={12} /></button>
-                      {k.source === "MANUAL" && k.id !== null && (
+                      {k.source === "MANUAL" && k.id !== null && !k.isOverride && (
                         <button
                           className={`btn btn-sm ${deletingId === k.id ? "btn-primary" : "btn-ghost"}`}
                           style={deletingId !== k.id ? { color: "var(--err-text, #f87171)" } : {}}
@@ -397,6 +614,8 @@ export function Referencias() {
         </div>
       </div>
 
+      <CompatSection allKeys={keys} isAdmin={user?.role === "ADMIN"} />
+
       {/* Modal de edição */}
       {editModal && (
         <div
@@ -409,11 +628,25 @@ export function Referencias() {
               <button className="btn btn-ghost btn-sm" onClick={() => setEditModal(null)}><X size={14} /></button>
             </div>
 
-            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", fontSize: "0.82rem" }}>
-              {editModal.key.source === "MANUAL"
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", fontSize: "0.82rem", flexWrap: "wrap" }}>
+              {editModal.key.source === "MANUAL" && !editModal.key.isOverride
                 ? <span className="badge badge-ok">Manual</span>
-                : <span className="badge badge-muted" style={{ fontSize: "0.75rem" }}>Importada → será promovida a Manual ao salvar</span>}
+                : editModal.key.isOverride
+                  ? <span className="badge badge-info">Importada (editada)</span>
+                  : <span className="badge badge-muted" style={{ fontSize: "0.75rem" }}>Importada — override local preserva valor original</span>}
             </div>
+
+            {editModal.key.isOverride && (editModal.key.originalChavePeca || editModal.key.originalDescricao) && (
+              <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)", borderRadius: "var(--r)", padding: "0.6rem 0.85rem", fontSize: "0.82rem" }}>
+                <span className="muted">Valor original importado: </span>
+                {editModal.key.originalChavePeca && editModal.key.originalChavePeca !== editModal.key.chave_peca && (
+                  <span style={{ fontFamily: "monospace", fontWeight: 600, marginRight: "0.5rem" }}>{editModal.key.originalChavePeca}</span>
+                )}
+                {editModal.key.originalDescricao && (
+                  <span className="muted">{editModal.key.originalDescricao}</span>
+                )}
+              </div>
+            )}
 
             <div className="form-group">
               <label>CHAVEPECA</label>
@@ -454,6 +687,17 @@ export function Referencias() {
               <button className="btn btn-primary btn-sm" onClick={() => void saveEdit()} disabled={editModal.saving || !editModal.chavePeca.trim()}>
                 {editModal.saving ? "Salvando…" : "Salvar"}
               </button>
+              {editModal.key.isOverride && (
+                <button
+                  className="btn btn-ghost btn-sm"
+                  style={{ color: "var(--warn-text, #fbbf24)" }}
+                  onClick={() => void restoreKey()}
+                  disabled={editModal.saving}
+                  title="Remove o override e volta a exibir o valor importado original"
+                >
+                  <RotateCcw size={11} /> Restaurar valor importado
+                </button>
+              )}
               <button className="btn btn-ghost btn-sm" onClick={() => setEditModal(null)}>Cancelar</button>
             </div>
 

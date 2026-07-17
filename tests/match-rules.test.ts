@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createDb } from "./helpers.js";
 import type { Db } from "../src/db/database.js";
 import {
-  getActiveRuleSet, createDraftRuleSet, activateRuleSet, listRuleSets, computeScore,
-  MatchRuleError,
+  getActiveRuleSet, createDraftRuleSet, activateRuleSet, listRuleSets,
+  MatchRuleError, validateActiveRule, updateDraftRuleSet,
 } from "../src/match/match-rule-service.js";
 
 let db: Db;
@@ -49,31 +49,72 @@ describe("match_rule_sets", () => {
       .toThrow(MatchRuleError);
   });
 
-  it("computeScore — fórmula padrão", () => {
-    const rule = getActiveRuleSet(db);
-    const { marginPoints, agePoints, score } = computeScore(rule, 90, 450);
-    expect(agePoints).toBe(3); // floor(90/30)=3
-    expect(marginPoints).toBe(3); // floor(450/150)=3
-    expect(score).toBe(6);
+  // O cálculo de score foi consolidado em calculate-match.ts (computeRuleScore,
+  // sem arredondamento) — testado em tests/calculate-match.test.ts.
+
+  it("validateActiveRule recusa marginAmountPerPoint = 0", () => {
+    expect(validateActiveRule({ marginAmountPerPoint: 0, ageDaysPerPoint: 30, ageMaxPoints: 12, marginWeight: 1, ageWeight: 1 }))
+      .not.toBeNull();
   });
 
-  it("computeScore — teto de idade", () => {
-    const rule = getActiveRuleSet(db);
-    const { agePoints } = computeScore(rule, 9999, 0);
-    expect(agePoints).toBe(15);
+  it("validateActiveRule recusa ageDaysPerPoint negativo", () => {
+    expect(validateActiveRule({ marginAmountPerPoint: 150, ageDaysPerPoint: -5, ageMaxPoints: 12, marginWeight: 1, ageWeight: 1 }))
+      .not.toBeNull();
   });
 
-  it("computeScore — margem negativa pune", () => {
-    const rule = getActiveRuleSet(db);
-    const { marginPoints } = computeScore(rule, 0, -300);
-    expect(marginPoints).toBe(-2); // floor(-300/150)=-2
-    expect(marginPoints).toBeLessThan(0);
+  it("validateActiveRule recusa NaN", () => {
+    expect(validateActiveRule({ marginAmountPerPoint: NaN, ageDaysPerPoint: 30, ageMaxPoints: 12, marginWeight: 1, ageWeight: 1 }))
+      .not.toBeNull();
   });
 
-  it("computeScore — margem nula não causa crash", () => {
-    const rule = getActiveRuleSet(db);
-    const { marginPoints, score } = computeScore(rule, 60, null);
-    expect(marginPoints).toBe(0);
-    expect(score).toBe(2); // só pontos de idade
+  it("validateActiveRule recusa Infinity", () => {
+    expect(validateActiveRule({ marginAmountPerPoint: Infinity, ageDaysPerPoint: 30, ageMaxPoints: 12, marginWeight: 1, ageWeight: 1 }))
+      .not.toBeNull();
+  });
+
+  it("validateActiveRule aceita ageMaxPoints = 0 (desabilita componente de idade)", () => {
+    expect(validateActiveRule({ marginAmountPerPoint: 150, ageDaysPerPoint: 30, ageMaxPoints: 0, marginWeight: 1, ageWeight: 1 }))
+      .toBeNull();
+  });
+
+  it("validateActiveRule aceita marginWeight = 0 (ignora margem)", () => {
+    expect(validateActiveRule({ marginAmountPerPoint: 150, ageDaysPerPoint: 30, ageMaxPoints: 12, marginWeight: 0, ageWeight: 1 }))
+      .toBeNull();
+  });
+
+  it("createDraftRuleSet rejeita marginAmountPerPoint = 0", () => {
+    expect(() => createDraftRuleSet(db, { marginAmountPerPoint: 0 }))
+      .toThrow(MatchRuleError);
+  });
+
+  it("createDraftRuleSet rejeita ageDaysPerPoint = NaN", () => {
+    expect(() => createDraftRuleSet(db, { ageDaysPerPoint: NaN }))
+      .toThrow(MatchRuleError);
+  });
+
+  it("updateDraftRuleSet rejeita marginWeight negativo", () => {
+    const draft = createDraftRuleSet(db, {});
+    expect(() => updateDraftRuleSet(db, draft.id, { marginWeight: -1 }, null))
+      .toThrow(MatchRuleError);
+  });
+
+  it("activateRuleSet rejeita regra com parâmetros inválidos", () => {
+    // Insere diretamente um rascunho com valor inválido (contornando a validação do service)
+    db.prepare(
+      "INSERT INTO match_rule_sets (version, name, margin_amount_per_point, age_days_per_point, age_max_points, margin_weight, age_weight, active) VALUES (99,'INVÁLIDA',0,30,12,1,1,0)"
+    ).run();
+    const bad = (db.prepare("SELECT * FROM match_rule_sets WHERE version = 99").get() as { id: number });
+    expect(() => activateRuleSet(db, bad.id, { reason: "testando parâmetro inválido", userId: null }))
+      .toThrow(MatchRuleError);
+  });
+
+  it("cria regra com manualPriorityEnabled=true e persiste o valor", () => {
+    const draft = createDraftRuleSet(db, { manualPriorityEnabled: true });
+    expect(draft.manualPriorityEnabled).toBe(true);
+  });
+
+  it("manualPriorityEnabled default é false", () => {
+    const draft = createDraftRuleSet(db, {});
+    expect(draft.manualPriorityEnabled).toBe(false);
   });
 });

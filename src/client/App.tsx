@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import {
   Wrench, List, ShoppingCart, Boxes, ScanBarcode,
-  Users, Database, Activity, FileInput, LogOut,
+  Users, Database, FileInput, LogOut,
   PanelLeftClose, PanelLeftOpen, Stethoscope, Sliders, LayoutDashboard,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "./auth.js";
@@ -17,7 +17,6 @@ import { Cotacoes } from "./pages/Cotacoes.js";
 import { Bipagem } from "./pages/Bipagem.js";
 import { Compras } from "./pages/Compras.js";
 import { Movimentacoes } from "./pages/Movimentacoes.js";
-import { Match } from "./pages/Match.js";
 import { AdminUsuarios } from "./pages/AdminUsuarios.js";
 import { AdminTecnicos } from "./pages/AdminTecnicos.js";
 import { AdminPessoas } from "./pages/AdminPessoas.js";
@@ -188,9 +187,6 @@ function AuthenticatedShell() {
                   <NavLink to="/diagnostico" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                     <Stethoscope size={15} /> Diagnóstico
                   </NavLink>
-                  <NavLink to="/match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Activity size={15} /> Auditoria do motor
-                  </NavLink>
                   <NavLink to="/importar" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                     <FileInput size={15} /> Importação inicial
                   </NavLink>
@@ -216,8 +212,8 @@ function AuthenticatedShell() {
             <Route path="/estoque/movimentacoes" element={<Movimentacoes />} />
             <Route path="/estoque/referencias" element={<Referencias />} />
             <Route path="/cotacoes" element={<Cotacoes />} />
-            <Route path="/match" element={<Match />} />
-            {/* Compatibilidade — /separacao redireciona para a fila */}
+            {/* Compatibilidade — telas antigas redirecionam para a fila */}
+            <Route path="/match" element={<Navigate to="/fila-reparos" replace />} />
             <Route path="/separacao" element={<Navigate to="/fila-reparos" replace />} />
             <Route path="/admin/usuarios" element={<AdminUsuarios />} />
             <Route path="/admin/tecnicos" element={<AdminTecnicos />} />

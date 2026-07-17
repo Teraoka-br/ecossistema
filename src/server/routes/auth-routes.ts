@@ -184,7 +184,7 @@ authRouter.post("/users/:id/reset-pin", requireAuth, requireAdmin, async (req, r
 
 // ─── Admin: permissões granulares ─────────────────────────────────────────
 
-const KNOWN_PERMISSIONS = ["OVERRIDE_REPAIR_STATUS"] as const;
+const KNOWN_PERMISSIONS = ["OVERRIDE_REPAIR_STATUS", "MANAGE_PART_REFERENCES"] as const;
 
 authRouter.get("/users/:id/permissions", requireAuth, requireAdmin, (req, res) => {
   const id = Number(req.params.id);
