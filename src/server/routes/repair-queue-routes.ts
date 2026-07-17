@@ -217,6 +217,123 @@ repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) 
   res.json({ items, total, page, limit, filter });
 });
 
+// ─── Exportação completa do filtro (sem paginação) ───────────────────────
+
+repairQueueRouter.get("/fila-reparos/export", requireAuth, requireOperator, (req, res) => {
+  const db = getDb();
+  const filter = (req.query.filter as QueueFilter) || "TODOS";
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+
+  const statuses = QUEUE_FILTER_STATUSES[filter] ?? null;
+
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (statuses && statuses.length > 0) {
+    conditions.push(`rc.workflow_status IN (${statuses.map(() => "?").join(",")})`);
+    params.push(...statuses);
+  }
+
+  if (q) {
+    const like = `%${q}%`;
+    conditions.push(
+      `(rc.imei LIKE ? OR rc.os LIKE ? OR rc.brand LIKE ? OR rc.model LIKE ?
+        OR rc.deposito_atual LIKE ?
+        OR EXISTS (
+          SELECT 1 FROM part_requests pr
+          WHERE pr.repair_case_id = rc.id AND pr.cancelled_at IS NULL
+            AND (pr.chave_peca LIKE ? OR pr.description LIKE ?
+                 OR pr.allocated_reference LIKE ?
+                 OR EXISTS (
+                   SELECT 1 FROM purchase_requests pur
+                   WHERE pur.part_request_id = pr.id AND pur.referencia LIKE ?
+                 ))
+        ))`,
+    );
+    params.push(like, like, like, like, like, like, like, like, like);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  // Busca todos os casos sem paginação, incluindo dados de score e peças
+  const rows = db.prepare(`
+    SELECT
+      rc.id,
+      rc.imei,
+      rc.os,
+      rc.brand,
+      rc.model,
+      rc.color,
+      rc.capacity,
+      rc.deposito_atual,
+      rc.workflow_status,
+      rc.age_days,
+      rc.cost,
+      rc.estimated_sale,
+      rc.margin,
+      rc.manual_priority_active,
+      (SELECT COUNT(*) FROM part_requests WHERE repair_case_id = rc.id AND cancelled_at IS NULL) AS total_parts,
+      (SELECT GROUP_CONCAT(chave_peca, ' | ') FROM part_requests WHERE repair_case_id = rc.id AND cancelled_at IS NULL) AS pecas,
+      (SELECT GROUP_CONCAT(allocated_reference, ' | ') FROM part_requests WHERE repair_case_id = rc.id AND cancelled_at IS NULL AND allocated_reference IS NOT NULL) AS referencias,
+      rmcr.score,
+      rmcr.result_status AS match_result,
+      mrs.name AS regra_ativa
+    FROM repair_cases rc
+    LEFT JOIN repair_match_case_results rmcr ON rmcr.repair_case_id = rc.id
+      AND rmcr.run_id = (SELECT MAX(run_id) FROM repair_match_case_results WHERE repair_case_id = rc.id)
+    LEFT JOIN match_rule_sets mrs ON mrs.id = rmcr.rule_set_id
+    ${where}
+    ORDER BY
+      CASE WHEN rc.manual_priority_active = 1 THEN 0 ELSE 1 END,
+      CASE rc.workflow_status
+        WHEN 'MATCH' THEN 1 WHEN 'APTO_REPARO' THEN 2 WHEN 'MATCH_PARCIAL' THEN 3
+        WHEN 'VERIFICAR' THEN 4 WHEN 'EM_SEPARACAO' THEN 5 WHEN 'PEDIR_PECA' THEN 6
+        WHEN 'AGUARDANDO_RECEBIMENTO' THEN 7 WHEN 'EM_ANALISE' THEN 8 ELSE 9
+      END,
+      rc.id ASC
+  `).all(...params) as Record<string, unknown>[];
+
+  // Gera CSV
+  const esc = (v: unknown): string => {
+    if (v == null) return "";
+    const s = String(v);
+    if (s.includes(",") || s.includes('"') || s.includes("\n")) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+
+  const header = [
+    "IMEI", "OS", "Marca", "Modelo", "Cor", "Capacidade",
+    "Depósito", "Status", "Score", "Margem (R$)", "Idade (dias)",
+    "Qtd peças", "Peças necessárias", "Referências alocadas", "Regra ativa",
+  ].join(",");
+
+  const lines = rows.map(r => [
+    esc(r.imei),
+    esc(r.os),
+    esc(r.brand),
+    esc(r.model),
+    esc(r.color),
+    esc(r.capacity),
+    esc(r.deposito_atual),
+    esc(r.workflow_status),
+    esc(r.score != null ? Number(r.score).toFixed(4) : ""),
+    esc(r.margin),
+    esc(r.age_days),
+    esc(r.total_parts),
+    esc(r.pecas),
+    esc(r.referencias),
+    esc(r.regra_ativa),
+  ].join(","));
+
+  const csv = [header, ...lines].join("\r\n");
+  const date = new Date().toISOString().slice(0, 10);
+  const fname = `fila-reparos-${filter.toLowerCase()}-${date}.csv`;
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
+  res.send("﻿" + csv); // BOM para Excel reconhecer UTF-8
+});
+
 // ─── Summary (KPIs reais) ─────────────────────────────────────────────────
 
 repairQueueRouter.get("/fila-reparos/summary", requireAuth, (_req, res) => {

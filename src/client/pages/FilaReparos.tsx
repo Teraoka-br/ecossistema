@@ -747,31 +747,29 @@ export function FilaReparos() {
     });
   }
 
-  // Exportar TODOS os IMEIs do filtro atual (busca todas as páginas)
+  // Exportar todos os resultados do filtro atual como CSV completo (endpoint dedicado)
   async function exportAllImeis() {
     setExportingAll(true);
+    setExportFeedback("Gerando arquivo…");
     try {
-      const qs = new URLSearchParams({ filter, limit: "5000" });
+      const qs = new URLSearchParams({ filter });
       if (q) qs.set("q", q);
-      const r = await fetch(`/api/fila-reparos?${qs.toString()}`);
+      const r = await fetch(`/api/fila-reparos/export?${qs.toString()}`);
       if (!r.ok) throw new Error(`Erro ${r.status}`);
-      const data = await r.json() as { items: QueueItem[]; total: number };
-      const imeis = data.items.map(i => i.imei).filter(Boolean) as string[];
-      if (imeis.length === 0) {
-        setExportFeedback("Nenhum IMEI encontrado");
-        setTimeout(() => setExportFeedback(null), 2500);
-        return;
-      }
-      copyOrDownload(
-        imeis.join("\n"),
-        `imeis-${filter.toLowerCase()}.txt`,
-        () => {
-          setExportFeedback(`${imeis.length} IMEIs copiados`);
-          setTimeout(() => setExportFeedback(null), 2500);
-        },
-      );
+      const blob = await r.blob();
+      const disposition = r.headers.get("Content-Disposition") ?? "";
+      const fnMatch = disposition.match(/filename="([^"]+)"/);
+      const filename = fnMatch?.[1] ?? `fila-reparos-${filter.toLowerCase()}.csv`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      setExportFeedback(`${total} aparelhos exportados`);
+      setTimeout(() => setExportFeedback(null), 3000);
     } catch {
-      setExportFeedback("Erro ao buscar IMEIs");
+      setExportFeedback("Erro ao exportar");
       setTimeout(() => setExportFeedback(null), 2500);
     } finally {
       setExportingAll(false);
@@ -886,10 +884,10 @@ export function FilaReparos() {
             style={{ flexShrink: 0, gap: "0.35rem", whiteSpace: "nowrap" }}
             onClick={() => void exportAllImeis()}
             disabled={exportingAll}
-            title={`Exportar todos os ${total} IMEIs deste filtro`}
+            title={`Exportar CSV com todos os ${total} aparelhos do filtro "${filter}"`}
           >
             {exportingAll ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
-            {exportFeedback ?? `Exportar ${total} IMEIs`}
+            {exportFeedback ?? `Exportar ${total} aparelhos`}
           </button>
         )}
       </div>
