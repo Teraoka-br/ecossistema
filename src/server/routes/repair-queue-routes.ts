@@ -467,8 +467,10 @@ repairQueueRouter.get("/fila-reparos/:id", requireAuth, (req, res, next) => {
     // Enrich parts with availability
     const partsEnriched = rc.parts.map(p => {
       const reserved = reservations.find(r => r.partRequestId === p.id && r.status === "ACTIVE");
-      const available = p.chavePecaNorm ? (stockMap.get(p.chavePecaNorm) ?? 0) : 0;
       const matchResult = matchResults.find(mr => mr.part_request_id === p.id);
+      // Alias resolution: when matched via ALIAS, stock lives under a different chave_peca_norm.
+      const lookupNorm = (matchResult?.alias_stock_chave_norm as string | null) ?? p.chavePecaNorm;
+      const available = lookupNorm ? (stockMap.get(lookupNorm) ?? 0) : 0;
       const purchInfo = purchaseByPart.get(p.id);
       return {
         ...p,

@@ -358,7 +358,8 @@ export function reserveKitFromEngine(
 
   // Última execução do motor para este caso
   const matchResults = db.prepare(`
-    SELECT part_request_id, allocated_reference, allocated_reference_norm, result_status
+    SELECT part_request_id, allocated_reference, allocated_reference_norm, result_status,
+           alias_stock_chave_norm
     FROM repair_match_results
     WHERE repair_case_id = ?
       AND run_id = (SELECT MAX(run_id) FROM repair_match_results WHERE repair_case_id = ?)
@@ -368,6 +369,7 @@ export function reserveKitFromEngine(
     allocated_reference: string | null;
     allocated_reference_norm: string | null;
     result_status: string;
+    alias_stock_chave_norm: string | null;
   }[];
 
   if (matchResults.length === 0) {
@@ -404,7 +406,9 @@ export function reserveKitFromEngine(
 
   for (const p of pendingParts) {
     const m = matchByPartId.get(p.id)!;
-    const k = `${p.chave_peca_norm}||${m.allocated_reference_norm}`;
+    // Alias: quando matched via ALIAS, o estoque está sob outra chave_peca_norm.
+    const effectiveChaveNorm = m.alias_stock_chave_norm ?? p.chave_peca_norm;
+    const k = `${effectiveChaveNorm}||${m.allocated_reference_norm}`;
     if ((availMap.get(k) ?? 0) < 1) {
       throw new ReservationError(
         "STOCK_CHANGED",
@@ -421,20 +425,23 @@ export function reserveKitFromEngine(
     for (const p of pendingParts) {
       const m = matchByPartId.get(p.id)!;
       const referenceNorm = m.allocated_reference_norm!;
+      // Alias: reservar sob a chave_peca_norm do estoque real, não a solicitada.
+      const effectiveChaveNorm = m.alias_stock_chave_norm ?? p.chave_peca_norm;
+      const effectiveChavePeca = m.alias_stock_chave_norm ?? p.chave_peca;
 
       const existing = db.prepare(
         "SELECT id FROM operational_reservations WHERE part_request_id = ? AND status = 'ACTIVE'"
       ).get(p.id);
       if (existing) throw new ReservationError("ALREADY_RESERVED", `Peça ${p.id} já tem reserva ativa.`);
 
-      // Re-verifica dentro da tx por (chave, ref)
+      // Re-verifica dentro da tx por (chave efetiva, ref)
       const reservedInTx = (db.prepare(`
         SELECT COALESCE(SUM(quantity), 0) AS qty
         FROM operational_reservations
         WHERE chave_peca_norm = ? AND COALESCE(reference_norm,'') = ? AND status = 'ACTIVE'
-      `).get(p.chave_peca_norm, referenceNorm) as { qty: number }).qty;
+      `).get(effectiveChaveNorm, referenceNorm) as { qty: number }).qty;
 
-      const physicalInTx = getPhysicalStockByRef(db, p.chave_peca_norm, referenceNorm);
+      const physicalInTx = getPhysicalStockByRef(db, effectiveChaveNorm, referenceNorm);
       if (physicalInTx - reservedInTx < 1) {
         throw new ReservationError(
           "STOCK_CHANGED",
@@ -447,7 +454,7 @@ export function reserveKitFromEngine(
           (part_request_id, repair_case_id, chave_peca, chave_peca_norm,
            reference, reference_norm, quantity, created_by_user_id)
         VALUES (?,?,?,?,?,?,1,?)
-      `).run(p.id, repairCaseId, p.chave_peca, p.chave_peca_norm, m.allocated_reference, referenceNorm, userId ?? null);
+      `).run(p.id, repairCaseId, effectiveChavePeca, effectiveChaveNorm, m.allocated_reference, referenceNorm, userId ?? null);
 
       db.prepare(
         "UPDATE part_requests SET status = 'RESERVADA', allocated_reference = ?, allocated_reference_norm = ?, updated_at = datetime('now') WHERE id = ?"
