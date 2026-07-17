@@ -77,7 +77,7 @@ function run(cases: MatchCaseInput[], stockGroups: StockGroupInput[], rule: Acti
     cases,
     availableStock: stockGroups,
     activeRule: rule,
-    compatibility: compat ?? { groups: [], catalog: new Map() },
+    compatibility: compat ?? { groups: [], aliases: new Map(), catalog: new Map() },
   });
 }
 
@@ -425,7 +425,7 @@ describe("compatibilidade simétrica por grupos", () => {
   it("35. grupo de compatibilidade: pedido de A usa estoque de B (e vice-versa)", () => {
     const groups = [{ groupId: 1, members: ["BATERIA IPHONE 12", "BATERIA IPHONE 12/12 PRO"] }];
     const cA = makeCase({ caseId: 1, chaves: ["BATERIA IPHONE 12"] });
-    const outA = run([cA], stock([["BATERIA IPHONE 12/12 PRO", "RFIS", 3]]), REGRA1, { groups, catalog: new Map() });
+    const outA = run([cA], stock([["BATERIA IPHONE 12/12 PRO", "RFIS", 3]]), REGRA1, { groups, aliases: new Map(), catalog: new Map() });
     expect(outA.cases[0].result).toBe("MATCH");
     expect(outA.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBe("BATERIA IPHONE 12/12 PRO");
     expect(outA.cases[0].compatibilityResolutions).toEqual([
@@ -434,7 +434,7 @@ describe("compatibilidade simétrica por grupos", () => {
 
     // pedido de B usa estoque de A
     const cB = makeCase({ caseId: 2, chaves: ["BATERIA IPHONE 12/12 PRO"] });
-    const outB = run([cB], stock([["BATERIA IPHONE 12", "RFIS", 2]]), REGRA1, { groups, catalog: new Map() });
+    const outB = run([cB], stock([["BATERIA IPHONE 12", "RFIS", 2]]), REGRA1, { groups, aliases: new Map(), catalog: new Map() });
     expect(outB.cases[0].result).toBe("MATCH");
     expect(outB.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBe("BATERIA IPHONE 12");
   });
@@ -443,7 +443,7 @@ describe("compatibilidade simétrica por grupos", () => {
     const groups = [{ groupId: 1, members: ["BATERIA IPHONE 12", "BATERIA IPHONE 12/12 PRO"] }];
     const c = makeCase({ caseId: 1, chaves: ["BATERIA IPHONE 12"] });
     // Ambos têm saldo — deve usar o direto primeiro
-    const out = run([c], stock([["BATERIA IPHONE 12", "RF1", 1], ["BATERIA IPHONE 12/12 PRO", "RF2", 1]]), REGRA1, { groups, catalog: new Map() });
+    const out = run([c], stock([["BATERIA IPHONE 12", "RF1", 1], ["BATERIA IPHONE 12/12 PRO", "RF2", 1]]), REGRA1, { groups, aliases: new Map(), catalog: new Map() });
     expect(out.cases[0].result).toBe("MATCH");
     expect(out.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBeNull(); // usou a própria chave
   });
@@ -459,13 +459,13 @@ describe("compatibilidade simétrica por grupos", () => {
     const c1 = makeCase({ caseId: 1, cost: 0, estimatedSale: 900, ageDays: 0, chaves: ["BATERIA IPHONE 12"] });
     const c2 = makeCase({ caseId: 2, cost: 0, estimatedSale: 600, ageDays: 0, chaves: ["BATERIA IPHONE 12 PRO"] });
     // 1 unidade física — apenas 1 match possível
-    const out1 = run([c1, c2], stock([["BATERIA 12/12PRO", "RF", 1]]), REGRA1, { groups, catalog: new Map() });
+    const out1 = run([c1, c2], stock([["BATERIA 12/12PRO", "RF", 1]]), REGRA1, { groups, aliases: new Map(), catalog: new Map() });
     const matches1 = out1.cases.filter((c) => c.result === "MATCH");
     expect(matches1).toHaveLength(1);
     expect(matches1[0].caseId).toBe(1); // maior score vence
 
     // 2 unidades físicas — dois matches possíveis
-    const out2 = run([c1, c2], stock([["BATERIA 12/12PRO", "RF", 2]]), REGRA1, { groups, catalog: new Map() });
+    const out2 = run([c1, c2], stock([["BATERIA 12/12PRO", "RF", 2]]), REGRA1, { groups, aliases: new Map(), catalog: new Map() });
     const matches2 = out2.cases.filter((c) => c.result === "MATCH");
     expect(matches2).toHaveLength(2);
   });
@@ -473,7 +473,7 @@ describe("compatibilidade simétrica por grupos", () => {
   it("resolução ambígua via catálogo (2+ alvos, sem grupo) → VERIFICAR MAIS_DE_UMA_REFERENCIA_POSSIVEL", () => {
     const catalog = new Map([["CHAVE AMBIGUA", ["TELA A", "TELA B"]]]);
     const c = makeCase({ caseId: 1, chaves: ["CHAVE AMBIGUA"] });
-    const out = run([c], stock([["TELA A", "R1", 1], ["TELA B", "R2", 1]]), REGRA1, { groups: [], catalog });
+    const out = run([c], stock([["TELA A", "R1", 1], ["TELA B", "R2", 1]]), REGRA1, { groups: [], aliases: new Map(), catalog });
     expect(out.cases[0].result).toBe("VERIFICAR");
     expect(out.cases[0].verifyReasons).toContain(VERIFY_REASONS.MAIS_DE_UMA_REFERENCIA_POSSIVEL);
   });
@@ -481,9 +481,25 @@ describe("compatibilidade simétrica por grupos", () => {
   it("catálogo com alvo único resolve sem grupo (via CATALOG)", () => {
     const catalog = new Map([["FRONTAL K61", ["FRONTAL K61 PRETO"]]]);
     const c = makeCase({ caseId: 1, chaves: ["FRONTAL K61"] });
-    const out = run([c], stock([["FRONTAL K61 PRETO", "R9", 1]]), REGRA1, { groups: [], catalog });
+    const out = run([c], stock([["FRONTAL K61 PRETO", "R9", 1]]), REGRA1, { groups: [], aliases: new Map(), catalog });
     expect(out.cases[0].result).toBe("MATCH");
     expect(out.cases[0].compatibilityResolutions[0]?.via).toBe("CATALOG");
+  });
+
+  it("alias manual via chave_peca_norm direta → MATCH com via=ALIAS", () => {
+    const aliases = new Map([["BATERIA IPHONE 12", "BATERIA IPHONE 12/12 PRO"]]);
+    const c = makeCase({ caseId: 1, chaves: ["BATERIA IPHONE 12"] });
+    const out = run([c], stock([["BATERIA IPHONE 12/12 PRO", "PC-QA15247", 59]]), REGRA1, { groups: [], aliases, catalog: new Map() });
+    expect(out.cases[0].result).toBe("MATCH");
+    expect(out.cases[0].compatibilityResolutions[0]?.via).toBe("ALIAS");
+    expect(out.cases[0].compatibilityResolutions[0]?.stockChaveNorm).toBe("BATERIA IPHONE 12/12 PRO");
+  });
+
+  it("alias manual sem saldo na chave alvo → PEDIR_PECA", () => {
+    const aliases = new Map([["BATERIA IPHONE 12", "BATERIA IPHONE 12/12 PRO"]]);
+    const c = makeCase({ caseId: 1, chaves: ["BATERIA IPHONE 12"] });
+    const out = run([c], stock([]), REGRA1, { groups: [], aliases, catalog: new Map() });
+    expect(out.cases[0].result).toBe("PEDIR_PECA");
   });
 });
 
@@ -607,7 +623,7 @@ describe("correções de auditoria — peças avançadas e parâmetros", () => {
   it("grupos simétricos: A e B no mesmo grupo — pedido de A usa estoque de B", () => {
     const groups = [{ groupId: 10, members: ["CHAVE-A", "CHAVE-B"] }];
     const c = makeCase({ caseId: 1, chaves: ["CHAVE-A"] });
-    const out = run([c], stock([["CHAVE-B", "REF1", 2]]), REGRA1, { groups, catalog: new Map() });
+    const out = run([c], stock([["CHAVE-B", "REF1", 2]]), REGRA1, { groups, aliases: new Map(), catalog: new Map() });
     expect(out.cases[0].result).toBe("MATCH");
     expect(out.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBe("CHAVE-B");
     expect(out.cases[0].compatibilityResolutions[0]?.via).toBe("GROUP");
@@ -616,7 +632,7 @@ describe("correções de auditoria — peças avançadas e parâmetros", () => {
   it("grupos simétricos: pedido de B usa estoque de A (simetria real)", () => {
     const groups = [{ groupId: 10, members: ["CHAVE-A", "CHAVE-B"] }];
     const c = makeCase({ caseId: 1, chaves: ["CHAVE-B"] });
-    const out = run([c], stock([["CHAVE-A", "REF1", 2]]), REGRA1, { groups, catalog: new Map() });
+    const out = run([c], stock([["CHAVE-A", "REF1", 2]]), REGRA1, { groups, aliases: new Map(), catalog: new Map() });
     expect(out.cases[0].result).toBe("MATCH");
     expect(out.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBe("CHAVE-A");
   });
@@ -624,7 +640,7 @@ describe("correções de auditoria — peças avançadas e parâmetros", () => {
   it("grupos: estoque direto tem prioridade sobre membro do grupo", () => {
     const groups = [{ groupId: 10, members: ["CHAVE-A", "CHAVE-B"] }];
     const c = makeCase({ caseId: 1, chaves: ["CHAVE-A"] });
-    const out = run([c], stock([["CHAVE-A", "REF_DIRETO", 1], ["CHAVE-B", "REF_B", 1]]), REGRA1, { groups, catalog: new Map() });
+    const out = run([c], stock([["CHAVE-A", "REF_DIRETO", 1], ["CHAVE-B", "REF_B", 1]]), REGRA1, { groups, aliases: new Map(), catalog: new Map() });
     expect(out.cases[0].result).toBe("MATCH");
     // Usou a chave direta, não o membro do grupo
     expect(out.cases[0].virtuallyAllocatedParts[0].aliasStockChaveNorm).toBeNull();
@@ -635,7 +651,7 @@ describe("correções de auditoria — peças avançadas e parâmetros", () => {
     const c1 = makeCase({ caseId: 1, cost: 0, estimatedSale: 900, ageDays: 0, chaves: ["CHAVE-A"] });
     const c2 = makeCase({ caseId: 2, cost: 0, estimatedSale: 600, ageDays: 0, chaves: ["CHAVE-B"] });
     const c3 = makeCase({ caseId: 3, cost: 0, estimatedSale: 300, ageDays: 0, chaves: ["CHAVE-A"] });
-    const out = run([c1, c2, c3], stock([["CHAVE-A", "R1", 1], ["CHAVE-B", "R2", 1]]), REGRA1, { groups, catalog: new Map() });
+    const out = run([c1, c2, c3], stock([["CHAVE-A", "R1", 1], ["CHAVE-B", "R2", 1]]), REGRA1, { groups, aliases: new Map(), catalog: new Map() });
     const matches = out.cases.filter((c) => c.result === "MATCH");
     expect(matches).toHaveLength(2); // 2 unidades físicas = máximo 2 matches
     expect(matches.find((c) => c.caseId === 3)).toBeUndefined(); // menor score fica sem

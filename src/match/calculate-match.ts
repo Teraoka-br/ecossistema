@@ -90,11 +90,14 @@ export interface CompatibilityGroup {
 /**
  * Resolução de chave solicitada → chave(s) de estoque.
  *  - groups: grupos simétricos (compatibilidade M:M — prioridade máxima);
+ *  - aliases: vínculos manuais direcionais (requested → stock), cadastrados em /estoque/referencias;
  *  - catalog: mapeamento via referência física (chave → chaves de estoque).
  *    Mais de um alvo distinto sem grupo é ambiguidade ⇒ VERIFICAR.
  */
 export interface CompatibilityInput {
   groups: readonly CompatibilityGroup[];
+  /** requested_chave_peca_norm → stock_chave_peca_norm (part_key_aliases ativos). */
+  aliases: ReadonlyMap<string, string>;
   catalog: ReadonlyMap<string, readonly string[]>;
 }
 
@@ -151,7 +154,7 @@ export type PartResultStatus =
   | "PEDIR_PECA"
   | "AGUARDANDO_RECEBIMENTO";
 
-export type ResolutionVia = "DIRECT" | "GROUP" | "CATALOG" | "NONE" | "AMBIGUOUS" | "MISSING_KEY";
+export type ResolutionVia = "DIRECT" | "GROUP" | "ALIAS" | "CATALOG" | "NONE" | "AMBIGUOUS" | "MISSING_KEY";
 
 export interface PartDecision {
   partRequestId: number;
@@ -366,14 +369,21 @@ function resolveKey(
   // 2. A própria chave existe no estoque (sem grupo).
   if (stockKeys.has(chaveNorm)) return { stockCandidates: [chaveNorm], via: "DIRECT" };
 
-  // 3. Catálogo: chave → chaves de estoque via referência física.
+  // 3. Alias manual (part_key_aliases): vínculo explícito requested → stock.
+  const aliasTarget = compat.aliases.get(chaveNorm) ?? null;
+  if (aliasTarget) {
+    if (stockKeys.has(aliasTarget)) return { stockCandidates: [aliasTarget], via: "ALIAS" };
+    // Alias definido mas sem saldo na chave alvo — continua tentando catalog.
+  }
+
+  // 4. Catálogo: chave → chaves de estoque via referência física.
   const targets = Array.from(
     new Set((compat.catalog.get(chaveNorm) ?? []).filter((t) => t && t !== chaveNorm && stockKeys.has(t))),
   ).sort();
   if (targets.length === 1) return { stockCandidates: targets, via: "CATALOG" };
   if (targets.length > 1) return { stockCandidates: [], via: "AMBIGUOUS", ambiguousTargets: targets };
 
-  // 4. Sem correspondência — tenta a própria chave (resultado esperado: null no estoque).
+  // 5. Sem correspondência — tenta a própria chave (resultado esperado: null no estoque).
   return { stockCandidates: [chaveNorm], via: "NONE" };
 }
 

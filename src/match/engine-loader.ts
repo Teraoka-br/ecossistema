@@ -343,7 +343,38 @@ export function loadEngineInput(db: Db, activeRule: ActiveRule): LoadedEngineInp
     /* tabela pode não existir em banco legado anterior à migration 039 */
   }
 
-  const compatibility: CompatibilityInput = { groups: compatGroups, catalog };
+  // Aliases manuais (part_key_aliases): vínculos explícitos requested → stock.
+  // O campo stock_chave_peca_norm pode conter um chave_peca_norm direto OU uma
+  // referencia_norm (ex.: "PC-QA15247"). Neste segundo caso resolvemos via
+  // refNormToStockChaves — se a referência for unívoca (1 chave), usamos essa chave.
+  const stockChaveNorms = new Set(availableStock.map((g) => g.chavePecaNorm));
+  const aliases = new Map<string, string>();
+  try {
+    const aliasRows = db
+      .prepare(
+        `SELECT requested_chave_peca_norm, stock_chave_peca_norm
+         FROM part_key_aliases WHERE active = 1`,
+      )
+      .all() as { requested_chave_peca_norm: string; stock_chave_peca_norm: string }[];
+    for (const a of aliasRows) {
+      if (!a.requested_chave_peca_norm || !a.stock_chave_peca_norm) continue;
+      let target = a.stock_chave_peca_norm;
+      if (!stockChaveNorms.has(target)) {
+        // Tenta interpretar como referencia_norm e resolver para chave_peca_norm.
+        const chavesViaRef = refNormToStockChaves.get(target);
+        if (chavesViaRef && chavesViaRef.size === 1) {
+          target = [...chavesViaRef][0];
+        }
+        // Se referência não existir ou for ambígua, mantém o valor original —
+        // resolveKey tentará contra stockKeys e falhará graciosamente.
+      }
+      aliases.set(a.requested_chave_peca_norm, target);
+    }
+  } catch {
+    /* tabela pode não existir em banco legado anterior à migration 036 */
+  }
+
+  const compatibility: CompatibilityInput = { groups: compatGroups, aliases, catalog };
 
   return {
     cases,
