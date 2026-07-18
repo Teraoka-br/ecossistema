@@ -31,7 +31,7 @@ function appliedMigrations(db: Db): Set<string> {
   return new Set(rows.map((r) => r.name));
 }
 
-const BACKUP_RETENTION = 5;
+const BACKUP_RETENTION = 2;
 
 /** Remove backups mais antigos, mantendo apenas os BACKUP_RETENTION mais recentes. */
 function pruneOldBackups(): void {
