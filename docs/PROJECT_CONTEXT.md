@@ -495,10 +495,11 @@ reimportação.
 
 ## 10. Pendências
 
-**Bloqueadores:** nenhum conhecido. 586 testes + typecheck + build limpos.
+**Bloqueadores:** nenhum conhecido. 634 testes + typecheck + build limpos.
 
 **Últimas mudanças relevantes (mais recentes primeiro, máx. 5):**
-1. **Consolidação do motor único de match** (2026-07-16, migration 038): função pura
+1. **Home operacional / Central Operacional** (2026-07-17, migration 041): página `/admin/dashboards` refatorada em componentes (`src/client/components/dashboard/`); novos serviços `src/dashboard/` (snapshot, overview, alertas, contagens) e `src/issue/` (central de problemas). Migration 041 cria `dashboard_daily_snapshots` (UPSERT idempotente por `snapshot_date`, fuso SP) e `issue_reports` (módulo/severidade/status). Endpoints: `GET /api/dashboards/home` (cards + comparação + panorama + técnicos + contagens + alertas + problemas; snapshot do dia atualizado a cada acesso), `GET /api/dashboards/timeline` (série histórica por métrica), `POST /api/dashboards/snapshots/recalculate` (ADMIN), `GET/POST/PATCH /api/issue-reports`. Gráfico SVG nativo (sem dependência extra), 9 cards clicáveis com delta vs snapshot anterior, 8 alertas operacionais, modal de criação de problema. Nenhum módulo operacional alterado.
+2. **Consolidação do motor único de match** (2026-07-16, migration 038): função pura
    `calculateMatch` é a ÚNICA implementação (motor real, simulador, testes) — sem
    arredondamento (score decimal exato), elegibilidade com motivos de VERIFICAR
    persistidos em `repair_match_case_results`, gate de depósito (só AGUARDANDO PECA/
