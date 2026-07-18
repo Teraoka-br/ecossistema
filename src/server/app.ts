@@ -17,6 +17,7 @@ import { repairQueueRouter } from "./routes/repair-queue-routes.js";
 import { importCentralRouter } from "./routes/import-central-routes.js";
 import { analiseRouter } from "./routes/analise-routes.js";
 import { dashboardsRouter } from "./routes/dashboards-routes.js";
+import { issueRouter } from "./routes/issue-routes.js";
 import { requireAuth } from "./middleware/auth-middleware.js";
 import { getDb } from "../db/database.js";
 
@@ -79,6 +80,7 @@ export function createApp(): Express {
   app.use("/api/import-central", importCentralRouter);  // central de dados
   app.use("/api/analise", analiseRouter);               // análise de aparelho
   app.use("/api", dashboardsRouter);                    // dashboards administrativos
+  app.use("/api", requireAuth, issueRouter);            // central de problemas
 
   // Em produção, serve o frontend compilado e faz fallback de SPA.
   if (fs.existsSync(config.clientDist)) {
