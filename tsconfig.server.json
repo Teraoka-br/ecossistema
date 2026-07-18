@@ -27,6 +27,8 @@
     "src/repair/**/*.ts",
     "src/datasys/**/*.ts",
     "src/import-central/**/*.ts",
-    "src/analise/**/*.ts"
+    "src/analise/**/*.ts",
+    "src/dashboard/**/*.ts",
+    "src/issue/**/*.ts"
   ]
 }
