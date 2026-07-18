@@ -10,7 +10,7 @@ import { useAuth } from "../auth.js";
 
 type QueueFilter =
   | "DO_NOW" | "MATCH" | "MATCH_PARCIAL" | "AGUARDANDO_PECAS"
-  | "APTO_REPARO" | "EM_ANALISE" | "VERIFICAR" | "FINALIZADOS" | "TODOS";
+  | "APTO_REPARO" | "EM_ANALISE" | "VERIFICAR" | "VENDA_ESTADO" | "FINALIZADOS" | "TODOS";
 
 interface NextAction {
   code: string;
@@ -43,6 +43,8 @@ interface QueueItem {
   nextAction: NextAction;
   createdAt: string;
   updatedAt: string;
+  margin: number | null;
+  creationSource: "IMPORT" | "MANUAL" | "DATASYS";
 }
 
 interface EngineState {
@@ -54,15 +56,16 @@ interface EngineState {
 }
 
 const FILTER_LABELS: Record<QueueFilter, string> = {
-  DO_NOW: "Fazer agora",
-  MATCH: "Match completo",
-  MATCH_PARCIAL: "Match parcial",
+  DO_NOW:           "Fazer agora",
+  MATCH:            "Match completo",
+  MATCH_PARCIAL:    "Match parcial",
   AGUARDANDO_PECAS: "Aguardando peças",
-  APTO_REPARO: "Apto para reparo",
-  EM_ANALISE: "Em análise",
-  VERIFICAR: "Verificar",
-  FINALIZADOS: "Finalizados",
-  TODOS: "Todos",
+  APTO_REPARO:      "Apto para reparo",
+  EM_ANALISE:       "Em análise",
+  VERIFICAR:        "Verificar",
+  VENDA_ESTADO:     "Venda no Estado",
+  FINALIZADOS:      "Finalizados",
+  TODOS:            "Todos",
 };
 
 
@@ -82,6 +85,7 @@ function statusMeta(s: string): { label: string; color: string; bg: string; icon
     case "TRIAGEM_FINAL":   return { label: "Triagem final",    color: "var(--info-text)",     bg: "var(--info-dim)",   icon: <Eye size={11} /> };
     case "CONCLUIDO":       return { label: "Concluído",        color: "var(--ok-text)",       bg: "var(--ok-dim)",     icon: <CheckCircle2 size={11} /> };
     case "CANCELADO":       return { label: "Cancelado",        color: "var(--err-text)",      bg: "var(--err-dim)",    icon: <X size={11} /> };
+    case "VENDA_ESTADO":    return { label: "Venda no Estado",  color: "rgba(245,158,11,0.85)", bg: "rgba(245,158,11,0.12)", icon: <Tag size={11} /> };
     default:                return { label: s,                  color: "var(--text-muted)",    bg: "var(--elevated)",   icon: null };
   }
 }
@@ -198,6 +202,16 @@ function RepairCard({
             {item.ageDays != null && (
               <span style={{ color: isOld ? "var(--warn-text)" : "var(--text-muted)", fontWeight: isOld ? 600 : 400 }}>
                 {item.ageDays}d em estoque
+              </span>
+            )}
+            {item.creationSource === "MANUAL" && (
+              <span style={{ color: "var(--info-text)", fontSize: "0.67rem", fontWeight: 600 }}>
+                Manual
+              </span>
+            )}
+            {item.creationSource === "DATASYS" && (
+              <span style={{ color: "var(--accent)", fontSize: "0.67rem", fontWeight: 600 }}>
+                Datasys
               </span>
             )}
           </div>
@@ -785,27 +799,29 @@ export function FilaReparos() {
   const sumByStatuses = (statuses: string[]) =>
     statuses.reduce((acc, s) => acc + (queueSummary?.summary[s] ?? 0), 0);
   const fc: Record<string, number> = queueSummary?.filterCounts ?? (queueSummary ? {
-    MATCH:           sumByStatuses(["MATCH"]),
-    MATCH_PARCIAL:   sumByStatuses(["MATCH_PARCIAL"]),
-    AGUARDANDO_PECAS:sumByStatuses(["PEDIR_PECA","AGUARDANDO_RECEBIMENTO"]),
-    APTO_REPARO:     sumByStatuses(["APTO_REPARO"]),
-    EM_ANALISE:      sumByStatuses(["EM_ANALISE","EM_SEPARACAO"]),
-    VERIFICAR:       sumByStatuses(["VERIFICAR"]),
-    FINALIZADOS:     sumByStatuses(["CONCLUIDO","VENDA_ESTADO","CANCELADO"]),
-    TODOS:           kpiTotal,
+    MATCH:            sumByStatuses(["MATCH"]),
+    MATCH_PARCIAL:    sumByStatuses(["MATCH_PARCIAL"]),
+    AGUARDANDO_PECAS: sumByStatuses(["PEDIR_PECA","AGUARDANDO_RECEBIMENTO"]),
+    APTO_REPARO:      sumByStatuses(["APTO_REPARO"]),
+    EM_ANALISE:       sumByStatuses(["EM_ANALISE","EM_SEPARACAO"]),
+    VERIFICAR:        sumByStatuses(["VERIFICAR"]),
+    VENDA_ESTADO:     sumByStatuses(["VENDA_ESTADO"]),
+    FINALIZADOS:      sumByStatuses(["CONCLUIDO","CANCELADO"]),
+    TODOS:            kpiTotal,
   } : {});
 
   // Ordem fixa dos cards — sempre visíveis, independente de contagem
   type FilterCardDef = { f: QueueFilter; label: string; sub: string; color: string; borderColor: string };
   const FILTER_CARDS: FilterCardDef[] = [
-    { f: "MATCH",           label: "Match completo",  sub: "prontos p/ separar", color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.4)" },
-    { f: "APTO_REPARO",     label: "Apto p/ reparo",  sub: "para direcionar",    color: "var(--accent)",     borderColor: "rgba(124,58,237,0.4)" },
-    { f: "VERIFICAR",       label: "Verificar",       sub: "precisam atenção",   color: "var(--err-text)",   borderColor: "rgba(239,68,68,0.4)"  },
-    { f: "EM_ANALISE",      label: "Em análise",      sub: "em separação",       color: "var(--text-muted)", borderColor: "rgba(255,255,255,0.15)"},
-    { f: "AGUARDANDO_PECAS",label: "Aguard. peças",   sub: "em compra",          color: "var(--text-muted)", borderColor: "rgba(255,255,255,0.15)"},
-    { f: "MATCH_PARCIAL",   label: "Match parcial",   sub: "incompletos",        color: "var(--warn-text)",  borderColor: "rgba(245,158,11,0.3)" },
-    { f: "FINALIZADOS",     label: "Finalizados",     sub: "concluídos",         color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.2)" },
-    { f: "TODOS",           label: "Todos",           sub: "aparelhos",          color: "var(--text-muted)", borderColor: "rgba(255,255,255,0.12)"},
+    { f: "MATCH",           label: "Match",           sub: "prontos",       color: "var(--ok-text)",          borderColor: "rgba(16,185,129,0.4)"  },
+    { f: "APTO_REPARO",     label: "Apto reparo",     sub: "direcionar",    color: "var(--accent)",           borderColor: "rgba(124,58,237,0.4)"  },
+    { f: "VERIFICAR",       label: "Verificar",       sub: "atenção",       color: "var(--err-text)",         borderColor: "rgba(239,68,68,0.4)"   },
+    { f: "EM_ANALISE",      label: "Em análise",      sub: "separação",     color: "var(--text-muted)",       borderColor: "rgba(255,255,255,0.15)"},
+    { f: "AGUARDANDO_PECAS",label: "Aguardando",      sub: "em compra",     color: "var(--text-muted)",       borderColor: "rgba(255,255,255,0.15)"},
+    { f: "MATCH_PARCIAL",   label: "Parcial",         sub: "incompletos",   color: "var(--warn-text)",        borderColor: "rgba(245,158,11,0.3)"  },
+    { f: "VENDA_ESTADO",    label: "Venda Estado",    sub: "baixo score",   color: "rgba(245,158,11,0.85)",   borderColor: "rgba(245,158,11,0.35)" },
+    { f: "FINALIZADOS",     label: "Finalizados",     sub: "concluídos",    color: "var(--ok-text)",          borderColor: "rgba(16,185,129,0.2)"  },
+    { f: "TODOS",           label: "Todos",           sub: "aparelhos",     color: "var(--text-muted)",       borderColor: "rgba(255,255,255,0.12)"},
   ];
 
   return (

@@ -21,10 +21,11 @@ const SEVERITIES = ["LOW","MEDIUM","HIGH","CRITICAL"] as const;
 const STATUSES   = ["OPEN","IN_ANALYSIS","RESOLVED","DISMISSED"] as const;
 
 const createSchema = z.object({
-  title:       z.string().min(3).max(200),
-  description: z.string().max(2000).optional(),
-  module:      z.enum(MODULES),
-  severity:    z.enum(SEVERITIES),
+  title:         z.string().min(3).max(200),
+  description:   z.string().max(2000).optional(),
+  module:        z.enum(MODULES),
+  severity:      z.enum(SEVERITIES),
+  metadata_json: z.string().max(4000).optional(),
 });
 
 const updateSchema = z.object({
@@ -50,12 +51,13 @@ issueRouter.post("/issue-reports", requireAuth, (req, res, next) => {
     const user = (req as unknown as { user?: { id: number; role: string; username?: string } }).user;
     const body = createSchema.parse(req.body);
     const issue = createIssue(db, {
-      title:       body.title,
-      description: body.description,
-      module:      body.module as IssueModule,
-      severity:    body.severity as IssueSeverityReport,
-      userId:      user?.id ?? null,
-      userName:    user?.username ?? null,
+      title:        body.title,
+      description:  body.description,
+      module:       body.module as IssueModule,
+      severity:     body.severity as IssueSeverityReport,
+      userId:       user?.id ?? null,
+      userName:     user?.username ?? null,
+      metadataJson: body.metadata_json ?? null,
     });
     res.status(201).json({ issue });
   } catch (err) {

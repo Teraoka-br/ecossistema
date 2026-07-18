@@ -6,6 +6,7 @@ import {
   PanelLeftClose, PanelLeftOpen, Stethoscope, Sliders, LayoutDashboard,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "./auth.js";
+import { BugReportWidget } from "./components/BugReportWidget.js";
 import { Login } from "./pages/Login.js";
 import { Setup } from "./pages/Setup.js";
 import { Analise } from "./pages/Analise.js";
@@ -107,6 +108,7 @@ function AuthenticatedShell() {
   return (
     <div className="app-shell">
       <UIVersionMarker />
+      <BugReportWidget />
       <header className="topbar">
         <button className="topbar-btn" onClick={() => setSidebarOpen((v) => !v)} title="Recolher menu">
           {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}

@@ -211,6 +211,8 @@ repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) 
       nextAction,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
+      margin: r.margin ?? null,
+      creationSource: (r.creation_source as string | null) ?? "IMPORT",
     };
   });
 
@@ -349,15 +351,16 @@ repairQueueRouter.get("/fila-reparos/summary", requireAuth, (_req, res) => {
   ).c;
 
   const FILTER_STATUSES: Record<string, string[] | null> = {
-    DO_NOW:         ["MATCH", "APTO_REPARO", "MATCH_PARCIAL", "VERIFICAR"],
-    MATCH:          ["MATCH"],
-    MATCH_PARCIAL:  ["MATCH_PARCIAL"],
+    DO_NOW:           ["MATCH", "APTO_REPARO", "MATCH_PARCIAL", "VERIFICAR"],
+    MATCH:            ["MATCH"],
+    MATCH_PARCIAL:    ["MATCH_PARCIAL"],
     AGUARDANDO_PECAS: ["PEDIR_PECA", "AGUARDANDO_RECEBIMENTO"],
-    APTO_REPARO:    ["APTO_REPARO"],
-    EM_ANALISE:     ["EM_ANALISE", "EM_SEPARACAO"],
-    VERIFICAR:      ["VERIFICAR"],
-    FINALIZADOS:    ["CONCLUIDO", "VENDA_ESTADO", "CANCELADO"],
-    TODOS:          null,
+    APTO_REPARO:      ["APTO_REPARO"],
+    EM_ANALISE:       ["EM_ANALISE", "EM_SEPARACAO"],
+    VERIFICAR:        ["VERIFICAR"],
+    VENDA_ESTADO:     ["VENDA_ESTADO"],
+    FINALIZADOS:      ["CONCLUIDO", "CANCELADO"],
+    TODOS:            null,
   };
   const filterCounts: Record<string, number> = {};
   for (const [f, statuses] of Object.entries(FILTER_STATUSES)) {
