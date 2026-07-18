@@ -248,7 +248,7 @@ export function getDashboardOverview(db: Db): OverviewData {
   const techRows = db
     .prepare(
       `SELECT
-         rc.technician_user_id,
+         rc.directed_technician_id as technician_user_id,
          st.name as technician_name,
          COUNT(*) as total_cases,
          COUNT(DISTINCT rc.imei) as unique_imeis,
@@ -256,10 +256,10 @@ export function getDashboardOverview(db: Db): OverviewData {
          MIN(rc.repair_date) as oldest_case_date,
          MAX(rc.updated_at) as last_movement
        FROM repair_cases rc
-       LEFT JOIN staff st ON st.id = rc.technician_user_id
-       WHERE rc.technician_user_id IS NOT NULL
+       LEFT JOIN staff_members st ON st.id = rc.directed_technician_id
+       WHERE rc.directed_technician_id IS NOT NULL
          AND rc.workflow_status NOT IN ('ENTREGUE','CANCELADO')
-       GROUP BY rc.technician_user_id`,
+       GROUP BY rc.directed_technician_id`,
     )
     .all() as TechRow[];
 

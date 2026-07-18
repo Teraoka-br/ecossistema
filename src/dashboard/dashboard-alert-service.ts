@@ -36,7 +36,7 @@ export function getOperationalAlerts(db: Db): OperationalAlert[] {
   const countYesterday = db
     .prepare(
       `SELECT COUNT(*) as c FROM count_sessions
-       WHERE status='FINALIZED' AND DATE(created_at)=?`,
+       WHERE status='FINALIZED' AND DATE(finished_at)=?`,
     )
     .get(lastBdStr) as { c: number };
   if (countYesterday.c === 0) {
@@ -74,7 +74,7 @@ export function getOperationalAlerts(db: Db): OperationalAlert[] {
   const semDeposito = db
     .prepare(
       `SELECT COUNT(*) as c FROM repair_cases
-       WHERE deposito IS NULL AND workflow_status NOT IN ('ENTREGUE','CANCELADO')`,
+       WHERE deposito_atual IS NULL AND workflow_status NOT IN ('ENTREGUE','CANCELADO')`,
     )
     .get() as { c: number };
   if (semDeposito.c > 0) {
@@ -93,7 +93,7 @@ export function getOperationalAlerts(db: Db): OperationalAlert[] {
   const semRefRow = db
     .prepare(
       `SELECT COUNT(*) as c FROM part_requests pr
-       LEFT JOIN reference_mappings rm ON rm.reference_norm = pr.chave_peca_norm AND rm.deleted_at IS NULL
+       LEFT JOIN reference_mappings rm ON rm.reference_norm = pr.chave_peca_norm AND rm.active = 1
        WHERE pr.cancelled_at IS NULL
          AND pr.chave_peca IS NULL
          AND rm.id IS NULL`,
@@ -183,7 +183,7 @@ export function getOperationalAlerts(db: Db): OperationalAlert[] {
   // 8. Ausencia de regra de match ativa
   const activeRuleRow = db
     .prepare(
-      `SELECT COUNT(*) as c FROM match_rule_sets WHERE is_active=1`,
+      `SELECT COUNT(*) as c FROM match_rule_sets WHERE active=1`,
     )
     .get() as { c: number };
   if (activeRuleRow.c === 0) {

@@ -64,13 +64,13 @@ export function getCountingBlockData(db: Db): CountingBlockData {
   const minDate = targetDays[targetDays.length - 1];
   const sessions = db
     .prepare(
-      `SELECT cs.id, cs.responsible_name, cs.count_type, cs.created_at,
-              MAX(cs.finalized_at) as finalized_at,
+      `SELECT cs.id, cs.responsible_name, cs.count_type, cs.started_at as created_at,
+              cs.finished_at as finalized_at,
               COUNT(sc.id) as total_scanned
        FROM count_sessions cs
        LEFT JOIN count_scans sc ON sc.session_id = cs.id AND sc.cancelled_at IS NULL
        WHERE cs.status = 'FINALIZED'
-         AND DATE(cs.created_at) >= ?
+         AND DATE(cs.started_at) >= ?
        GROUP BY cs.id
        ORDER BY cs.id DESC`,
     )
@@ -115,7 +115,8 @@ export function getCountingBlockData(db: Db): CountingBlockData {
   // Ãšltima sessÃ£o finalizada
   const lastRow = db
     .prepare(
-      `SELECT cs.id, cs.responsible_name, cs.count_type, cs.finalized_at,
+      `SELECT cs.id, cs.responsible_name, cs.count_type,
+              cs.started_at as created_at, cs.finished_at as finalized_at,
               COUNT(sc.id) as total_scanned
        FROM count_sessions cs
        LEFT JOIN count_scans sc ON sc.session_id = cs.id AND sc.cancelled_at IS NULL
