@@ -10,7 +10,8 @@ import { useAuth } from "../auth.js";
 
 type QueueFilter =
   | "DO_NOW" | "MATCH" | "MATCH_PARCIAL" | "AGUARDANDO_PECAS"
-  | "APTO_REPARO" | "EM_ANALISE" | "VERIFICAR" | "FINALIZADOS" | "TODOS";
+  | "COM_TECNICO" | "EM_ANALISE" | "VERIFICAR" | "VENDA_ESTADO"
+  | "FINALIZADOS" | "TODOS";
 
 interface NextAction {
   code: string;
@@ -43,6 +44,8 @@ interface QueueItem {
   nextAction: NextAction;
   createdAt: string;
   updatedAt: string;
+  margin: number | null;
+  creationSource: "IMPORT" | "MANUAL" | "DATASYS";
 }
 
 interface EngineState {
@@ -58,9 +61,10 @@ const FILTER_LABELS: Record<QueueFilter, string> = {
   MATCH: "Match completo",
   MATCH_PARCIAL: "Match parcial",
   AGUARDANDO_PECAS: "Aguardando peças",
-  APTO_REPARO: "Apto para reparo",
+  COM_TECNICO: "Com Técnico",
   EM_ANALISE: "Em análise",
   VERIFICAR: "Verificar",
+  VENDA_ESTADO: "Venda no Estado",
   FINALIZADOS: "Finalizados",
   TODOS: "Todos",
 };
@@ -187,7 +191,7 @@ function RepairCard({
               {modelStr || "Modelo não identificado"}
             </span>
           </div>
-          {/* IMEI + OS + idade */}
+          {/* IMEI + OS + idade + origem */}
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", fontSize: "0.73rem", color: "var(--text-muted)" }}>
             {item.imei && (
               <span style={{ fontFamily: "monospace", letterSpacing: "0.02em" }} title="IMEI completo">
@@ -197,7 +201,17 @@ function RepairCard({
             {item.os && <span>OS {item.os}</span>}
             {item.ageDays != null && (
               <span style={{ color: isOld ? "var(--warn-text)" : "var(--text-muted)", fontWeight: isOld ? 600 : 400 }}>
-                {item.ageDays}d em estoque
+                {item.ageDays}d
+              </span>
+            )}
+            {item.creationSource === "MANUAL" && (
+              <span style={{ color: "var(--info-text)", fontSize: "0.67rem", fontWeight: 600 }} title={`Criado em ${new Date(item.createdAt).toLocaleDateString("pt-BR")}`}>
+                Manual
+              </span>
+            )}
+            {item.creationSource === "DATASYS" && (
+              <span style={{ color: "var(--purple-text)", fontSize: "0.67rem", fontWeight: 600 }}>
+                Datasys
               </span>
             )}
           </div>
@@ -563,7 +577,7 @@ interface QueueSummary {
 }
 
 // Filtros que faz sentido exportar IMEIs (têm aparelhos reais com IMEI)
-const EXPORTABLE_FILTERS: QueueFilter[] = ["MATCH", "MATCH_PARCIAL", "DO_NOW", "APTO_REPARO", "AGUARDANDO_PECAS", "VERIFICAR", "TODOS"];
+const EXPORTABLE_FILTERS: QueueFilter[] = ["MATCH", "MATCH_PARCIAL", "DO_NOW", "COM_TECNICO", "AGUARDANDO_PECAS", "VERIFICAR", "VENDA_ESTADO", "TODOS"];
 
 function downloadTxt(text: string, filename: string, onDone: () => void) {
   const blob = new Blob([text], { type: "text/plain" });
@@ -785,27 +799,29 @@ export function FilaReparos() {
   const sumByStatuses = (statuses: string[]) =>
     statuses.reduce((acc, s) => acc + (queueSummary?.summary[s] ?? 0), 0);
   const fc: Record<string, number> = queueSummary?.filterCounts ?? (queueSummary ? {
-    MATCH:           sumByStatuses(["MATCH"]),
-    MATCH_PARCIAL:   sumByStatuses(["MATCH_PARCIAL"]),
-    AGUARDANDO_PECAS:sumByStatuses(["PEDIR_PECA","AGUARDANDO_RECEBIMENTO"]),
-    APTO_REPARO:     sumByStatuses(["APTO_REPARO"]),
-    EM_ANALISE:      sumByStatuses(["EM_ANALISE","EM_SEPARACAO"]),
-    VERIFICAR:       sumByStatuses(["VERIFICAR"]),
-    FINALIZADOS:     sumByStatuses(["CONCLUIDO","VENDA_ESTADO","CANCELADO"]),
-    TODOS:           kpiTotal,
+    MATCH:            sumByStatuses(["MATCH"]),
+    MATCH_PARCIAL:    sumByStatuses(["MATCH_PARCIAL"]),
+    AGUARDANDO_PECAS: sumByStatuses(["PEDIR_PECA","AGUARDANDO_RECEBIMENTO"]),
+    COM_TECNICO:      sumByStatuses(["APTO_REPARO","DIRECIONADO_TECNICO","EM_REPARO","REPARO_EXECUTADO","TRIAGEM_FINAL","RETORNO_TECNICO"]),
+    EM_ANALISE:       sumByStatuses(["EM_ANALISE","EM_SEPARACAO"]),
+    VERIFICAR:        sumByStatuses(["VERIFICAR"]),
+    VENDA_ESTADO:     sumByStatuses(["VENDA_ESTADO"]),
+    FINALIZADOS:      sumByStatuses(["CONCLUIDO","CANCELADO"]),
+    TODOS:            kpiTotal,
   } : {});
 
   // Ordem fixa dos cards — sempre visíveis, independente de contagem
   type FilterCardDef = { f: QueueFilter; label: string; sub: string; color: string; borderColor: string };
   const FILTER_CARDS: FilterCardDef[] = [
-    { f: "MATCH",           label: "Match completo",  sub: "prontos p/ separar", color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.4)" },
-    { f: "APTO_REPARO",     label: "Apto p/ reparo",  sub: "para direcionar",    color: "var(--accent)",     borderColor: "rgba(124,58,237,0.4)" },
-    { f: "VERIFICAR",       label: "Verificar",       sub: "precisam atenção",   color: "var(--err-text)",   borderColor: "rgba(239,68,68,0.4)"  },
-    { f: "EM_ANALISE",      label: "Em análise",      sub: "em separação",       color: "var(--text-muted)", borderColor: "rgba(255,255,255,0.15)"},
-    { f: "AGUARDANDO_PECAS",label: "Aguard. peças",   sub: "em compra",          color: "var(--text-muted)", borderColor: "rgba(255,255,255,0.15)"},
-    { f: "MATCH_PARCIAL",   label: "Match parcial",   sub: "incompletos",        color: "var(--warn-text)",  borderColor: "rgba(245,158,11,0.3)" },
-    { f: "FINALIZADOS",     label: "Finalizados",     sub: "concluídos",         color: "var(--ok-text)",    borderColor: "rgba(16,185,129,0.2)" },
-    { f: "TODOS",           label: "Todos",           sub: "aparelhos",          color: "var(--text-muted)", borderColor: "rgba(255,255,255,0.12)"},
+    { f: "MATCH",           label: "Match",           sub: "prontos",        color: "var(--ok-text)",        borderColor: "rgba(16,185,129,0.4)"  },
+    { f: "COM_TECNICO",     label: "Com Técnico",     sub: "distribuídos",   color: "var(--accent)",         borderColor: "rgba(124,58,237,0.4)"  },
+    { f: "VERIFICAR",       label: "Verificar",       sub: "atenção",        color: "var(--err-text)",       borderColor: "rgba(239,68,68,0.4)"   },
+    { f: "EM_ANALISE",      label: "Em análise",      sub: "separação",      color: "var(--text-muted)",     borderColor: "rgba(255,255,255,0.15)" },
+    { f: "AGUARDANDO_PECAS",label: "Aguardando",      sub: "em compra",      color: "var(--text-muted)",     borderColor: "rgba(255,255,255,0.15)" },
+    { f: "MATCH_PARCIAL",   label: "Parcial",         sub: "incompletos",    color: "var(--warn-text)",      borderColor: "rgba(245,158,11,0.3)"  },
+    { f: "VENDA_ESTADO",    label: "Venda Estado",    sub: "baixo score",    color: "rgba(245,158,11,0.7)",  borderColor: "rgba(245,158,11,0.35)" },
+    { f: "FINALIZADOS",     label: "Finalizados",     sub: "concluídos",     color: "var(--ok-text)",        borderColor: "rgba(16,185,129,0.2)"  },
+    { f: "TODOS",           label: "Todos",           sub: "aparelhos",      color: "var(--text-muted)",     borderColor: "rgba(255,255,255,0.12)" },
   ];
 
   return (
@@ -837,8 +853,8 @@ export function FilaReparos() {
       <div style={{
         display: "grid",
         gridTemplateColumns: `repeat(${FILTER_CARDS.length}, 1fr)`,
-        gap: "0.6rem",
-        marginBottom: "1.5rem",
+        gap: "0.45rem",
+        marginBottom: "1.25rem",
       }}>
         {FILTER_CARDS.map(({ f, label, sub, color, borderColor }) => {
           const count = fc[f] ?? 0;
@@ -851,18 +867,18 @@ export function FilaReparos() {
               onClick={() => { setFilter(f); setPage(1); clearSelection(); }}
               style={{
                 cursor: "pointer", font: "inherit", textAlign: "left",
-                padding: "0.85rem 1rem", minWidth: 0,
+                padding: "0.6rem 0.7rem", minWidth: 0,
                 "--kpi-color": color,
                 borderColor: isActive ? borderColor : undefined,
                 boxShadow: isActive
-                  ? `0 0 0 1px ${borderColor}, 0 8px 24px rgba(0,0,0,0.5)`
+                  ? `0 0 0 1px ${borderColor}, 0 6px 20px rgba(0,0,0,0.4)`
                   : undefined,
-                opacity: hasCount ? 1 : 0.45,
+                opacity: hasCount ? 1 : 0.4,
               } as React.CSSProperties}
             >
-              <div className="kpi-label" style={{ color, marginBottom: "0.35rem" }}>{label}</div>
-              <div className="kpi-value" style={{ color, fontSize: "1.85rem" }}>{count}</div>
-              <div className="kpi-sub">{sub}</div>
+              <div className="kpi-label" style={{ color, marginBottom: "0.2rem", fontSize: "0.66rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</div>
+              <div className="kpi-value" style={{ color, fontSize: "1.45rem", lineHeight: 1.1 }}>{count}</div>
+              <div className="kpi-sub" style={{ fontSize: "0.62rem", marginTop: "0.15rem", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{sub}</div>
             </button>
           );
         })}
@@ -903,8 +919,8 @@ export function FilaReparos() {
       {selectedCount > 0 && (
         <div style={{
           display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap",
-          background: filter === "APTO_REPARO" ? "rgba(124,58,237,0.12)" : "rgba(124,58,237,0.1)",
-          border: `1px solid ${filter === "APTO_REPARO" ? "rgba(124,58,237,0.4)" : "rgba(124,58,237,0.3)"}`,
+          background: filter === "COM_TECNICO" ? "rgba(124,58,237,0.12)" : "rgba(124,58,237,0.1)",
+          border: `1px solid ${filter === "COM_TECNICO" ? "rgba(124,58,237,0.4)" : "rgba(124,58,237,0.3)"}`,
           borderRadius: "var(--r-md)", padding: "0.5rem 0.875rem",
           marginBottom: "0.875rem",
         }}>
@@ -913,7 +929,7 @@ export function FilaReparos() {
           </span>
 
           {/* Ação principal: direcionar ao técnico (só em APTO_REPARO) */}
-          {filter === "APTO_REPARO" && (
+          {filter === "COM_TECNICO" && (
             <>
               <button
                 className="btn btn-primary btn-sm"

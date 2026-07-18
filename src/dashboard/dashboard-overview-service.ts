@@ -1,4 +1,5 @@
-﻿import type { Db } from "../db/database.js";
+import type { Db } from "../db/database.js";
+import { getBaseMetrics } from "./dashboard-base-metrics.js";
 
 export interface CardCounts {
   match: number;
@@ -35,7 +36,7 @@ export interface TechnicianCases {
 
 export interface OverviewData {
   cards: CardCounts;
-  cardComparison: Partial<CardCounts> | null;   // diferenÃ§a vs ontem
+  cardComparison: Partial<CardCounts> | null;
   stock: StockSummary;
   panorama: {
     activeCases: number;
@@ -56,43 +57,10 @@ export interface OverviewData {
 export function getDashboardOverview(db: Db): OverviewData {
   const now = new Date().toISOString();
 
-  // â”€â”€ Cards: repair_cases + part_requests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  type WfRow = { workflow_status: string; c: number };
-  const wfRows = db
-    .prepare(
-      `SELECT workflow_status, COUNT(*) as c
-       FROM repair_cases GROUP BY workflow_status`,
-    )
-    .all() as WfRow[];
-  const wf = new Map(wfRows.map((r) => [r.workflow_status, r.c]));
-
-  type PrRow = { status: string; c: number };
-  const prRows = db
-    .prepare(
-      `SELECT status, COUNT(*) as c
-       FROM part_requests WHERE cancelled_at IS NULL GROUP BY status`,
-    )
-    .all() as PrRow[];
-  const pr = new Map(prRows.map((r) => [r.status, r.c]));
-
-  const aptoReparo =
-    (wf.get("APTO_REPARO") ?? 0) +
-    (wf.get("PECA_DISPONIVEL") ?? 0) +
-    (wf.get("EM_SEPARACAO") ?? 0);
-  const comTecnico =
-    (wf.get("DIRECIONADO_TECNICO") ?? 0) +
-    (wf.get("EM_REPARO") ?? 0) +
-    (wf.get("REPARO_EXECUTADO") ?? 0) +
-    (wf.get("TRIAGEM_FINAL") ?? 0) +
-    (wf.get("RETORNO_TECNICO") ?? 0);
-  const finalizados =
-    (wf.get("ENTREGUE") ?? 0) + (wf.get("CANCELADO") ?? 0);
-  const emAnalise =
-    (wf.get("DRAFT") ?? 0) + (wf.get("ANALISE") ?? 0) + (wf.get("ANALYSIS_DRAFT") ?? 0);
-  const aguardandoPeca =
-    (wf.get("AGUARDANDO_PECA") ?? 0) +
-    (pr.get("AGUARDANDO_RECEBIMENTO") ?? 0);
-  const total = [...wf.values()].reduce((s, v) => s + v, 0);
+  // -- Cards (usa metricas base compartilhadas com snapshot-service) -----------
+  const base = getBaseMetrics(db);
+  const { workflowMap: wf, partMap: pr, aptoReparo, comTecnico, emAnalise, finalizados } = base;
+  const aguardandoPeca = (wf.get("AGUARDANDO_PECA") ?? 0) + (pr.get("AGUARDANDO_RECEBIMENTO") ?? 0);
 
   const cards: CardCounts = {
     match: pr.get("MATCH") ?? 0,
@@ -103,15 +71,12 @@ export function getDashboardOverview(db: Db): OverviewData {
     aguardandoPeca,
     comTecnico,
     finalizados,
-    total,
+    total: base.totalCases,
   };
 
-  // â”€â”€ ComparaÃ§Ã£o com ontem (snapshot diÃ¡rio) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Comparacao com snapshot anterior ----------------------------------------
   const yesterday = db
-    .prepare(
-      `SELECT * FROM dashboard_daily_snapshots
-       ORDER BY snapshot_date DESC LIMIT 1`,
-    )
+    .prepare(`SELECT * FROM dashboard_daily_snapshots ORDER BY snapshot_date DESC LIMIT 1`)
     .get() as Record<string, number> | undefined;
 
   let cardComparison: Partial<CardCounts> | null = null;
@@ -129,7 +94,7 @@ export function getDashboardOverview(db: Db): OverviewData {
     };
   }
 
-  // â”€â”€ Estoque â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Estoque -----------------------------------------------------------------
   const lastSnap = db
     .prepare(
       `SELECT ss.id, ss.total_units, ss.created_at, ss.baseline_movement_id_max,
@@ -162,33 +127,24 @@ export function getDashboardOverview(db: Db): OverviewData {
         .get(lastSnap.id) as { c: number }
     ).c;
   } else {
-    const src = db
-      .prepare(`SELECT COUNT(*) as units FROM source_inventory_items`)
-      .get() as { units: number };
+    const src = db.prepare(`SELECT COUNT(*) as units FROM source_inventory_items`).get() as { units: number };
     baseUnits = src.units;
     baseRefs = (
       db
-        .prepare(
-          `SELECT COUNT(DISTINCT chave_peca_norm) as c
-           FROM source_inventory_items WHERE chave_peca_norm IS NOT NULL`,
-        )
+        .prepare(`SELECT COUNT(DISTINCT chave_peca_norm) as c FROM source_inventory_items WHERE chave_peca_norm IS NOT NULL`)
         .get() as { c: number }
     ).c;
   }
 
   const movRow = db
-    .prepare(
-      `SELECT COALESCE(SUM(quantity),0) as q
-       FROM stock_movements WHERE reversed_at IS NULL AND id > ?`,
-    )
+    .prepare(`SELECT COALESCE(SUM(quantity),0) as q FROM stock_movements WHERE reversed_at IS NULL AND id > ?`)
     .get(movCut) as { q: number };
   const stockTotal = baseUnits + movRow.q;
 
   const reservedRow = db
     .prepare(
       `SELECT COALESCE(SUM(ABS(quantity)),0) as q
-       FROM stock_movements
-       WHERE reversed_at IS NULL AND movement_type='REPAIR_RESERVATION'`,
+       FROM stock_movements WHERE reversed_at IS NULL AND movement_type='REPAIR_RESERVATION'`,
     )
     .get() as { q: number };
   const reserved = reservedRow.q;
@@ -204,38 +160,25 @@ export function getDashboardOverview(db: Db): OverviewData {
     lastSnapshotBy: lastSnap?.responsible_name ?? null,
   };
 
-  // â”€â”€ Panorama â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const activeCasesRow = db
-    .prepare(
-      `SELECT COUNT(*) as c, COUNT(DISTINCT imei) as u
-       FROM repair_cases WHERE workflow_status NOT IN ('ENTREGUE','CANCELADO')`,
-    )
-    .get() as { c: number; u: number };
-
+  // -- Panorama ----------------------------------------------------------------
   const pendingPO = db
-    .prepare(
-      `SELECT COUNT(*) as c FROM purchase_orders
-       WHERE status IN ('AWAITING','PARTIALLY_RECEIVED')`,
-    )
+    .prepare(`SELECT COUNT(*) as c FROM purchase_orders WHERE status IN ('AWAITING','PARTIALLY_RECEIVED')`)
     .get() as { c: number };
 
-  // Reparos possÃ­veis agora = aparelhos em APTO_REPARO + PECA_DISPONIVEL + EM_SEPARACAO
-  const possibleNow = aptoReparo;
-
   const panorama = {
-    activeCases: activeCasesRow.c,
-    uniqueImeis: activeCasesRow.u,
+    activeCases: base.activeCases,
+    uniqueImeis: base.activeUniqueImeis,
     stockUnits: stock.totalUnits,
     stockReferences: stock.totalReferences,
     availableUnits: stock.availableUnits,
     reservedUnits: stock.reservedUnits,
     pendingPurchaseOrders: pendingPO.c,
-    possibleRepairsNow: possibleNow,
+    possibleRepairsNow: aptoReparo,
     lastOfficialCount: lastSnap?.created_at ?? null,
     lastUpdatedAt: now,
   };
 
-  // â”€â”€ TÃ©cnicos â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Tecnicos ----------------------------------------------------------------
   type TechRow = {
     technician_user_id: number | null;
     technician_name: string | null;
@@ -265,7 +208,7 @@ export function getDashboardOverview(db: Db): OverviewData {
 
   const technicians: TechnicianCases[] = techRows.map((r) => ({
     technicianId: r.technician_user_id,
-    technicianName: r.technician_name ?? `TÃ©cnico #${r.technician_user_id}`,
+    technicianName: r.technician_name ?? `Tecnico #${r.technician_user_id}`,
     totalCases: r.total_cases,
     uniqueImeis: r.unique_imeis,
     inRepair: r.in_repair,
@@ -273,12 +216,5 @@ export function getDashboardOverview(db: Db): OverviewData {
     lastMovement: r.last_movement,
   }));
 
-  return {
-    cards,
-    cardComparison,
-    stock,
-    panorama,
-    technicians,
-    lastUpdatedAt: now,
-  };
+  return { cards, cardComparison, stock, panorama, technicians, lastUpdatedAt: now };
 }

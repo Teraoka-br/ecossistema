@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback } from "react";
+import { useState } from "react";
 import { Wrench, CheckCircle, AlertCircle, Calendar } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { useAsync } from "../hooks/useAsync.js";
 
 interface TecnicoStats {
   linked: boolean;
@@ -21,23 +22,13 @@ function monthStart(): string {
 
 export function TecnicoHome() {
   const [from, setFrom] = useState(monthStart());
-  const [to, setTo] = useState(today());
-  const [stats, setStats] = useState<TecnicoStats | null>(null);
-  const [loading, setLoading] = useState(true);
-  const navigate = useNavigate();
+  const [to, setTo]     = useState(today());
+  const navigate        = useNavigate();
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const qs = new URLSearchParams({ from, to });
-      const r = await fetch(`/api/fila-reparos/minha-fila/stats?${qs}`);
-      if (r.ok) setStats(await r.json() as TecnicoStats);
-    } finally {
-      setLoading(false);
-    }
-  }, [from, to]);
-
-  useEffect(() => { void load(); }, [load]);
+  const { data: stats, loading } = useAsync<TecnicoStats>(
+    () => fetch(`/api/fila-reparos/minha-fila/stats?from=${from}&to=${to}`).then(r => r.json() as Promise<TecnicoStats>),
+    [from, to],
+  );
 
   if (!loading && stats && !stats.linked) {
     return (
@@ -46,7 +37,7 @@ export function TecnicoHome() {
           <AlertCircle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
           <span>
             Sua conta ainda não está vinculada a um técnico. Peça ao administrador para fazer o vínculo em{" "}
-            <strong>Administração → Pessoas → Técnicos</strong>.
+            <strong>Administração → Pessoas e Usuários</strong>.
           </span>
         </div>
       </div>
@@ -57,14 +48,11 @@ export function TecnicoHome() {
     <div className="page-container">
       <div className="page-header">
         <div>
-          <h1 className="page-title">
-            {stats?.staffName ? `Olá, ${stats.staffName}` : "Início"}
-          </h1>
+          <h1 className="page-title">{stats?.staffName ? `Olá, ${stats.staffName}` : "Início"}</h1>
           <p className="page-subtitle">Resumo do seu trabalho</p>
         </div>
       </div>
 
-      {/* Cards de resumo */}
       <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginBottom: "2rem" }}>
         <button
           className="kpi-card"
@@ -87,13 +75,7 @@ export function TecnicoHome() {
           <div className="kpi-sub">aparelhos direcionados</div>
         </button>
 
-        <div
-          className="kpi-card"
-          style={{
-            border: "1px solid rgba(16,185,129,0.3)",
-            minWidth: 180, flex: "1 1 180px",
-          }}
-        >
+        <div className="kpi-card" style={{ border: "1px solid rgba(16,185,129,0.3)", minWidth: 180, flex: "1 1 180px" }}>
           <div className="kpi-label" style={{ color: "var(--ok-text)", display: "flex", alignItems: "center", gap: "0.4rem" }}>
             <CheckCircle size={12} /> Realizados no período
           </div>
@@ -104,7 +86,6 @@ export function TecnicoHome() {
         </div>
       </div>
 
-      {/* Filtro de período */}
       <div className="card" style={{ maxWidth: 480 }}>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "1rem" }}>
           <Calendar size={14} style={{ opacity: 0.6 }} />

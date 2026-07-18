@@ -900,3 +900,67 @@ button:not([class]):disabled { opacity: 0.35; cursor: not-allowed; transform: no
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(124,58,237,0.25); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(124,58,237,0.5); }
+
+/* ─── Bug report widget ───────────────────────────────────────────────────── */
+@keyframes bug-slide-up {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ─── Design improvements v2.1 ───────────────────────────────────────────── */
+
+/* Topbar: gradient accent line at bottom */
+.topbar::after {
+  content: '';
+  position: absolute; bottom: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent 0%, rgba(124,58,237,0.5) 30%, rgba(99,102,241,0.3) 70%, transparent 100%);
+}
+
+/* Cards: subtle top accent gradient */
+.card::before {
+  content: '';
+  display: block; height: 1px;
+  background: linear-gradient(90deg, rgba(124,58,237,0.3) 0%, rgba(99,102,241,0.15) 50%, transparent 100%);
+  margin: -1.375rem -1.625rem 1.375rem;
+}
+
+/* KPI cards: add top bar with card color */
+.kpi-card::after {
+  height: 2px;
+  background: var(--kpi-color, var(--accent));
+  opacity: 0.7;
+  border-radius: 2px 2px 0 0;
+}
+
+/* Sidebar: smooth highlight on hover using gradient */
+.sidebar-link:hover {
+  background: linear-gradient(90deg, rgba(124,58,237,0.12), rgba(99,102,241,0.06));
+}
+
+/* Page title: subtle gradient */
+.page-title {
+  background: linear-gradient(135deg, var(--text) 0%, rgba(196,181,253,0.85) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Repair grid: slightly tighter on large screens */
+.repair-grid { grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 0.75rem; }
+
+/* Better focus rings */
+:focus-visible {
+  outline: 2px solid rgba(124,58,237,0.6);
+  outline-offset: 2px;
+}
+
+/* Table header: stronger */
+thead th {
+  background: rgba(124,58,237,0.08);
+  color: rgba(152,152,184,0.9);
+}
+
+/* Subtle animated gradient on active sidebar item */
+.sidebar-link.active {
+  background: linear-gradient(90deg, rgba(139,92,246,0.35) 0%, rgba(99,102,241,0.14) 60%, transparent 100%);
+}

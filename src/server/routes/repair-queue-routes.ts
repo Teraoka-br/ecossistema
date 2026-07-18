@@ -115,6 +115,7 @@ repairQueueRouter.post("/engine/run", requireAuth, requireAdmin, async (req, res
 
 // ─── Fila de reparos ──────────────────────────────────────────────────────
 
+
 repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) => {
   const db = getDb();
   const filter = (req.query.filter as QueueFilter) || "DO_NOW";
@@ -177,6 +178,7 @@ repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) 
         WHEN 'EM_ANALISE' THEN 8
         ELSE 9
       END,
+      rc.margin ASC NULLS FIRST,
       rc.id ASC
     LIMIT ? OFFSET ?
   `).all(...params, limit, offset) as Record<string, unknown>[];
@@ -211,6 +213,8 @@ repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) 
       nextAction,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
+      margin: r.margin ?? null,
+      creationSource: r.creation_source ?? "IMPORT",
     };
   });
 
@@ -349,15 +353,16 @@ repairQueueRouter.get("/fila-reparos/summary", requireAuth, (_req, res) => {
   ).c;
 
   const FILTER_STATUSES: Record<string, string[] | null> = {
-    DO_NOW:         ["MATCH", "APTO_REPARO", "MATCH_PARCIAL", "VERIFICAR"],
-    MATCH:          ["MATCH"],
-    MATCH_PARCIAL:  ["MATCH_PARCIAL"],
+    DO_NOW:           ["MATCH", "APTO_REPARO", "MATCH_PARCIAL", "VERIFICAR"],
+    MATCH:            ["MATCH"],
+    MATCH_PARCIAL:    ["MATCH_PARCIAL"],
     AGUARDANDO_PECAS: ["PEDIR_PECA", "AGUARDANDO_RECEBIMENTO"],
-    APTO_REPARO:    ["APTO_REPARO"],
-    EM_ANALISE:     ["EM_ANALISE", "EM_SEPARACAO"],
-    VERIFICAR:      ["VERIFICAR"],
-    FINALIZADOS:    ["CONCLUIDO", "VENDA_ESTADO", "CANCELADO"],
-    TODOS:          null,
+    COM_TECNICO:      ["APTO_REPARO", "DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO"],
+    EM_ANALISE:       ["EM_ANALISE", "EM_SEPARACAO"],
+    VERIFICAR:        ["VERIFICAR"],
+    VENDA_ESTADO:     ["VENDA_ESTADO"],
+    FINALIZADOS:      ["CONCLUIDO", "CANCELADO"],
+    TODOS:            null,
   };
   const filterCounts: Record<string, number> = {};
   for (const [f, statuses] of Object.entries(FILTER_STATUSES)) {

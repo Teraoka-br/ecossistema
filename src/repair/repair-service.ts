@@ -166,6 +166,7 @@ export function createRepairCase(
     workflowStatus?: WorkflowStatus;
     analysisStatus?: AnalysisStatus;
     createdByUserId?: number | null;
+    creationSource?: "IMPORT" | "MANUAL" | "DATASYS";
   },
 ): RepairCase {
   const imeiNorm = params.imei ? normalizeText(params.imei) : null;
@@ -191,14 +192,17 @@ export function createRepairCase(
       ? params.estimatedSale - params.cost
       : null;
 
+  const creationSource = params.creationSource
+    ?? (params.legacyImportBatchId != null ? "IMPORT" : "MANUAL");
+
   const res = db
     .prepare(
       `INSERT INTO repair_cases
          (imei, imei_norm, os, os_norm, brand, model, entry_date, repair_date, repair_date_source,
           age_days, cost, estimated_sale, margin, notes, analysis_status, workflow_status,
           assigned_technician_id, legacy_import_batch_id, legacy_device_key, legacy_case_key,
-          created_by_user_id, updated_by_user_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          created_by_user_id, updated_by_user_id, creation_source)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       params.imei ?? null, imeiNorm,
@@ -217,6 +221,7 @@ export function createRepairCase(
       params.legacyCaseKey ?? null,
       params.createdByUserId ?? null,
       params.createdByUserId ?? null,
+      creationSource,
     );
   return getRepairCaseById(db, res.lastInsertRowid as number)!;
 }

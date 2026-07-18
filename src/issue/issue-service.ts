@@ -31,6 +31,7 @@ export interface CreateIssueInput {
   severity: IssueSeverityReport;
   userId: number | null;
   userName: string | null;
+  metadataJson?: string | null;
 }
 
 export interface UpdateIssueInput {
@@ -67,8 +68,8 @@ export function createIssue(db: Db, input: CreateIssueInput): IssueReport {
     .prepare(
       `INSERT INTO issue_reports
          (title, description, module, severity, status,
-          created_by_user_id, created_by_name, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
+          created_by_user_id, created_by_name, created_at, updated_at, metadata_json)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       input.title.trim(),
@@ -80,6 +81,7 @@ export function createIssue(db: Db, input: CreateIssueInput): IssueReport {
       input.userName,
       now,
       now,
+      input.metadataJson ?? null,
     );
   return db
     .prepare(`SELECT * FROM issue_reports WHERE id=?`)

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import {
   Wrench, List, ShoppingCart, Boxes, ScanBarcode,
@@ -6,28 +6,29 @@ import {
   PanelLeftClose, PanelLeftOpen, Stethoscope, Sliders, LayoutDashboard,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "./auth.js";
+import { BugReportWidget } from "./components/BugReportWidget.js";
+// Login e Setup carregam sempre (necessários antes da autenticação)
 import { Login } from "./pages/Login.js";
 import { Setup } from "./pages/Setup.js";
-import { Analise } from "./pages/Analise.js";
-import { Importar } from "./pages/Importar.js";
-import { Diagnostico } from "./pages/Diagnostico.js";
-import { Pedidos } from "./pages/Pedidos.js";
-import { Estoque } from "./pages/Estoque.js";
-import { Cotacoes } from "./pages/Cotacoes.js";
-import { Bipagem } from "./pages/Bipagem.js";
-import { Compras } from "./pages/Compras.js";
-import { Movimentacoes } from "./pages/Movimentacoes.js";
-import { AdminUsuarios } from "./pages/AdminUsuarios.js";
-import { AdminTecnicos } from "./pages/AdminTecnicos.js";
-import { AdminPessoas } from "./pages/AdminPessoas.js";
-import { AdminDatasys } from "./pages/AdminDatasys.js";
-import { FilaReparos } from "./pages/FilaReparos.js";
-import { AdminMatchRules } from "./pages/AdminMatchRules.js";
-import { AdminDados } from "./pages/AdminDados.js";
-import { TecnicoFila } from "./pages/TecnicoFila.js";
-import { TecnicoHome } from "./pages/TecnicoHome.js";
-import { AdminDashboards } from "./pages/AdminDashboards.js";
-import { Referencias } from "./pages/Referencias.js";
+// Demais páginas: carregamento sob demanda (code splitting por rota)
+const Analise       = lazy(() => import("./pages/Analise.js").then(m => ({ default: m.Analise })));
+const Importar      = lazy(() => import("./pages/Importar.js").then(m => ({ default: m.Importar })));
+const Diagnostico   = lazy(() => import("./pages/Diagnostico.js").then(m => ({ default: m.Diagnostico })));
+const Pedidos       = lazy(() => import("./pages/Pedidos.js").then(m => ({ default: m.Pedidos })));
+const Estoque       = lazy(() => import("./pages/Estoque.js").then(m => ({ default: m.Estoque })));
+const Cotacoes      = lazy(() => import("./pages/Cotacoes.js").then(m => ({ default: m.Cotacoes })));
+const Bipagem       = lazy(() => import("./pages/Bipagem.js").then(m => ({ default: m.Bipagem })));
+const Compras       = lazy(() => import("./pages/Compras.js").then(m => ({ default: m.Compras })));
+const Movimentacoes = lazy(() => import("./pages/Movimentacoes.js").then(m => ({ default: m.Movimentacoes })));
+const AdminUsuarios = lazy(() => import("./pages/AdminUsuarios.js").then(m => ({ default: m.AdminUsuarios })));
+const AdminDatasys  = lazy(() => import("./pages/AdminDatasys.js").then(m => ({ default: m.AdminDatasys })));
+const FilaReparos   = lazy(() => import("./pages/FilaReparos.js").then(m => ({ default: m.FilaReparos })));
+const AdminMatchRules = lazy(() => import("./pages/AdminMatchRules.js").then(m => ({ default: m.AdminMatchRules })));
+const AdminDados    = lazy(() => import("./pages/AdminDados.js").then(m => ({ default: m.AdminDados })));
+const TecnicoFila   = lazy(() => import("./pages/TecnicoFila.js").then(m => ({ default: m.TecnicoFila })));
+const TecnicoHome   = lazy(() => import("./pages/TecnicoHome.js").then(m => ({ default: m.TecnicoHome })));
+const AdminDashboards = lazy(() => import("./pages/AdminDashboards.js").then(m => ({ default: m.AdminDashboards })));
+const Referencias   = lazy(() => import("./pages/Referencias.js").then(m => ({ default: m.Referencias })));
 
 function LoadingScreen() {
   return (
@@ -107,6 +108,7 @@ function AuthenticatedShell() {
   return (
     <div className="app-shell">
       <UIVersionMarker />
+      <BugReportWidget />
       <header className="topbar">
         <button className="topbar-btn" onClick={() => setSidebarOpen((v) => !v)} title="Recolher menu">
           {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
@@ -176,10 +178,7 @@ function AuthenticatedShell() {
                     <Database size={15} /> Dados
                   </NavLink>
                   <NavLink to="/admin/usuarios" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Users size={15} /> Usuários
-                  </NavLink>
-                  <NavLink to="/admin/pessoas" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Users size={15} /> Pessoas / Técnicos
+                    <Users size={15} /> Pessoas e Usuários
                   </NavLink>
                   <NavLink to="/admin/regras-match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
                     <Sliders size={15} /> Regras do Match
@@ -197,6 +196,7 @@ function AuthenticatedShell() {
         </nav>
 
         <main className="main-content">
+          <Suspense fallback={<LoadingScreen />}>
           <Routes>
             <Route path="/" element={<Navigate to={isTechnician ? "/inicio" : "/fila-reparos"} replace />} />
             <Route path="/inicio" element={<TecnicoHome />} />
@@ -216,14 +216,15 @@ function AuthenticatedShell() {
             <Route path="/match" element={<Navigate to="/fila-reparos" replace />} />
             <Route path="/separacao" element={<Navigate to="/fila-reparos" replace />} />
             <Route path="/admin/usuarios" element={<AdminUsuarios />} />
-            <Route path="/admin/tecnicos" element={<AdminTecnicos />} />
-            <Route path="/admin/pessoas" element={<AdminPessoas />} />
+            <Route path="/admin/tecnicos" element={<Navigate to="/admin/usuarios" replace />} />
+            <Route path="/admin/pessoas" element={<Navigate to="/admin/usuarios" replace />} />
             <Route path="/admin/datasys" element={<AdminDatasys />} />
             <Route path="/admin/dados" element={<AdminDados />} />
             <Route path="/admin/dashboards" element={<AdminDashboards />} />
             <Route path="/admin/regras-match" element={<AdminMatchRules />} />
             <Route path="*" element={<Navigate to={isTechnician ? "/inicio" : "/fila-reparos"} replace />} />
           </Routes>
+          </Suspense>
         </main>
       </div>
     </div>
