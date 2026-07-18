@@ -27,6 +27,28 @@ const aliasCreateSchema = z.object({
   reason: z.string().optional().nullable(),
 });
 
+// Busca chaves e referências disponíveis no estoque (para autocomplete do campo "chave no estoque")
+partKeyAliasRouter.get("/referencias/stock-keys", requireAuth, (req, res, next) => {
+  try {
+    const q = (typeof req.query.q === "string" ? req.query.q : "").trim().toUpperCase();
+    const db = getDb();
+    // Pega o snapshot OFFICIAL mais recente
+    const snap = db.prepare("SELECT id FROM stock_snapshots WHERE status='OFFICIAL' ORDER BY id DESC LIMIT 1")
+      .get() as { id: number } | undefined;
+    if (!snap) { res.json({ items: [] }); return; }
+    const pattern = `%${q.replace(/[%_\\]/g, "\\$&")}%`;
+    const rows = db.prepare(`
+      SELECT reference, chave_peca FROM stock_snapshot_items
+      WHERE snapshot_id = ?
+        AND (upper(reference) LIKE ? ESCAPE '\\' OR upper(chave_peca) LIKE ? ESCAPE '\\')
+      ORDER BY reference LIMIT 20
+    `).all(snap.id, pattern, pattern) as { reference: string; chave_peca: string }[];
+    res.json({ items: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
 partKeyAliasRouter.get("/part-key-aliases", requireAuth, (req, res, next) => {
   try {
     const q = typeof req.query.q === "string" ? req.query.q : undefined;

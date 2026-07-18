@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Plus, Pencil, Trash2, Search, History, X, Check, RefreshCw, Wand2, Info, RotateCcw } from "lucide-react";
 import { useAuth } from "../auth.js";
 import {
@@ -155,6 +155,116 @@ interface AliasRow {
   created_at: string;
 }
 
+interface ComboOption { label: string; sub?: string }
+
+/**
+ * Campo de busca com dropdown — busca via API conforme o usuário digita,
+ * permite selecionar uma opção existente ou confirmar texto livre.
+ */
+function ChaveCombobox({
+  value,
+  onChange,
+  placeholder,
+  fetchOptions,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  fetchOptions: (q: string) => Promise<ComboOption[]>;
+  disabled?: boolean;
+}) {
+  const [options, setOptions] = useState<ComboOption[]>([]);
+  const [open, setOpen] = useState(false);
+  const [highlighted, setHighlighted] = useState(0);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open || value.trim().length < 1) { setOptions([]); return; }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      void fetchOptions(value.trim()).then(opts => { if (!cancelled) { setOptions(opts); setHighlighted(0); } });
+    }, 180);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [value, open, fetchOptions]);
+
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, []);
+
+  const trimmed = value.trim().toUpperCase();
+  const exactMatch = options.some(o => o.label.toUpperCase() === trimmed);
+  const showFree = trimmed.length >= 2 && !exactMatch;
+  const allOpts: ComboOption[] = showFree
+    ? [...options, { label: trimmed, sub: "usar este texto (novo)" }]
+    : options;
+
+  function select(opt: ComboOption) {
+    onChange(opt.label);
+    setOpen(false);
+  }
+
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (!open || allOpts.length === 0) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); setHighlighted(h => Math.min(h + 1, allOpts.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setHighlighted(h => Math.max(h - 1, 0)); }
+    else if (e.key === "Enter") { e.preventDefault(); if (allOpts[highlighted]) select(allOpts[highlighted]); }
+    else if (e.key === "Escape") setOpen(false);
+  }
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative" }}>
+      <input
+        value={value}
+        disabled={disabled}
+        placeholder={placeholder}
+        onChange={e => { onChange(e.target.value.toUpperCase()); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={onKeyDown}
+        style={{ width: "100%", boxSizing: "border-box" }}
+        autoComplete="off"
+      />
+      {open && allOpts.length > 0 && (
+        <div style={{
+          position: "absolute", zIndex: 200, left: 0, right: 0, top: "calc(100% + 2px)",
+          background: "var(--surface)", border: "1px solid var(--border-2)",
+          borderRadius: "var(--r-sm)", boxShadow: "var(--shadow-lg)",
+          maxHeight: 220, overflowY: "auto",
+        }}>
+          {allOpts.map((opt, i) => {
+            const isNew = opt.sub === "usar este texto (novo)";
+            return (
+              <div
+                key={opt.label + i}
+                onMouseDown={e => { e.preventDefault(); select(opt); }}
+                onMouseEnter={() => setHighlighted(i)}
+                style={{
+                  padding: "0.45rem 0.75rem",
+                  cursor: "pointer",
+                  background: i === highlighted ? "var(--elevated)" : undefined,
+                  borderBottom: i < allOpts.length - 1 ? "1px solid var(--border)" : undefined,
+                  display: "flex", flexDirection: "column", gap: "0.1rem",
+                }}
+              >
+                <span style={{ fontSize: "0.83rem", fontWeight: 600, color: isNew ? "var(--accent)" : "var(--text)" }}>
+                  {isNew ? `+ "${opt.label}"` : opt.label}
+                </span>
+                {opt.sub && !isNew && (
+                  <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>{opt.sub}</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CompatSection({ allKeys, isAdmin }: { allKeys: PartKey[]; isAdmin: boolean }) {
   const [aliases, setAliases] = useState<AliasRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -167,6 +277,36 @@ function CompatSection({ allKeys, isAdmin }: { allKeys: PartKey[]; isAdmin: bool
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
   const [removingId, setRemovingId] = useState<number | null>(null);
+
+  // Busca chaves pedidas pelos casos (part_requests)
+  const fetchRequestedKeys = useCallback(async (q: string): Promise<ComboOption[]> => {
+    if (q.length < 1) return [];
+    const r = await fetch(`/api/analise/part-suggestions?q=${encodeURIComponent(q)}`).catch(() => null);
+    if (!r?.ok) return [];
+    const d = await r.json() as { suggestions: Array<{ text: string }> };
+    return d.suggestions.map(s => ({ label: s.text }));
+  }, []);
+
+  // Busca chaves e referências no estoque (allKeys + PC-... refs)
+  const fetchStockKeys = useCallback(async (q: string): Promise<ComboOption[]> => {
+    const upper = q.toUpperCase();
+    const fromKeys = allKeys
+      .filter(k => k.chave_peca.includes(upper))
+      .slice(0, 10)
+      .map(k => ({ label: k.chave_peca, sub: k.descricao ?? undefined }));
+    // Busca referências PC-... no estoque operacional
+    const r = await fetch(`/api/referencias/stock-keys?q=${encodeURIComponent(q)}`).catch(() => null);
+    const fromStock: ComboOption[] = [];
+    if (r?.ok) {
+      const d = await r.json() as { items: Array<{ reference: string; chave_peca: string }> };
+      for (const item of d.items) {
+        if (!fromKeys.some(k => k.label === item.chave_peca)) {
+          fromStock.push({ label: item.reference, sub: item.chave_peca });
+        }
+      }
+    }
+    return [...fromKeys, ...fromStock];
+  }, [allKeys]);
 
   async function load(query?: string) {
     setLoading(true);
@@ -241,39 +381,55 @@ function CompatSection({ allKeys, isAdmin }: { allKeys: PartKey[]; isAdmin: bool
       {err && <div className="alert alert-err">{err}</div>}
 
       {showForm && (
-        <div style={{ border: "1px solid var(--border)", borderRadius: "var(--r)", padding: "0.75rem 1rem", marginBottom: "0.75rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-          <div className="form-group" style={{ margin: 0 }}>
-            <label>Chave solicitada (como aparece no pedido)</label>
-            <input
-              value={reqChave}
-              onChange={e => setReqChave(e.target.value.toUpperCase())}
-              placeholder="ex: BATERIA IPHONE 12"
-              list="compat-keys-list"
-            />
+        <div style={{ border: "1px solid var(--border)", borderRadius: "var(--r)", padding: "0.875rem 1rem", marginBottom: "0.75rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: "0.75rem", alignItems: "end" }}>
+            <div className="form-group" style={{ margin: 0 }}>
+              <label style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Chave pedida pelos casos
+              </label>
+              <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginBottom: "0.35rem" }}>
+                Como aparece nos pedidos de peça (ex: BATERIA IPHONE 12)
+              </div>
+              <ChaveCombobox
+                value={reqChave}
+                onChange={setReqChave}
+                placeholder="Buscar ou digitar chave dos casos…"
+                fetchOptions={fetchRequestedKeys}
+                disabled={saving}
+              />
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", color: "var(--accent)", fontWeight: 700, fontSize: "1.1rem", paddingBottom: "0.1rem" }}>
+              →
+            </div>
+
+            <div className="form-group" style={{ margin: 0 }}>
+              <label style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Chave ou referência no estoque
+              </label>
+              <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginBottom: "0.35rem" }}>
+                Chave do estoque ou código PC-… (ex: BATERIA IPHONE 12/12 PRO ou PC-QA15247)
+              </div>
+              <ChaveCombobox
+                value={stockChave}
+                onChange={setStockChave}
+                placeholder="Buscar chave do estoque ou ref PC-…"
+                fetchOptions={fetchStockKeys}
+                disabled={saving}
+              />
+            </div>
           </div>
-          <div className="form-group" style={{ margin: 0 }}>
-            <label>Chave compatível no estoque (canônica do grupo)</label>
-            <input
-              value={stockChave}
-              onChange={e => setStockChave(e.target.value.toUpperCase())}
-              placeholder="ex: BATERIA IPHONE 12/12 PRO"
-              list="compat-keys-list"
-            />
-          </div>
-          <datalist id="compat-keys-list">
-            {allKeys.map((k, i) => (
-              <option key={k.id ?? `i-${i}`} value={k.chave_peca}>{k.descricao ?? ""}</option>
-            ))}
-          </datalist>
+
           <div className="form-group" style={{ margin: 0 }}>
             <label>Justificativa (opcional)</label>
             <input value={reason} onChange={e => setReason(e.target.value)} placeholder="ex: mesma peça física, embalagem 12/12 Pro" />
           </div>
+
           <div className="gap-row">
             <button className="btn btn-primary btn-sm" onClick={() => void create()} disabled={saving || !reqChave.trim() || !stockChave.trim()}>
               {saving ? "Salvando…" : "Criar vínculo"}
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => setShowForm(false)}>Cancelar</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setShowForm(false); setReqChave(""); setStockChave(""); setReason(""); }}>Cancelar</button>
           </div>
         </div>
       )}
