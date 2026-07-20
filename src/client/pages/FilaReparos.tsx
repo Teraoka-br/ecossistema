@@ -1012,13 +1012,6 @@ export function FilaReparos() {
         </div>
       ) : (
         <>
-          {filter === "VERIFICAR" ? (
-            <VerificarList
-              items={items}
-              onCaseClick={setSelectedId}
-              onRefresh={loadItems}
-            />
-          ) : (
             <div className="repair-grid">
               {items.map((item) => (
                 <RepairCard
@@ -1031,7 +1024,6 @@ export function FilaReparos() {
                 />
               ))}
             </div>
-          )}
 
           {totalPages > 1 && (
             <div className="pagination">
