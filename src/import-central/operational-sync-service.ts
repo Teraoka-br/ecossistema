@@ -699,6 +699,13 @@ export function applyPeacsToRepairCases(db: Db): PeacsSyncResult {
     throw err;
   }
 
+  // Casos em EM_ANALISE que continuam sem preço → VERIFICAR
+  db.prepare(`
+    UPDATE repair_cases
+    SET workflow_status = 'VERIFICAR', updated_at = datetime('now')
+    WHERE workflow_status = 'EM_ANALISE' AND estimated_sale IS NULL
+  `).run();
+
   return result;
 }
 
