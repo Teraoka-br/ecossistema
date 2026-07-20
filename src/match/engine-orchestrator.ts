@@ -165,7 +165,7 @@ export async function runRepairMatchEngine(
         WHERE rmcr.run_id = ?
           AND rmcr.eligible = 1
           AND rc.workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
-        ORDER BY rmcr.score ASC NULLS LAST
+        ORDER BY rmcr.margin_points ASC NULLS LAST, rmcr.score ASC
         LIMIT ?
       `).all(runId, vagas) as { repair_case_id: number }[]).map(r => r.repair_case_id);
 
