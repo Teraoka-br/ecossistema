@@ -149,7 +149,28 @@ export async function runRepairMatchEngine(
     const output = calculateMatch(input);
     const persisted = persistDecisions(db, runId, input, output.cases);
 
-    // Piores 10 pontuadores elegíveis → VENDA_ESTADO
+    // Piores 10 pontuadores → VENDA_ESTADO (sempre exatamente 10, sem acúmulo)
+    // 1. Reverter os do run anterior que ainda estão em VENDA_ESTADO
+    const prevRun = db.prepare(
+      "SELECT id FROM repair_match_runs WHERE status='COMPLETED' AND id < ? ORDER BY id DESC LIMIT 1"
+    ).get(runId) as { id: number } | undefined;
+
+    if (prevRun) {
+      const prevWorstIds = (db.prepare(`
+        SELECT repair_case_id FROM repair_match_case_results WHERE run_id = ?
+        ORDER BY score ASC NULLS LAST LIMIT 10
+      `).all(prevRun.id) as { repair_case_id: number }[]).map(r => r.repair_case_id);
+
+      if (prevWorstIds.length > 0) {
+        const ph = prevWorstIds.map(() => "?").join(",");
+        db.prepare(
+          `UPDATE repair_cases SET workflow_status = 'EM_ANALISE', updated_at = datetime('now')
+           WHERE id IN (${ph}) AND workflow_status = 'VENDA_ESTADO'`
+        ).run(...prevWorstIds);
+      }
+    }
+
+    // 2. Definir os 10 piores do run atual
     const worstIds = (db.prepare(`
       SELECT rmcr.repair_case_id
       FROM repair_match_case_results rmcr
@@ -162,10 +183,10 @@ export async function runRepairMatchEngine(
     `).all(runId) as { repair_case_id: number }[]).map(r => r.repair_case_id);
 
     if (worstIds.length > 0) {
-      const placeholders = worstIds.map(() => "?").join(",");
+      const ph = worstIds.map(() => "?").join(",");
       db.prepare(
         `UPDATE repair_cases SET workflow_status = 'VENDA_ESTADO', updated_at = datetime('now')
-         WHERE id IN (${placeholders})`
+         WHERE id IN (${ph})`
       ).run(...worstIds);
     }
 
