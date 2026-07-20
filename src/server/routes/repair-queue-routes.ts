@@ -664,6 +664,38 @@ repairQueueRouter.post("/fila-reparos/:id/close", requireAuth, requireOperator, 
   } catch (err) { next(err); }
 });
 
+// ─── Candidatos a VENDA_ESTADO (piores pontuadores do último run) ─────────
+
+repairQueueRouter.get("/fila-reparos/venda-estado-candidatos", requireAuth, requireOperator, (req, res, next) => {
+  try {
+    const db = getDb();
+    const limit = Math.min(parseInt((req.query.limit as string) ?? "10", 10) || 10, 50);
+
+    const lastRun = db.prepare(
+      "SELECT id FROM repair_match_runs WHERE status='COMPLETED' ORDER BY id DESC LIMIT 1",
+    ).get() as { id: number } | undefined;
+
+    if (!lastRun) return res.json({ candidatos: [], runId: null });
+
+    const rows = db.prepare(`
+      SELECT
+        rc.id, rc.brand, rc.model, rc.capacity, rc.color, rc.imei,
+        rc.workflow_status, rc.cost, rc.estimated_sale, rc.margin,
+        rc.age_days, rc.deposito_atual, rc.os,
+        rmcr.score, rmcr.margin_points, rmcr.age_points
+      FROM repair_match_case_results rmcr
+      JOIN repair_cases rc ON rc.id = rmcr.repair_case_id
+      WHERE rmcr.run_id = ?
+        AND rmcr.eligible = 1
+        AND rc.workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
+      ORDER BY rmcr.score ASC NULLS LAST
+      LIMIT ?
+    `).all(lastRun.id, limit) as Record<string, unknown>[];
+
+    res.json({ candidatos: rows, runId: lastRun.id });
+  } catch (err) { next(err); }
+});
+
 // ─── Override manual de fase ──────────────────────────────────────────────
 
 repairQueueRouter.post("/fila-reparos/:id/override-status", requireAuth, requirePermissionOrAdmin("OVERRIDE_REPAIR_STATUS"), (req, res, next) => {

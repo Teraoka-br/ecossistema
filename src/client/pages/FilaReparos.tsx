@@ -3,7 +3,7 @@ import {
   Clock, Wrench, Package, AlertTriangle, CheckCircle2, ChevronRight,
   Star, RefreshCw, X, UserCheck, Loader2,
   PackageCheck, ShoppingBag, Eye, Boxes, Download, XCircle, MapPin,
-  CheckCheck, SendToBack,
+  CheckCheck, SendToBack, Tag,
 } from "lucide-react";
 import { RepairDrawer } from "../components/RepairDrawer.js";
 import { useAuth } from "../auth.js";
@@ -428,6 +428,7 @@ export function FilaReparos() {
   const [depositoMap, setDepositoMap] = useState<Record<string, string>>({});
   const [showTechModal, setShowTechModal] = useState(false);
   const [techDirectFeedback, setTechDirectFeedback] = useState<string | null>(null);
+  const [vendaCandidatos, setVendaCandidatos] = useState<QueueItem[]>([]);
   const { user } = useAuth();
 
   useEffect(() => {
@@ -491,6 +492,14 @@ export function FilaReparos() {
     void loadEngine();
     void loadSummary();
   }, [loadItems, loadEngine, loadSummary]);
+
+  useEffect(() => {
+    if (filter !== "VENDA_ESTADO") return;
+    fetch("/api/fila-reparos/venda-estado-candidatos?limit=10")
+      .then(r => r.ok ? r.json() : { candidatos: [] })
+      .then((d: { candidatos: QueueItem[] }) => setVendaCandidatos(d.candidatos))
+      .catch(() => {});
+  }, [filter]);
 
   const prevEngineStatusRef = useRef<string | null>(null);
   useEffect(() => {
@@ -833,6 +842,32 @@ export function FilaReparos() {
                 />
               ))}
             </div>
+
+          {filter === "VENDA_ESTADO" && vendaCandidatos.length > 0 && (
+            <div style={{ marginTop: "2rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                <Tag size={14} style={{ color: "var(--warn-text)" }} />
+                <span style={{ fontWeight: 600, fontSize: "0.82rem", color: "var(--warn-text)" }}>
+                  Candidatos a venda no estado
+                </span>
+                <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                  — piores {vendaCandidatos.length} pontuadores do último run do motor
+                </span>
+              </div>
+              <div className="repair-grid">
+                {vendaCandidatos.map((item) => (
+                  <RepairCard
+                    key={`cand-${item.id}`}
+                    item={item}
+                    selected={false}
+                    onToggle={() => {}}
+                    onClick={() => setSelectedId(item.id)}
+                    depositoMap={depositoMap}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
 
           {totalPages > 1 && (
             <div className="pagination">
