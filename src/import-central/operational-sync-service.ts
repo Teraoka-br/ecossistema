@@ -598,6 +598,18 @@ export function applyBipagemToStock(db: Db, importId: number): BipagemStockResul
 // 5. PEACS → repair_cases (estimated_sale, margin)
 // ---------------------------------------------------------------------------
 
+/** Remove sufixos do Datasys e cor de uma descrição de produto, mantendo modelo+capacidade. */
+function stripDescrSuffix(s: string): string {
+  // Remove " - OPEN", " - NOVO", " OPEN", " NOVO" e variações no final
+  return s.replace(/\s*[-–]?\s*(OPEN|NOVO|SEMINOVO|OUTLET)\s*$/i, "").trim();
+}
+
+/** Extrai capacidade (ex: "64GB", "128GB") de uma string de descrição. */
+function extractCapacity(s: string): string | null {
+  const m = s.match(/\b(\d+\s*(?:GB|TB))\b/i);
+  return m ? m[1].replace(/\s+/, "").toUpperCase() : null;
+}
+
 export function applyPeacsToRepairCases(db: Db): PeacsSyncResult {
   const result: PeacsSyncResult = { atualizados: 0, semCorrespondencia: 0, ambiguos: 0 };
 
@@ -610,39 +622,76 @@ export function applyPeacsToRepairCases(db: Db): PeacsSyncResult {
 
   if (catalogMap.size === 0) return result;
 
-  // Para cada repair_case com brand e model, tentar match
-  const cases = db.prepare(
-    `SELECT id, brand, model, cost FROM repair_cases WHERE brand IS NOT NULL AND model IS NOT NULL`,
-  ).all() as { id: number; brand: string; model: string; cost: number | null }[];
+  // Join com rel_seriais_current para pegar codigo_comercial (col F) e descricao (col E)
+  // Não sobrescreve estimated_sale já preenchido manualmente
+  const cases = db.prepare(`
+    SELECT rc.id, rc.cost, rc.estimated_sale,
+           rsc.codigo_comercial, rsc.descricao
+    FROM repair_cases rc
+    LEFT JOIN rel_seriais_current rsc ON rsc.imei_norm = rc.imei_norm
+    WHERE rc.imei_norm IS NOT NULL
+  `).all() as {
+    id: number;
+    cost: number | null;
+    estimated_sale: number | null;
+    codigo_comercial: string | null;
+    descricao: string | null;
+  }[];
 
   const updateCase = db.prepare(
     `UPDATE repair_cases SET estimated_sale = ?, margin = ?, updated_at = datetime('now') WHERE id = ?`,
   );
 
+  function tryMatch(key: string): number | null {
+    if (catalogMap.has(key)) return catalogMap.get(key)!;
+    return null;
+  }
+
   db.prepare("BEGIN").run();
   try {
     for (const rc of cases) {
-      const key = normalizeKey(`${rc.brand} ${rc.model}`);
-      if (catalogMap.has(key)) {
-        const sale = catalogMap.get(key)!;
-        const margin = rc.cost !== null ? sale - rc.cost : null;
-        updateCase.run(sale, margin, rc.id);
-        result.atualizados++;
-      } else {
-        // Verificar match por prefixo (modelo sem capacidade) — busca simples
-        const partialKey = key.split(/\s+/).slice(0, 2).join(" ");
-        const matches = [...catalogMap.entries()].filter(([k]) => k.startsWith(partialKey));
-        if (matches.length === 1) {
-          const sale = matches[0][1];
-          const margin = rc.cost !== null ? sale - rc.cost : null;
-          updateCase.run(sale, margin, rc.id);
-          result.atualizados++;
-        } else if (matches.length > 1) {
-          result.ambiguos++;
-        } else {
-          result.semCorrespondencia++;
+      // Nunca sobrescreve valor já preenchido
+      if (rc.estimated_sale !== null) continue;
+
+      const codComercial = rc.codigo_comercial ?? "";
+      const descricao    = rc.descricao ?? "";
+
+      if (!codComercial && !descricao) { result.semCorrespondencia++; continue; }
+
+      // 1. Chave primária: codigo_comercial limpo (col F — sem cor)
+      const baseKey = normalizeKey(stripDescrSuffix(codComercial));
+
+      // 2. Tentar match direto (codigo_comercial já tem capacidade)
+      let sale = tryMatch(baseKey);
+
+      // 3. Se não casou, o codigo_comercial pode não ter capacidade (ex: "SAMSUNG GALAXY A12")
+      //    → extrair capacidade da descricao (col E) e tentar com capacidade
+      if (sale === null && descricao) {
+        const cap = extractCapacity(descricao);
+        if (cap) {
+          const keyWithCap = normalizeKey(`${stripDescrSuffix(codComercial)} ${cap}`);
+          sale = tryMatch(keyWithCap);
         }
       }
+
+      // 4. Fallback: match por prefixo no catálogo (ambíguo → pular)
+      if (sale === null) {
+        const prefixKey = baseKey.split(/\s+/).slice(0, 3).join(" ");
+        const matches = [...catalogMap.entries()].filter(([k]) => k.startsWith(prefixKey));
+        if (matches.length === 1) {
+          sale = matches[0][1];
+        } else if (matches.length > 1) {
+          result.ambiguos++;
+          continue;
+        } else {
+          result.semCorrespondencia++;
+          continue;
+        }
+      }
+
+      const margin = rc.cost !== null ? sale - rc.cost : null;
+      updateCase.run(sale, margin, rc.id);
+      result.atualizados++;
     }
     db.prepare("COMMIT").run();
   } catch (err) {
