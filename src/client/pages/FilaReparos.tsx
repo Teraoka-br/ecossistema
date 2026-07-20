@@ -191,14 +191,19 @@ function RepairCard({
               {modelStr || "Modelo não identificado"}
             </span>
           </div>
-          {/* IMEI + OS + idade + origem */}
+          {/* OS em destaque */}
+          {item.os && (
+            <div style={{ fontSize: "0.72rem", fontWeight: 600, color: "var(--accent)", marginBottom: "0.1rem", letterSpacing: "0.03em" }}>
+              OS {item.os}
+            </div>
+          )}
+          {/* IMEI + idade + origem */}
           <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", fontSize: "0.73rem", color: "var(--text-muted)" }}>
             {item.imei && (
               <span style={{ fontFamily: "monospace", letterSpacing: "0.02em" }} title="IMEI completo">
                 {item.imei}
               </span>
             )}
-            {item.os && <span>OS {item.os}</span>}
             {item.ageDays != null && (
               <span style={{ color: isOld ? "var(--warn-text)" : "var(--text-muted)", fontWeight: isOld ? 600 : 400 }}>
                 {item.ageDays}d

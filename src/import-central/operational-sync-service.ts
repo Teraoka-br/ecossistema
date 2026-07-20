@@ -137,14 +137,16 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
        s.filial_atual,                                -- NULL se ausente do Com Saldo
        COALESCE(c.disponivel, s.disponivel)           AS disponivel,
        COALESCE(c.fabricante, s.fabricante)           AS fabricante,
-       COALESCE(c.descricao, s.descricao)             AS descricao
+       COALESCE(c.descricao, s.descricao)             AS descricao,
+       c.codigo_comercial                             AS codigo_comercial
      FROM rel_seriais_current c
      LEFT JOIN rel_seriais_saldo_current s ON s.imei_norm = c.imei_norm
      UNION
      SELECT
        s.imei_norm, s.serial,
        s.deposito_atual, s.filial_atual,
-       s.disponivel, s.fabricante, s.descricao
+       s.disponivel, s.fabricante, s.descricao,
+       NULL AS codigo_comercial
      FROM rel_seriais_saldo_current s
      WHERE s.imei_norm NOT IN (SELECT imei_norm FROM rel_seriais_current WHERE imei_norm IS NOT NULL)`,
   ).all() as {
@@ -155,6 +157,7 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
     disponivel: string | null;
     fabricante: string | null;
     descricao: string | null;
+    codigo_comercial: string | null;
   }[];
 
   // Mapa depósito (uppercase) → staff_id para direcionamento automático
@@ -298,10 +301,15 @@ export function applyRelSeriaisToRepairCases(db: Db, _importId?: number): RelSer
       updateLocation.run(row.deposito_atual, row.filial_atual, row.disponivel, rc.id);
       result.atualizados++;
 
-      // Enriquecer marca/modelo somente quando vazio no cadastro interno
+      // Enriquecer marca/modelo: sempre sobrescreve se modelo atual parece código interno (APSN)
       const sourceBrand = row.fabricante ?? null;
-      const sourceModel = row.descricao ?? null;
-      if ((sourceBrand && !rc.brand) || (sourceModel && !rc.model)) {
+      const rawModel = row.codigo_comercial ?? row.descricao ?? null;
+      // codigo_comercial inclui a marca no início ("APPLE IPHONE 13 128GB") — remover prefixo
+      const sourceModel = rawModel && sourceBrand && rawModel.toUpperCase().startsWith(sourceBrand.toUpperCase())
+        ? rawModel.substring(sourceBrand.length).trim()
+        : rawModel;
+      const modelIsInternal = !rc.model || /^'?APSN/i.test(rc.model);
+      if ((sourceBrand && (!rc.brand || modelIsInternal)) || (sourceModel && modelIsInternal)) {
         enrichBrandModel.run(sourceBrand, sourceModel, rc.id);
         result.marcaModeloEnriquecidos++;
       }
