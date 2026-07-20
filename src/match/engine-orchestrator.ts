@@ -149,45 +149,33 @@ export async function runRepairMatchEngine(
     const output = calculateMatch(input);
     const persisted = persistDecisions(db, runId, input, output.cases);
 
-    // Piores 10 pontuadores → VENDA_ESTADO (sempre exatamente 10, sem acúmulo)
-    // 1. Reverter os do run anterior que ainda estão em VENDA_ESTADO
-    const prevRun = db.prepare(
-      "SELECT id FROM repair_match_runs WHERE status='COMPLETED' AND id < ? ORDER BY id DESC LIMIT 1"
-    ).get(runId) as { id: number } | undefined;
+    // Manter exatamente 10 casos em VENDA_ESTADO (vagas abertas por conclusão manual)
+    // VENDA_ESTADO é permanente — nunca revertido automaticamente.
+    // A cada run, preenche vagas com os próximos piores pontuadores.
+    const activeVendaCount = (db.prepare(
+      "SELECT COUNT(*) AS n FROM repair_cases WHERE workflow_status = 'VENDA_ESTADO'"
+    ).get() as { n: number }).n;
 
-    if (prevRun) {
-      const prevWorstIds = (db.prepare(`
-        SELECT repair_case_id FROM repair_match_case_results WHERE run_id = ?
-        ORDER BY score ASC NULLS LAST LIMIT 10
-      `).all(prevRun.id) as { repair_case_id: number }[]).map(r => r.repair_case_id);
+    const vagas = Math.max(0, 10 - activeVendaCount);
+    if (vagas > 0) {
+      const toAdd = (db.prepare(`
+        SELECT rmcr.repair_case_id
+        FROM repair_match_case_results rmcr
+        JOIN repair_cases rc ON rc.id = rmcr.repair_case_id
+        WHERE rmcr.run_id = ?
+          AND rmcr.eligible = 1
+          AND rc.workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
+        ORDER BY rmcr.score ASC NULLS LAST
+        LIMIT ?
+      `).all(runId, vagas) as { repair_case_id: number }[]).map(r => r.repair_case_id);
 
-      if (prevWorstIds.length > 0) {
-        const ph = prevWorstIds.map(() => "?").join(",");
+      if (toAdd.length > 0) {
+        const ph = toAdd.map(() => "?").join(",");
         db.prepare(
-          `UPDATE repair_cases SET workflow_status = 'EM_ANALISE', updated_at = datetime('now')
-           WHERE id IN (${ph}) AND workflow_status = 'VENDA_ESTADO'`
-        ).run(...prevWorstIds);
+          `UPDATE repair_cases SET workflow_status = 'VENDA_ESTADO', updated_at = datetime('now')
+           WHERE id IN (${ph})`
+        ).run(...toAdd);
       }
-    }
-
-    // 2. Definir os 10 piores do run atual
-    const worstIds = (db.prepare(`
-      SELECT rmcr.repair_case_id
-      FROM repair_match_case_results rmcr
-      JOIN repair_cases rc ON rc.id = rmcr.repair_case_id
-      WHERE rmcr.run_id = ?
-        AND rmcr.eligible = 1
-        AND rc.workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
-      ORDER BY rmcr.score ASC NULLS LAST
-      LIMIT 10
-    `).all(runId) as { repair_case_id: number }[]).map(r => r.repair_case_id);
-
-    if (worstIds.length > 0) {
-      const ph = worstIds.map(() => "?").join(",");
-      db.prepare(
-        `UPDATE repair_cases SET workflow_status = 'VENDA_ESTADO', updated_at = datetime('now')
-         WHERE id IN (${ph})`
-      ).run(...worstIds);
     }
 
     const inconsistentCount = input.advancedOnlyCases.filter((c) => c.workflowInconsistent).length;
