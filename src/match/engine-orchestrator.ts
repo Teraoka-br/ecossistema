@@ -16,6 +16,7 @@
 
 import type { Db } from "../db/database.js";
 import { calculateMatch, type CaseDecision } from "./calculate-match.js";
+import { applyPeacsToRepairCases } from "../import-central/operational-sync-service.js";
 import {
   loadActiveRuleStrict,
   loadEngineInput,
@@ -142,6 +143,8 @@ export async function runRepairMatchEngine(
   ).run();
 
   try {
+    applyPeacsToRepairCases(db);
+
     const input = loadEngineInput(db, rule);
     const output = calculateMatch(input);
     const persisted = persistDecisions(db, runId, input, output.cases);
