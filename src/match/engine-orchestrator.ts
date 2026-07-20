@@ -149,6 +149,26 @@ export async function runRepairMatchEngine(
     const output = calculateMatch(input);
     const persisted = persistDecisions(db, runId, input, output.cases);
 
+    // Piores 10 pontuadores elegíveis → VENDA_ESTADO
+    const worstIds = (db.prepare(`
+      SELECT rmcr.repair_case_id
+      FROM repair_match_case_results rmcr
+      JOIN repair_cases rc ON rc.id = rmcr.repair_case_id
+      WHERE rmcr.run_id = ?
+        AND rmcr.eligible = 1
+        AND rc.workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
+      ORDER BY rmcr.score ASC NULLS LAST
+      LIMIT 10
+    `).all(runId) as { repair_case_id: number }[]).map(r => r.repair_case_id);
+
+    if (worstIds.length > 0) {
+      const placeholders = worstIds.map(() => "?").join(",");
+      db.prepare(
+        `UPDATE repair_cases SET workflow_status = 'VENDA_ESTADO', updated_at = datetime('now')
+         WHERE id IN (${placeholders})`
+      ).run(...worstIds);
+    }
+
     const inconsistentCount = input.advancedOnlyCases.filter((c) => c.workflowInconsistent).length;
 
     const result = {
