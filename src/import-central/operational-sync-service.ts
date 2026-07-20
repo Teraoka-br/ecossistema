@@ -86,8 +86,9 @@ export function applyHisToRepairCases(db: Db, _importId?: number): HisSyncResult
   };
 
   const findCase = db.prepare(`SELECT id FROM repair_cases WHERE imei_norm = ? LIMIT 1`);
+  // Custo sempre sobrescreve com o valor mais recente do HIS (não usa COALESCE para cost)
   const updateCase = db.prepare(
-    `UPDATE repair_cases SET age_days = COALESCE(?, age_days), cost = COALESCE(?, cost),
+    `UPDATE repair_cases SET age_days = COALESCE(?, age_days), cost = ?,
        updated_at = datetime('now') WHERE id = ?`,
   );
 
@@ -116,6 +117,7 @@ export function applyHisToRepairCases(db: Db, _importId?: number): HisSyncResult
     throw err;
   }
 
+  recalcAllMargins(db);
   return result;
 }
 
@@ -595,6 +597,24 @@ export function applyBipagemToStock(db: Db, importId: number): BipagemStockResul
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Recálculo de margem global
+// ---------------------------------------------------------------------------
+
+/** Recalcula margin = estimated_sale - cost para todos os casos que têm ambos preenchidos. */
+export function recalcAllMargins(db: Db): number {
+  const result = db.prepare(`
+    UPDATE repair_cases
+    SET margin = estimated_sale - cost,
+        updated_at = datetime('now')
+    WHERE cost IS NOT NULL
+      AND estimated_sale IS NOT NULL
+      AND (margin IS NULL OR margin != estimated_sale - cost)
+  `).run();
+  return result.changes as number;
+}
+
+// ---------------------------------------------------------------------------
 // 5. PEACS → repair_cases (estimated_sale, margin)
 // ---------------------------------------------------------------------------
 
@@ -706,6 +726,7 @@ export function applyPeacsToRepairCases(db: Db): PeacsSyncResult {
     WHERE workflow_status = 'EM_ANALISE' AND estimated_sale IS NULL
   `).run();
 
+  recalcAllMargins(db);
   return result;
 }
 
