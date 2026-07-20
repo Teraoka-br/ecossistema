@@ -3,6 +3,16 @@ import type { Db } from "../db/database.js";
 export interface NecessidadeItem {
   chavePeca: string;
   qtdeNecessaria: number;
+  casesBlocked: number;
+  marginReleased: number | null;
+  saleReleased: number | null;
+}
+
+export interface LeverageResult {
+  combinedUnblocked: number;
+  costReleased: number | null;
+  saleReleased: number | null;
+  marginReleased: number | null;
 }
 
 export interface Cotacao {
@@ -32,8 +42,20 @@ export interface CotacaoItem {
 // ---------------------------------------------------------------------------
 
 export function listNecessidades(db: Db): NecessidadeItem[] {
+  type Row = {
+    chave_peca: string;
+    qtde_necessaria: number;
+    cases_blocked: number;
+    margin_released: number | null;
+    sale_released: number | null;
+  };
   return (db.prepare(`
-    SELECT pr.chave_peca, COUNT(*) AS qtde_necessaria
+    SELECT
+      pr.chave_peca,
+      COUNT(*)                          AS qtde_necessaria,
+      COUNT(DISTINCT pr.repair_case_id) AS cases_blocked,
+      SUM(rc.margin)                    AS margin_released,
+      SUM(rc.estimated_sale)            AS sale_released
     FROM part_requests pr
     JOIN repair_cases rc ON rc.id = pr.repair_case_id
     WHERE rc.workflow_status = 'PEDIR_PECA'
@@ -41,9 +63,124 @@ export function listNecessidades(db: Db): NecessidadeItem[] {
       AND pr.chave_peca IS NOT NULL
       AND pr.cancelled_at IS NULL
     GROUP BY pr.chave_peca
-    ORDER BY qtde_necessaria DESC, pr.chave_peca
-  `).all() as Array<{ chave_peca: string; qtde_necessaria: number }>)
-    .map(r => ({ chavePeca: r.chave_peca, qtdeNecessaria: r.qtde_necessaria }));
+    ORDER BY cases_blocked DESC, qtde_necessaria DESC, pr.chave_peca
+  `).all() as Row[])
+    .map(r => ({
+      chavePeca: r.chave_peca,
+      qtdeNecessaria: r.qtde_necessaria,
+      casesBlocked: r.cases_blocked,
+      marginReleased: r.margin_released ?? null,
+      saleReleased: r.sale_released ?? null,
+    }));
+}
+
+export interface CaseNeedingPart {
+  caseId: number;
+  imei: string;
+  brand: string | null;
+  model: string | null;
+  margin: number | null;
+  estimatedSale: number | null;
+  otherPartsNeeded: string[];
+  /** Se comprar só esta peça, status previsto do caso */
+  predictedStatus: "MATCH" | "MATCH_PARCIAL";
+}
+
+export function getCasesNeedingPart(db: Db, chavePeca: string): CaseNeedingPart[] {
+  type Row = {
+    case_id: number;
+    imei: string;
+    brand: string | null;
+    model: string | null;
+    margin: number | null;
+    estimated_sale: number | null;
+    total_pending: number;
+  };
+  const rows = db.prepare(`
+    SELECT
+      rc.id AS case_id,
+      rc.imei,
+      rc.brand,
+      rc.model,
+      rc.margin,
+      rc.estimated_sale,
+      COUNT(pr2.id) AS total_pending
+    FROM repair_cases rc
+    JOIN part_requests pr ON pr.repair_case_id = rc.id
+      AND pr.chave_peca = ?
+      AND pr.status = 'PEDIR_PECA'
+      AND pr.cancelled_at IS NULL
+    LEFT JOIN part_requests pr2 ON pr2.repair_case_id = rc.id
+      AND pr2.status = 'PEDIR_PECA'
+      AND pr2.cancelled_at IS NULL
+      AND pr2.chave_peca IS NOT NULL
+      AND pr2.chave_peca != ?
+    WHERE rc.workflow_status = 'PEDIR_PECA'
+    GROUP BY rc.id
+    ORDER BY rc.margin DESC NULLS LAST
+  `).all(chavePeca, chavePeca) as Row[];
+
+  return rows.map(r => {
+    const otherParts = r.total_pending > 0
+      ? (db.prepare(`
+          SELECT DISTINCT chave_peca FROM part_requests
+          WHERE repair_case_id = ?
+            AND status = 'PEDIR_PECA'
+            AND cancelled_at IS NULL
+            AND chave_peca IS NOT NULL
+            AND chave_peca != ?
+          ORDER BY chave_peca
+        `).all(r.case_id, chavePeca) as { chave_peca: string }[]).map(x => x.chave_peca)
+      : [];
+
+    return {
+      caseId: r.case_id,
+      imei: r.imei,
+      brand: r.brand,
+      model: r.model,
+      margin: r.margin ?? null,
+      estimatedSale: r.estimated_sale ?? null,
+      otherPartsNeeded: otherParts,
+      predictedStatus: otherParts.length === 0 ? "MATCH" : "MATCH_PARCIAL",
+    };
+  });
+}
+
+export function getLeverageData(db: Db, selectedParts: string[]): LeverageResult {
+  if (selectedParts.length === 0) {
+    return { combinedUnblocked: 0, costReleased: null, saleReleased: null, marginReleased: null };
+  }
+  const placeholders = selectedParts.map(() => "?").join(",");
+  type Row = {
+    cnt: number;
+    cost_released: number | null;
+    sale_released: number | null;
+    margin_released: number | null;
+  };
+  const row = db.prepare(`
+    SELECT
+      COUNT(DISTINCT rc.id)   AS cnt,
+      SUM(rc.cost)            AS cost_released,
+      SUM(rc.estimated_sale)  AS sale_released,
+      SUM(rc.margin)          AS margin_released
+    FROM repair_cases rc
+    WHERE rc.workflow_status = 'PEDIR_PECA'
+      AND NOT EXISTS (
+        SELECT 1 FROM part_requests pr2
+        WHERE pr2.repair_case_id = rc.id
+          AND pr2.status = 'PEDIR_PECA'
+          AND pr2.cancelled_at IS NULL
+          AND pr2.chave_peca IS NOT NULL
+          AND pr2.chave_peca NOT IN (${placeholders})
+      )
+  `).get(...selectedParts) as Row;
+
+  return {
+    combinedUnblocked: row.cnt ?? 0,
+    costReleased:   row.cost_released   ?? null,
+    saleReleased:   row.sale_released   ?? null,
+    marginReleased: row.margin_released ?? null,
+  };
 }
 
 // ---------------------------------------------------------------------------

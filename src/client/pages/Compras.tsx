@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   confirmReceipt, cancelPurchaseOrder, getPurchaseOrders,
   type PurchaseOrder,
@@ -6,14 +6,38 @@ import {
 import { ErrorBanner, Loading, fmtMoney } from "../ui.js";
 import {
   ShoppingCart, Package, CheckCircle2, X, Loader2, RefreshCw,
-  Download, Upload, FileText, Check, Ban, Search,
+  Download, Upload, FileText, Check, Ban, Search, Zap, ArrowRight, Info,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface NecessidadeItem { chavePeca: string; qtdeNecessaria: number; }
+interface NecessidadeItem {
+  chavePeca: string;
+  qtdeNecessaria: number;
+  casesBlocked: number;
+  marginReleased: number | null;
+  saleReleased: number | null;
+}
+
+interface LeverageResult {
+  combinedUnblocked: number;
+  costReleased: number | null;
+  saleReleased: number | null;
+  marginReleased: number | null;
+}
+
+interface CaseNeedingPart {
+  caseId: number;
+  imei: string;
+  brand: string | null;
+  model: string | null;
+  margin: number | null;
+  estimatedSale: number | null;
+  otherPartsNeeded: string[];
+  predictedStatus: "MATCH" | "MATCH_PARCIAL";
+}
 
 interface CotacaoItem {
   id: number; cotacaoId: number; chavePeca: string;
@@ -126,6 +150,36 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [leverage, setLeverage] = useState<LeverageResult | null>(null);
+  const [leverageLoading, setLeverageLoading] = useState(false);
+  const [detailPart, setDetailPart] = useState<string | null>(null);
+  const [detailCases, setDetailCases] = useState<CaseNeedingPart[] | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  async function openDetail(chavePeca: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    setDetailPart(chavePeca);
+    setDetailCases(null);
+    setDetailLoading(true);
+    try {
+      const r = await fetch(`/api/necessidades/detail/${encodeURIComponent(chavePeca)}`);
+      if (r.ok) setDetailCases(await r.json() as CaseNeedingPart[]);
+    } finally { setDetailLoading(false); }
+  }
+
+  const fetchLeverage = useCallback(async (parts: string[]) => {
+    if (parts.length === 0) { setLeverage(null); return; }
+    setLeverageLoading(true);
+    try {
+      const r = await fetch(`/api/necessidades/leverage?pecas=${encodeURIComponent(parts.join(","))}`);
+      if (r.ok) setLeverage(await r.json() as LeverageResult);
+    } finally { setLeverageLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => fetchLeverage(Array.from(selected)), 300);
+    return () => clearTimeout(t);
+  }, [selected, fetchLeverage]);
 
   const filtered = search.trim()
     ? items.filter(i => i.chavePeca.toLowerCase().includes(search.trim().toLowerCase()))
@@ -271,6 +325,73 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
     <div>
       {error && <ErrorBanner message={error} />}
 
+      {/* Painel de impacto — aparece quando há seleção */}
+      {selected.size > 0 && (
+        <div style={{
+          background: "linear-gradient(135deg, rgba(124,58,237,0.12) 0%, rgba(99,102,241,0.06) 100%)",
+          border: "1px solid rgba(124,58,237,0.3)",
+          borderRadius: "var(--r-lg)",
+          padding: "1rem 1.25rem",
+          marginBottom: "0.875rem",
+          display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", color: "var(--accent)" }}>
+            <Zap size={16} />
+            <span style={{ fontWeight: 700, fontSize: "0.82rem" }}>
+              {selected.size} peça{selected.size !== 1 ? "s" : ""} selecionada{selected.size !== 1 ? "s"  : ""}
+            </span>
+          </div>
+
+          <ArrowRight size={14} style={{ color: "var(--muted)", flexShrink: 0 }} />
+
+          {leverageLoading ? (
+            <Loader2 size={14} className="spin" style={{ color: "var(--muted)" }} />
+          ) : leverage ? (
+            <>
+              <div style={{ display: "flex", alignItems: "baseline", gap: "0.3rem" }}>
+                <span style={{ fontSize: "1.5rem", fontWeight: 800, color: leverage.combinedUnblocked > 0 ? "var(--ok-text)" : "var(--muted)", letterSpacing: "-0.03em" }}>
+                  {leverage.combinedUnblocked}
+                </span>
+                <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)", fontWeight: 500 }}>
+                  aparelh{leverage.combinedUnblocked !== 1 ? "os" : "o"} liberado{leverage.combinedUnblocked !== 1 ? "s" : ""}
+                </span>
+              </div>
+
+              {leverage.combinedUnblocked > 0 && (
+                <>
+                  <div style={{ width: 1, height: 32, background: "var(--border)", flexShrink: 0 }} />
+                  <div style={{ display: "flex", gap: "1.25rem", flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ fontSize: "0.62rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "0.15rem" }}>Venda est.</div>
+                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: "var(--info-text)", fontVariantNumeric: "tabular-nums" }}>
+                        {leverage.saleReleased != null ? fmtMoney(leverage.saleReleased) : "—"}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: "0.62rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "0.15rem" }}>Margem liberada</div>
+                      <div style={{ fontWeight: 700, fontSize: "0.9rem", color: leverage.marginReleased != null && leverage.marginReleased >= 0 ? "var(--ok-text)" : "var(--err-text)", fontVariantNumeric: "tabular-nums" }}>
+                        {leverage.marginReleased != null ? fmtMoney(leverage.marginReleased) : "—"}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {leverage.combinedUnblocked === 0 && (
+                <span style={{ fontSize: "0.78rem", color: "var(--muted)" }}>
+                  Nenhum aparelho tem <em>todas</em> as peças cobertas por esta seleção
+                </span>
+              )}
+            </>
+          ) : null}
+
+          <span style={{ flex: 1 }} />
+          <button className="btn btn-ghost btn-sm" style={{ flexShrink: 0 }} onClick={() => setSelected(new Set())}>
+            <X size={12} /> Limpar
+          </button>
+        </div>
+      )}
+
       {/* Busca + ações */}
       <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
         <div style={{ position: "relative", flex: "1 1 220px", minWidth: 180, maxWidth: 360 }}>
@@ -292,10 +413,10 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
         </span>
         <span style={{ flex: 1 }} />
         <button className="btn btn-ghost btn-sm" onClick={exportCotacao}>
-          <Download size={12} /> Exportar cotação{selected.size > 0 ? ` (${selected.size})` : ""}
+          <Download size={12} /> Exportar{selected.size > 0 ? ` (${selected.size})` : ""}
         </button>
         <label className="btn btn-primary btn-sm" style={{ cursor: "pointer" }}>
-          <Upload size={12} /> Importar cotação preenchida
+          <Upload size={12} /> Importar cotação
           <input ref={fileRef} type="file" accept=".csv" style={{ display: "none" }} onChange={onFileChange} />
         </label>
       </div>
@@ -308,27 +429,141 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
                 <input type="checkbox" checked={allSelected} onChange={toggleAll} />
               </th>
               <th style={{ padding: "0.5rem 0.75rem", textAlign: "left", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.05em" }}>CHAVE DA PEÇA</th>
-              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>QTDE NECESSÁRIA</th>
+              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>UNID.</th>
+              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>APARELHOS</th>
+              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>VENDA EST.</th>
+              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>MARGEM</th>
+              <th style={{ padding: "0.5rem 0.75rem", width: 32 }} />
             </tr>
           </thead>
           <tbody>
             {filtered.map((item, idx) => (
               <tr
                 key={item.chavePeca}
-                style={{ borderBottom: idx < filtered.length - 1 ? "1px solid var(--border)" : "none", cursor: "pointer",
-                  background: selected.has(item.chavePeca) ? "rgba(99,102,241,0.05)" : undefined }}
+                style={{
+                  borderBottom: idx < filtered.length - 1 ? "1px solid var(--border)" : "none",
+                  cursor: "pointer",
+                  background: selected.has(item.chavePeca) ? "rgba(99,102,241,0.06)" : undefined,
+                  transition: "background var(--transition)",
+                }}
                 onClick={() => toggle(item.chavePeca)}
               >
                 <td style={{ padding: "0.5rem 1rem" }}>
                   <input type="checkbox" checked={selected.has(item.chavePeca)} onChange={() => toggle(item.chavePeca)} onClick={e => e.stopPropagation()} />
                 </td>
                 <td style={{ padding: "0.5rem 0.75rem", fontFamily: "monospace", fontSize: "0.82rem" }}>{item.chavePeca}</td>
-                <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{item.qtdeNecessaria}</td>
+                <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{item.qtdeNecessaria}</td>
+                <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>
+                  <span style={{
+                    display: "inline-flex", alignItems: "center", gap: "0.3rem",
+                    fontWeight: 600, color: "var(--accent)", fontVariantNumeric: "tabular-nums",
+                  }}>
+                    <Zap size={11} style={{ opacity: 0.7 }} />
+                    {item.casesBlocked}
+                  </span>
+                </td>
+                <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.8rem", color: "var(--info-text)", fontVariantNumeric: "tabular-nums" }}>
+                  {item.saleReleased != null ? fmtMoney(item.saleReleased) : "—"}
+                </td>
+                <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.8rem", fontVariantNumeric: "tabular-nums",
+                  color: item.marginReleased != null && item.marginReleased >= 0 ? "var(--ok-text)" : item.marginReleased != null ? "var(--err-text)" : "var(--muted)" }}>
+                  {item.marginReleased != null ? fmtMoney(item.marginReleased) : "—"}
+                </td>
+                <td style={{ padding: "0.5rem 0.5rem", textAlign: "right" }}>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    style={{ padding: "0.2rem 0.4rem", opacity: 0.6 }}
+                    title="Ver aparelhos bloqueados"
+                    onClick={e => openDetail(item.chavePeca, e)}
+                  >
+                    <Info size={13} />
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {/* Modal detalhe de aparelhos bloqueados */}
+      {detailPart && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 1000,
+            background: "rgba(0,0,0,0.45)", display: "flex",
+            alignItems: "center", justifyContent: "center", padding: "1rem",
+          }}
+          onClick={() => setDetailPart(null)}
+        >
+          <div
+            className="card"
+            style={{ maxWidth: 640, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column", overflow: "hidden" }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+              <Zap size={15} style={{ color: "var(--accent)" }} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: "0.95rem" }}>Aparelhos bloqueados</div>
+                <div style={{ fontFamily: "monospace", fontSize: "0.78rem", color: "var(--text-2)", marginTop: "0.1rem" }}>{detailPart}</div>
+              </div>
+              <button className="btn btn-ghost btn-sm" onClick={() => setDetailPart(null)}><X size={14} /></button>
+            </div>
+            <div style={{ overflowY: "auto", flex: 1, padding: "0.75rem 0" }}>
+              {detailLoading && (
+                <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)" }}>
+                  <Loader2 size={18} style={{ animation: "spin 1s linear infinite" }} />
+                </div>
+              )}
+              {!detailLoading && detailCases !== null && detailCases.length === 0 && (
+                <div style={{ padding: "1.5rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                  Nenhum aparelho bloqueado nesta peça.
+                </div>
+              )}
+              {!detailLoading && detailCases !== null && detailCases.length > 0 && (
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
+                  <thead>
+                    <tr style={{ background: "var(--surface-alt)" }}>
+                      <th style={{ padding: "0.4rem 1.25rem", textAlign: "left", fontWeight: 600, fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>IMEI</th>
+                      <th style={{ padding: "0.4rem 0.75rem", textAlign: "left", fontWeight: 600, fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>APARELHO</th>
+                      <th style={{ padding: "0.4rem 0.75rem", textAlign: "right", fontWeight: 600, fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>MARGEM</th>
+                      <th style={{ padding: "0.4rem 0.75rem", textAlign: "left", fontWeight: 600, fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>OUTRAS PEÇAS</th>
+                      <th style={{ padding: "0.4rem 0.75rem", textAlign: "left", fontWeight: 600, fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>STATUS PREVISTO</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detailCases.map((c, i) => (
+                      <tr key={c.caseId} style={{ borderTop: i > 0 ? "1px solid var(--border)" : undefined }}>
+                        <td style={{ padding: "0.5rem 1.25rem", fontFamily: "monospace", fontSize: "0.75rem", color: "var(--text-2)" }}>{c.imei}</td>
+                        <td style={{ padding: "0.5rem 0.75rem" }}>{[c.brand, c.model].filter(Boolean).join(" ") || "—"}</td>
+                        <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontVariantNumeric: "tabular-nums",
+                          color: c.margin != null && c.margin >= 0 ? "var(--ok-text)" : c.margin != null ? "var(--err-text)" : "var(--muted)" }}>
+                          {c.margin != null ? fmtMoney(c.margin) : "—"}
+                        </td>
+                        <td style={{ padding: "0.5rem 0.75rem" }}>
+                          {c.otherPartsNeeded.length === 0
+                            ? <span style={{ color: "var(--ok-text)", fontSize: "0.75rem" }}>Nenhuma</span>
+                            : <span style={{ fontSize: "0.72rem", fontFamily: "monospace", color: "var(--warn-text)" }}>{c.otherPartsNeeded.join(", ")}</span>
+                          }
+                        </td>
+                        <td style={{ padding: "0.5rem 0.75rem" }}>
+                          <span style={{
+                            display: "inline-flex", alignItems: "center", gap: "0.3rem",
+                            fontSize: "0.72rem", fontWeight: 600,
+                            color: c.predictedStatus === "MATCH" ? "var(--ok-text)" : "var(--warn-text)",
+                          }}>
+                            {c.predictedStatus === "MATCH" ? <CheckCircle2 size={11} /> : <ArrowRight size={11} />}
+                            {c.predictedStatus === "MATCH" ? "MATCH completo" : "Match parcial"}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

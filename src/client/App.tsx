@@ -3,10 +3,11 @@ import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom"
 import {
   Wrench, List, ShoppingCart, Boxes, ScanBarcode,
   Users, Database, FileInput, LogOut,
-  PanelLeftClose, PanelLeftOpen, Stethoscope, Sliders, LayoutDashboard,
+  PanelLeftClose, PanelLeftOpen, Stethoscope, Sliders, LayoutDashboard, Tag,
 } from "lucide-react";
 import { AuthProvider, useAuth } from "./auth.js";
 import { BugReportWidget } from "./components/BugReportWidget.js";
+import { NotificationBell } from "./components/NotificationBell.js";
 // Login e Setup carregam sempre (necessários antes da autenticação)
 import { Login } from "./pages/Login.js";
 import { Setup } from "./pages/Setup.js";
@@ -119,6 +120,7 @@ function AuthenticatedShell() {
         </span>
         <BetaBanner />
         <span className="topbar-user">
+          <NotificationBell role={user.role as "ADMIN" | "OPERATOR" | "TECHNICIAN"} />
           <span>{user.displayName}</span>
           <span className="topbar-role">{roleLabel}</span>
           <button className="topbar-btn" onClick={logout} title="Sair">
@@ -133,61 +135,67 @@ function AuthenticatedShell() {
           {isTechnician ? (
             <div className="sidebar-section">
               <div className="sidebar-label">Meu trabalho</div>
-              <NavLink to="/inicio" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <LayoutDashboard size={15} /> Início
+              <NavLink to="/inicio" title="Início" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <LayoutDashboard size={15} /> <span className="nav-text">Início</span>
               </NavLink>
-              <NavLink to="/minha-fila" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <Wrench size={15} /> Minha fila
+              <NavLink to="/minha-fila" title="Minha fila" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                <Wrench size={15} /> <span className="nav-text">Minha fila</span>
               </NavLink>
             </div>
           ) : (
             <>
+              {isAdmin && (
+                <div className="sidebar-section">
+                  <div className="sidebar-label">Visão geral</div>
+                  <NavLink to="/admin/dashboards" title="Dashboards" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <LayoutDashboard size={15} /> <span className="nav-text">Dashboards</span>
+                  </NavLink>
+                </div>
+              )}
+
               <div className="sidebar-section">
                 <div className="sidebar-label">Operação</div>
-                <NavLink to="/fila-reparos" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <List size={15} /> Fila de reparos
+                <NavLink to="/fila-reparos" title="Fila de reparos" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <List size={15} /> <span className="nav-text">Fila de reparos</span>
                 </NavLink>
-                <NavLink to="/analise" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <Wrench size={15} /> Analisar aparelho
+                <NavLink to="/analise" title="Analisar aparelho" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <Wrench size={15} /> <span className="nav-text">Analisar aparelho</span>
                 </NavLink>
               </div>
 
               <div className="sidebar-section">
                 <div className="sidebar-label">Suprimentos</div>
-                <NavLink to="/compras" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <ShoppingCart size={15} /> Pedidos de peças
+                <NavLink to="/compras" title="Pedidos de peças" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <ShoppingCart size={15} /> <span className="nav-text">Pedidos de peças</span>
                 </NavLink>
-                <NavLink to="/estoque" end className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <Boxes size={15} /> Estoque
+                <NavLink to="/estoque" end title="Estoque" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <Boxes size={15} /> <span className="nav-text">Estoque</span>
                 </NavLink>
-                <NavLink to="/estoque/referencias" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`} style={{ paddingLeft: "2rem", fontSize: "0.85rem" }}>
-                  Referências de peças
+                <NavLink to="/estoque/referencias" title="Referências de peças" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`} style={{ paddingLeft: sidebarOpen ? "2rem" : undefined, fontSize: "0.82rem" }}>
+                  <Tag size={13} /> <span className="nav-text">Referências de peças</span>
                 </NavLink>
-                <NavLink to="/bipagem" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <ScanBarcode size={15} /> Contagem
+                <NavLink to="/bipagem" title="Contagem" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                  <ScanBarcode size={15} /> <span className="nav-text">Contagem</span>
                 </NavLink>
               </div>
 
               {isAdmin && (
                 <div className="sidebar-section">
                   <div className="sidebar-label">Administração</div>
-                  <NavLink to="/admin/dashboards" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <LayoutDashboard size={15} /> Dashboards
+                  <NavLink to="/admin/dados" title="Dados" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Database size={15} /> <span className="nav-text">Dados</span>
                   </NavLink>
-                  <NavLink to="/admin/dados" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Database size={15} /> Dados
+                  <NavLink to="/admin/usuarios" title="Pessoas e Usuários" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Users size={15} /> <span className="nav-text">Pessoas e Usuários</span>
                   </NavLink>
-                  <NavLink to="/admin/usuarios" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Users size={15} /> Pessoas e Usuários
+                  <NavLink to="/admin/regras-match" title="Regras do Match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Sliders size={15} /> <span className="nav-text">Regras do Match</span>
                   </NavLink>
-                  <NavLink to="/admin/regras-match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Sliders size={15} /> Regras do Match
+                  <NavLink to="/diagnostico" title="Diagnóstico" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <Stethoscope size={15} /> <span className="nav-text">Diagnóstico</span>
                   </NavLink>
-                  <NavLink to="/diagnostico" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Stethoscope size={15} /> Diagnóstico
-                  </NavLink>
-                  <NavLink to="/importar" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <FileInput size={15} /> Importação inicial
+                  <NavLink to="/importar" title="Importação inicial" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
+                    <FileInput size={15} /> <span className="nav-text">Importação inicial</span>
                   </NavLink>
                 </div>
               )}
@@ -198,7 +206,7 @@ function AuthenticatedShell() {
         <main className="main-content">
           <Suspense fallback={<LoadingScreen />}>
           <Routes>
-            <Route path="/" element={<Navigate to={isTechnician ? "/inicio" : "/fila-reparos"} replace />} />
+            <Route path="/" element={<Navigate to={isTechnician ? "/inicio" : isAdmin ? "/admin/dashboards" : "/fila-reparos"} replace />} />
             <Route path="/inicio" element={<TecnicoHome />} />
             <Route path="/minha-fila" element={<TecnicoFila />} />
             <Route path="/fila-reparos" element={<FilaReparos />} />
@@ -222,7 +230,7 @@ function AuthenticatedShell() {
             <Route path="/admin/dados" element={<AdminDados />} />
             <Route path="/admin/dashboards" element={<AdminDashboards />} />
             <Route path="/admin/regras-match" element={<AdminMatchRules />} />
-            <Route path="*" element={<Navigate to={isTechnician ? "/inicio" : "/fila-reparos"} replace />} />
+            <Route path="*" element={<Navigate to={isTechnician ? "/inicio" : isAdmin ? "/admin/dashboards" : "/fila-reparos"} replace />} />
           </Routes>
           </Suspense>
         </main>
@@ -248,7 +256,7 @@ function AppShell() {
           !setupDone
             ? <Navigate to="/setup" replace />
             : user
-              ? <Navigate to={user.role === "TECHNICIAN" ? "/inicio" : "/fila-reparos"} replace />
+              ? <Navigate to={user.role === "TECHNICIAN" ? "/inicio" : user.role === "ADMIN" ? "/admin/dashboards" : "/fila-reparos"} replace />
               : <Login />
         }
       />

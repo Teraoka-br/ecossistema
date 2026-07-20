@@ -59,14 +59,14 @@ export function getDashboardOverview(db: Db): OverviewData {
 
   // -- Cards (usa metricas base compartilhadas com snapshot-service) -----------
   const base = getBaseMetrics(db);
-  const { workflowMap: wf, partMap: pr, aptoReparo, comTecnico, emAnalise, finalizados } = base;
-  const aguardandoPeca = (wf.get("AGUARDANDO_PECA") ?? 0) + (pr.get("AGUARDANDO_RECEBIMENTO") ?? 0);
+  const { workflowMap: wf, aptoReparo, comTecnico, emAnalise, finalizados } = base;
+  const aguardandoPeca = (wf.get("PEDIR_PECA") ?? 0) + (wf.get("AGUARDANDO_RECEBIMENTO") ?? 0);
 
   const cards: CardCounts = {
-    match: pr.get("MATCH") ?? 0,
-    matchParcial: pr.get("MATCH_PARCIAL") ?? 0,
+    match: wf.get("MATCH") ?? 0,
+    matchParcial: wf.get("MATCH_PARCIAL") ?? 0,
     aptoReparo,
-    verificar: pr.get("VERIFICAR") ?? 0,
+    verificar: wf.get("VERIFICAR") ?? 0,
     emAnalise,
     aguardandoPeca,
     comTecnico,
@@ -201,7 +201,7 @@ export function getDashboardOverview(db: Db): OverviewData {
        FROM repair_cases rc
        LEFT JOIN staff_members st ON st.id = rc.directed_technician_id
        WHERE rc.directed_technician_id IS NOT NULL
-         AND rc.workflow_status NOT IN ('ENTREGUE','CANCELADO')
+         AND rc.workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
        GROUP BY rc.directed_technician_id`,
     )
     .all() as TechRow[];

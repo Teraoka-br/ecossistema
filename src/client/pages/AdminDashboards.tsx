@@ -8,6 +8,7 @@ import { TechnicianBlock } from "../components/dashboard/TechnicianBlock.js";
 import { CountingBlock } from "../components/dashboard/CountingBlock.js";
 import { AlertsBlock } from "../components/dashboard/AlertsBlock.js";
 import { IssueReportsBlock } from "../components/dashboard/IssueReportsBlock.js";
+import { FinancialBlock } from "../components/dashboard/FinancialBlock.js";
 
 const PERIODS = [
   { label: "Hoje", value: 1 },
@@ -77,12 +78,16 @@ export function AdminDashboards() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
 
+        {/* ── KPIs financeiros ───────────────────────────────────── */}
+        <FinancialBlock financial={data.financial} />
+
         {/* ── Cards operacionais ─────────────────────────────────── */}
         <OperationalCards
           current={data.current}
           comparison={data.comparison}
           selected={selected}
           onSelect={setSelected}
+          financial={data.financialByBucket}
         />
 
         {/* ── Grafico temporal ───────────────────────────────────── */}
@@ -90,13 +95,13 @@ export function AdminDashboards() {
 
         {/* ── Panorama + Tecnicos ────────────────────────────────── */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
-          <PanoramaBlock panorama={data.panorama} stock={data.stock} />
+          <PanoramaBlock panorama={data.panorama} stock={data.stock} financial={data.financial} />
           <TechnicianBlock technicians={data.technicians} />
         </div>
 
         {/* ── Contagens + Alertas ────────────────────────────────── */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
-          <CountingBlock counting={data.counting} />
+          <CountingBlock counting={data.counting} onRefresh={load} />
           <AlertsBlock alerts={data.alerts} />
         </div>
 

@@ -714,7 +714,7 @@ export function Referencias() {
             </div>
           )}
         </div>
-        <div className="table-wrap">
+        <div className="table-wrap" style={{ maxHeight: 420, overflowY: "auto" }}>
           <table>
             <thead>
               <tr>

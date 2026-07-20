@@ -16,6 +16,7 @@ import {
   listReservationsByCase,
 } from "../../operational/reservation-service.js";
 import { recordOperationalEvent } from "../../operational/operational-event-service.js";
+import { createNotification } from "../../notifications/notification-service.js";
 import {
   ensurePurchaseRequestsForCase, PurchaseRequestLinkError,
 } from "../../operational/purchase-request-service.js";
@@ -646,8 +647,9 @@ repairQueueRouter.post("/fila-reparos/:id/close", requireAuth, requireOperator, 
     if (!status || !VALID_CLOSE.includes(status)) {
       return res.status(400).json({ error: `Status deve ser um de: ${VALID_CLOSE.join(", ")}.` });
     }
-    const rc = db.prepare("SELECT id FROM repair_cases WHERE id = ?").get(repairCaseId);
+    const rc = db.prepare("SELECT id, brand, model FROM repair_cases WHERE id = ?").get(repairCaseId) as { id: number; brand: string | null; model: string | null } | undefined;
     if (!rc) return res.status(404).json({ error: "Caso não encontrado." });
+    const userName = (req as Request).sessionUser?.displayName ?? "sistema";
     db.prepare(
       `UPDATE repair_cases SET workflow_status = ?, closed_at = datetime('now'),
          updated_by_user_id = ?, updated_at = datetime('now') WHERE id = ?`,
@@ -656,8 +658,30 @@ repairQueueRouter.post("/fila-reparos/:id/close", requireAuth, requireOperator, 
       recordOperationalEvent(db, {
         repairCaseId,
         eventType: "NOTE_ADDED",
-        responsibleName: (req as Request).sessionUser?.displayName ?? null,
+        responsibleName: userName,
         notes: notes.trim(),
+      });
+    }
+    const deviceLabel = [rc.brand, rc.model].filter(Boolean).join(" ") || `#${repairCaseId}`;
+    if (status === "CONCLUIDO") {
+      createNotification(db, {
+        targetRole: "ADMIN",
+        type: "CASE_CONCLUDED",
+        title: `${deviceLabel} concluído`,
+        body: `Finalizado por ${userName}`,
+        route: `/fila-reparos`,
+        entityType: "repair_case",
+        entityId: repairCaseId,
+      });
+    } else if (status === "CANCELADO" || status === "VENDA_ESTADO") {
+      createNotification(db, {
+        targetRole: "ADMIN",
+        type: "CASE_CLOSED_LOSS",
+        title: `${deviceLabel} → ${status === "CANCELADO" ? "Cancelado" : "Venda estado"}`,
+        body: `Registrado por ${userName}`,
+        route: `/fila-reparos`,
+        entityType: "repair_case",
+        entityId: repairCaseId,
       });
     }
     res.json({ ok: true });
@@ -717,11 +741,12 @@ repairQueueRouter.post("/fila-reparos/:id/override-status", requireAuth, require
     if (!notes?.trim()) {
       return res.status(400).json({ error: "Justificativa obrigatória." });
     }
-    const rc = db.prepare("SELECT id, workflow_status FROM repair_cases WHERE id = ?").get(repairCaseId) as { id: number; workflow_status: string } | undefined;
+    const rc = db.prepare("SELECT id, workflow_status, brand, model FROM repair_cases WHERE id = ?").get(repairCaseId) as { id: number; workflow_status: string; brand: string | null; model: string | null } | undefined;
     if (!rc) return res.status(404).json({ error: "Caso não encontrado." });
     const fromStatus = rc.workflow_status;
     const userId = (req as Request).sessionUser!.id;
     const userName = (req as Request).sessionUser!.displayName;
+    const deviceLabel = [rc.brand, rc.model].filter(Boolean).join(" ") || `#${repairCaseId}`;
 
     db.prepare(
       `UPDATE repair_cases SET workflow_status = ?, updated_by_user_id = ?, updated_at = datetime('now') WHERE id = ?`,
@@ -739,6 +764,41 @@ repairQueueRouter.post("/fila-reparos/:id/override-status", requireAuth, require
     db.prepare(
       `INSERT INTO audit_log (user_id, action, entity_type, entity_id, metadata_json) VALUES (?, 'OVERRIDE_REPAIR_STATUS', 'repair_case', ?, ?)`,
     ).run(userId, String(repairCaseId), JSON.stringify({ fromStatus, toStatus, notes: notes.trim() }));
+
+    // Gera notificações por tipo de destino
+    if (toStatus === "VERIFICAR") {
+      createNotification(db, {
+        targetRole: "ADMIN",
+        type: "CASE_VERIFICAR",
+        title: `${deviceLabel} marcado como VERIFICAR`,
+        body: `Por ${userName}: ${notes.trim()}`,
+        route: `/fila-reparos`,
+        entityType: "repair_case", entityId: repairCaseId,
+      });
+    } else if (toStatus === "RETORNO_TECNICO") {
+      // Notifica o técnico responsável pelo caso (se houver)
+      const techRow = db.prepare(
+        `SELECT u.id FROM repair_cases rc JOIN users u ON u.id = rc.updated_by_user_id WHERE rc.id = ? AND u.role = 'TECHNICIAN'`,
+      ).get(repairCaseId) as { id: number } | undefined;
+      createNotification(db, {
+        targetRole: techRow ? undefined : "TECHNICIAN",
+        targetUserId: techRow?.id,
+        type: "CASE_RETORNO",
+        title: `${deviceLabel} voltou para análise`,
+        body: `Retorno registrado por ${userName}`,
+        route: `/minha-fila`,
+        entityType: "repair_case", entityId: repairCaseId,
+      });
+    } else if (toStatus === "CONCLUIDO") {
+      createNotification(db, {
+        targetRole: "ADMIN",
+        type: "CASE_CONCLUDED",
+        title: `${deviceLabel} concluído`,
+        body: `Por ${userName}`,
+        route: `/fila-reparos`,
+        entityType: "repair_case", entityId: repairCaseId,
+      });
+    }
 
     res.json({ ok: true });
   } catch (err) { next(err); }

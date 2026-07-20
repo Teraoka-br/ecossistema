@@ -57,6 +57,7 @@ export interface CountingDaySummary {
   sessionCount: number;
   totalScanned: number;
   isWeekday: boolean;
+  justification: string | null;
   sessions: CountingSession[];
 }
 
@@ -95,6 +96,33 @@ export interface IssueSummary {
   openCount: number;
   criticalCount: number;
   recent: IssueReport[];
+  resolved: IssueReport[];
+}
+
+export interface FinancialSlice {
+  totalCost: number | null;
+  totalSale: number | null;
+  totalMargin: number | null;
+  caseCount: number;
+}
+
+export interface FinancialData {
+  active: FinancialSlice;
+  withTechnician: FinancialSlice;
+  waitingPart: FinancialSlice;
+  concludedThisMonth: FinancialSlice;
+  lostThisMonth: FinancialSlice;
+}
+
+export interface FinancialByBucket {
+  match:          FinancialSlice;
+  matchParcial:   FinancialSlice;
+  aptoReparo:     FinancialSlice;
+  verificar:      FinancialSlice;
+  emAnalise:      FinancialSlice;
+  aguardandoPeca: FinancialSlice;
+  comTecnico:     FinancialSlice;
+  finalizados:    FinancialSlice;
 }
 
 export interface HomeData {
@@ -106,6 +134,8 @@ export interface HomeData {
   counting: CountingBlockData;
   alerts: OperationalAlert[];
   recentIssues: IssueSummary;
+  financial: FinancialData;
+  financialByBucket: FinancialByBucket;
   lastUpdatedAt: string;
   _queryMs: number;
 }

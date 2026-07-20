@@ -5,6 +5,7 @@ import { getDashboardOverview } from "../../dashboard/dashboard-overview-service
 import { getOperationalAlerts } from "../../dashboard/dashboard-alert-service.js";
 import { getCountingBlockData } from "../../dashboard/dashboard-counting-service.js";
 import { getIssueSummary } from "../../issue/issue-service.js";
+import { getFinancialData, getFinancialByBucket } from "../../dashboard/dashboard-financial-service.js";
 import {
   createOrUpdateDashboardSnapshot,
   todaySaoPaulo,
@@ -19,10 +20,12 @@ dashboardsRouter.get("/dashboards/home", requireAuth, (_req, res, next) => {
     const t0 = Date.now();
     const db = getDb();
 
-    const overview = getDashboardOverview(db);
-    const alerts   = getOperationalAlerts(db);
-    const counting = getCountingBlockData(db);
-    const issues   = getIssueSummary(db);
+    const overview   = getDashboardOverview(db);
+    const alerts     = getOperationalAlerts(db);
+    const counting   = getCountingBlockData(db);
+    const issues     = getIssueSummary(db);
+    const financial         = getFinancialData(db);
+    const financialByBucket = getFinancialByBucket(db);
 
     // Atualiza snapshot do dia ao acessar a home
     let todaySnapshot: DashboardSnapshot | null = null;
@@ -41,6 +44,8 @@ dashboardsRouter.get("/dashboards/home", requireAuth, (_req, res, next) => {
       counting,
       alerts,
       recentIssues: issues,
+      financial,
+      financialByBucket,
       todaySnapshot,
       lastUpdatedAt: overview.lastUpdatedAt,
       _queryMs: Date.now() - t0,
@@ -83,6 +88,56 @@ dashboardsRouter.get("/dashboards/timeline", requireAuth, (req, res, next) => {
       .all(from ?? null, to ?? null) as Row[];
 
     res.json({ metric, data: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── POST /api/dashboards/counting/justify ────────────────────────────────────
+dashboardsRouter.post("/dashboards/counting/justify", requireAuth, requireAdmin, (req, res, next) => {
+  try {
+    const db = getDb();
+    const { date, justification } = req.body as { date?: string; justification?: string };
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) { res.status(400).json({ error: "Data inválida" }); return; }
+    const createdBy = (req as { user?: { name?: string } }).user?.name ?? null;
+    if (!justification || !justification.trim()) {
+      db.prepare(`DELETE FROM counting_day_justifications WHERE date = ?`).run(date);
+    } else {
+      const now = new Date().toISOString();
+      db.prepare(`
+        INSERT INTO counting_day_justifications (date, justification, created_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET justification=excluded.justification, created_by=excluded.created_by, updated_at=excluded.updated_at
+      `).run(date, justification.trim(), createdBy, now, now);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/dashboards/technician/:id/cases ─────────────────────────────────
+dashboardsRouter.get("/dashboards/technician/:id/cases", requireAuth, (req, res, next) => {
+  try {
+    const db = getDb();
+    const techId = parseInt(req.params.id);
+    if (isNaN(techId)) { res.status(400).json({ error: "ID inválido" }); return; }
+
+    type Row = {
+      id: number; imei: string; brand: string|null; model: string|null;
+      os_number: string|null; workflow_status: string; repair_date: string|null;
+      cost: number|null; estimated_sale: number|null; margin: number|null;
+    };
+    const cases = db.prepare(`
+      SELECT id, imei, brand, model, os_number, workflow_status,
+             repair_date, cost, estimated_sale, margin
+      FROM repair_cases
+      WHERE directed_technician_id = ?
+        AND workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
+      ORDER BY repair_date ASC
+    `).all(techId) as Row[];
+
+    res.json({ cases });
   } catch (err) {
     next(err);
   }

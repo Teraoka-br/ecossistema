@@ -5,6 +5,7 @@ export interface CountingDaySummary {
   sessionCount: number;
   totalScanned: number;
   isWeekday: boolean;
+  justification: string | null;
   sessions: {
     id: number;
     responsibleName: string | null;
@@ -62,6 +63,13 @@ export function getCountingBlockData(db: Db): CountingBlockData {
   };
 
   const minDate = targetDays[targetDays.length - 1];
+
+  // Carregar justificativas de ausência
+  const justRows = db
+    .prepare(`SELECT date, justification FROM counting_day_justifications WHERE date >= ?`)
+    .all(minDate) as { date: string; justification: string }[];
+  const justMap = new Map(justRows.map(r => [r.date, r.justification]));
+
   const sessions = db
     .prepare(
       `SELECT cs.id, cs.responsible_name, cs.count_type, cs.started_at as created_at,
@@ -91,6 +99,7 @@ export function getCountingBlockData(db: Db): CountingBlockData {
       sessionCount: daySessions.length,
       totalScanned: daySessions.reduce((s, x) => s + x.total_scanned, 0),
       isWeekday: true,
+      justification: justMap.get(date) ?? null,
       sessions: daySessions.map((s) => ({
         id: s.id,
         responsibleName: s.responsible_name,

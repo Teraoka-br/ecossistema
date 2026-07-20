@@ -219,6 +219,11 @@ function RepairCard({
                 Datasys
               </span>
             )}
+            {item.creationSource === "IMPORT" && (
+              <span style={{ color: "var(--muted)", fontSize: "0.67rem", fontWeight: 600 }} title="Aparelho de lote — sem rastreamento individual no DATASYS">
+                Lote
+              </span>
+            )}
           </div>
         </div>
         <div style={{

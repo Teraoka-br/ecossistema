@@ -29,6 +29,7 @@
     "src/import-central/**/*.ts",
     "src/analise/**/*.ts",
     "src/dashboard/**/*.ts",
-    "src/issue/**/*.ts"
+    "src/issue/**/*.ts",
+    "src/notifications/**/*.ts"
   ]
 }

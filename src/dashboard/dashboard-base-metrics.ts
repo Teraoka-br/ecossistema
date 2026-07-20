@@ -35,14 +35,14 @@ export function getBaseMetrics(db: Db): BaseMetrics {
 
   const get = (m: Map<string, number>, ...keys: string[]) => keys.reduce((s, k) => s + (m.get(k) ?? 0), 0);
 
-  const aptoReparo  = get(workflowMap, "APTO_REPARO", "PECA_DISPONIVEL", "EM_SEPARACAO");
+  const aptoReparo  = get(workflowMap, "APTO_REPARO", "EM_SEPARACAO");
   const comTecnico  = get(workflowMap, "DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO");
-  const emAnalise   = get(workflowMap, "DRAFT", "ANALISE", "ANALYSIS_DRAFT");
-  const finalizados = get(workflowMap, "ENTREGUE", "CANCELADO");
+  const emAnalise   = get(workflowMap, "EM_ANALISE");
+  const finalizados = get(workflowMap, "CONCLUIDO", "CANCELADO", "VENDA_ESTADO");
   const totalCases  = [...workflowMap.values()].reduce((s, v) => s + v, 0);
 
   const activeRow = db
-    .prepare(`SELECT COUNT(*) as c, COUNT(DISTINCT imei) as u FROM repair_cases WHERE workflow_status NOT IN ('ENTREGUE','CANCELADO')`)
+    .prepare(`SELECT COUNT(*) as c, COUNT(DISTINCT imei) as u FROM repair_cases WHERE workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')`)
     .get() as { c: number; u: number };
 
   return {

@@ -128,6 +128,7 @@ export function getIssueSummary(db: Db): {
   openCount: number;
   criticalCount: number;
   recent: IssueReport[];
+  resolved: IssueReport[];
 } {
   const openCount = (
     db
@@ -149,8 +150,15 @@ export function getIssueSummary(db: Db): {
       `SELECT * FROM issue_reports
        WHERE status IN ('OPEN','IN_ANALYSIS')
        ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
-                created_at DESC LIMIT 5`,
+                created_at DESC LIMIT 20`,
     )
     .all() as unknown as IssueReport[];
-  return { openCount, criticalCount, recent };
+  const resolved = db
+    .prepare(
+      `SELECT * FROM issue_reports
+       WHERE status IN ('RESOLVED','DISMISSED')
+       ORDER BY resolved_at DESC LIMIT 20`,
+    )
+    .all() as unknown as IssueReport[];
+  return { openCount, criticalCount, recent, resolved };
 }

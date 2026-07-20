@@ -247,6 +247,21 @@ procurementRouter.get("/necessidades", (_req, res) => {
 });
 
 // Export CSV template para cotação
+procurementRouter.get("/necessidades/detail/:chavePeca", (req, res) => {
+  try {
+    const chavePeca = decodeURIComponent(req.params.chavePeca);
+    res.json(cotacaoSvc.getCasesNeedingPart(getDb(), chavePeca));
+  } catch (err) { handleError(err, res); }
+});
+
+procurementRouter.get("/necessidades/leverage", (req, res) => {
+  try {
+    const pecasParam = typeof req.query.pecas === "string" ? req.query.pecas : "";
+    const selectedParts = pecasParam.split(",").map(s => s.trim()).filter(Boolean);
+    res.json(cotacaoSvc.getLeverageData(getDb(), selectedParts));
+  } catch (err) { handleError(err, res); }
+});
+
 procurementRouter.get("/necessidades/export.csv", (req, res) => {
   try {
     const items = cotacaoSvc.listNecessidades(getDb());

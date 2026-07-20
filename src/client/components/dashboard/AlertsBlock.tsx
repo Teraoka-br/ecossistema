@@ -1,4 +1,5 @@
 import { useNavigate } from "react-router-dom";
+import { ArrowRight } from "lucide-react";
 import type { OperationalAlert } from "./types.js";
 
 interface Props {
@@ -27,9 +28,18 @@ export function AlertsBlock({ alerts }: Props) {
             <div
               key={a.code}
               className={`alert ${classFor(a.severity)}`}
-              style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", padding: "0.6rem 0.75rem", margin: 0 }}
+              style={{
+                display: "flex", alignItems: "flex-start", gap: "0.5rem",
+                padding: "0.6rem 0.75rem", margin: 0,
+                cursor: a.route ? "pointer" : undefined,
+                transition: "opacity 0.15s",
+              }}
+              onClick={() => a.route && navigate(a.route)}
+              role={a.route ? "button" : undefined}
+              tabIndex={a.route ? 0 : undefined}
+              onKeyDown={e => { if (a.route && (e.key === "Enter" || e.key === " ")) navigate(a.route); }}
             >
-              <span style={{ flexShrink: 0 }}>{iconFor(a.severity)}</span>
+              <span style={{ flexShrink: 0, marginTop: "0.05rem" }}>{iconFor(a.severity)}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: "0.85rem" }}>{a.title}</div>
                 <div className="muted" style={{ fontSize: "0.78rem", marginTop: "0.15rem" }}>{a.description}</div>
@@ -40,13 +50,7 @@ export function AlertsBlock({ alerts }: Props) {
                 )}
               </div>
               {a.route && (
-                <button
-                  className="btn btn-ghost btn-sm"
-                  style={{ flexShrink: 0, fontSize: "0.75rem" }}
-                  onClick={() => navigate(a.route!)}
-                >
-                  Ver
-                </button>
+                <ArrowRight size={14} style={{ flexShrink: 0, opacity: 0.5, marginTop: "0.15rem" }} />
               )}
             </div>
           ))}

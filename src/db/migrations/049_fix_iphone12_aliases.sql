@@ -15,4 +15,4 @@ WHERE id = 6;
 INSERT OR IGNORE INTO part_key_aliases
   (requested_chave_peca, requested_chave_peca_norm, stock_chave_peca, stock_chave_peca_norm, reason, active, created_by_user_id)
 VALUES
-  ('FRONTAL IPHONE 12 PRO', 'FRONTAL IPHONE 12 PRO', 'FRONTAL IPHONE 12/12 PRO', 'FRONTAL IPHONE 12/12 PRO', 'frontal 12 e 12 pro são compatíveis', 1, 3);
+  ('FRONTAL IPHONE 12 PRO', 'FRONTAL IPHONE 12 PRO', 'FRONTAL IPHONE 12/12 PRO', 'FRONTAL IPHONE 12/12 PRO', 'frontal 12 e 12 pro são compatíveis', 1, NULL);
