@@ -7,14 +7,10 @@
  */
 
 import type { Db } from "../db/database.js";
+import { normalizeKey } from "../domain/text.js";
 import { calculateMatch } from "./calculate-match.js";
 import type { CalculateMatchInput, StockGroupInput } from "./calculate-match.js";
 import { loadEngineInput, loadActiveRuleStrict } from "./engine-loader.js";
-
-/** Normaliza chave_peca da cotação para o formato canônico do motor (lower + sem espaços). */
-function normKey(s: string): string {
-  return s.toLowerCase().replace(/ /g, "");
-}
 
 export interface SelectedCotacaoItem {
   id: number;
@@ -139,7 +135,7 @@ export function projectCotacaoImpact(
 
   // ── Construir adições de estoque a partir da seleção ──────────────────────
   const additions = selectedItems.map((item) => ({
-    chavePecaNorm: normKey(item.chavePeca),
+    chavePecaNorm: normalizeKey(item.chavePeca),
     chavePeca: item.chavePeca,
     qtde: item.qtde,
   }));
@@ -162,7 +158,7 @@ export function projectCotacaoImpact(
 
   // ── Impacto marginal por linha ────────────────────────────────────────────
   const lineProjections: LineProjection[] = selectedItems.map((item) => {
-    const norm = normKey(item.chavePeca);
+    const norm = normalizeKey(item.chavePeca);
     const currentAvailable =
       engineInput.availableStock.find((g) => g.chavePecaNorm === norm)?.availableQuantity ?? 0;
 
@@ -170,7 +166,7 @@ export function projectCotacaoImpact(
     const additionsMinus = selectedItems
       .filter((si) => si.id !== item.id)
       .map((si) => ({
-        chavePecaNorm: normKey(si.chavePeca),
+        chavePecaNorm: normalizeKey(si.chavePeca),
         chavePeca: si.chavePeca,
         qtde: si.qtde,
       }));
