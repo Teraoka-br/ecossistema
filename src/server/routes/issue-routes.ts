@@ -18,7 +18,7 @@ const MODULES = [
   "REFERENCIAS","PEDIDOS","CONTAGEM","MATCH_RULES","USUARIOS","OUTRO",
 ] as const;
 const SEVERITIES = ["LOW","MEDIUM","HIGH","CRITICAL"] as const;
-const STATUSES   = ["OPEN","IN_ANALYSIS","RESOLVED","DISMISSED"] as const;
+const STATUSES = ["OPEN","IN_ANALYSIS","AWAITING_TEST","RESOLVED","DISMISSED"] as const;
 
 const createSchema = z.object({
   title:         z.string().min(3).max(200),
@@ -31,6 +31,7 @@ const createSchema = z.object({
 const updateSchema = z.object({
   status:           z.enum(STATUSES).optional(),
   resolution_notes: z.string().max(2000).optional(),
+  fix_commit:       z.string().max(200).optional(),
 });
 
 issueRouter.get("/issue-reports", requireAuth, (req, res, next) => {
@@ -72,10 +73,13 @@ issueRouter.patch("/issue-reports/:id", requireAuth, requireAdmin, (req, res, ne
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) { res.status(400).json({ error: "ID inválido" }); return; }
     const body = updateSchema.parse(req.body);
+    const isValidating = body.status === "RESOLVED";
     const updated = updateIssue(db, id, {
-      status:           body.status as IssueStatus | undefined,
-      resolution_notes: body.resolution_notes,
-      resolvedByUserId: user.id,
+      status:            body.status as IssueStatus | undefined,
+      resolution_notes:  body.resolution_notes,
+      resolvedByUserId:  user.id,
+      fix_commit:        body.fix_commit,
+      validatedByUserId: isValidating ? user.id : undefined,
     });
     if (!updated) { res.status(404).json({ error: "Problema não encontrado" }); return; }
     res.json({ issue: updated });

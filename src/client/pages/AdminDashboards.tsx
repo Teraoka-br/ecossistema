@@ -134,11 +134,11 @@ export function AdminDashboards() {
         {/* ── Contagens + Alertas ────────────────────────────────── */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
           <CountingBlock counting={data.counting} onRefresh={load} />
-          <AlertsBlock alerts={data.alerts} />
+          <AlertsBlock alerts={data.alerts} onFilter={setActiveFilter} />
         </div>
 
         {/* ── Central de Problemas ───────────────────────────────── */}
-        <IssueReportsBlock issues={data.recentIssues} onRefresh={load} />
+        <IssueReportsBlock issues={data.recentIssues} isAdmin onRefresh={load} />
 
       </div>
     </div>

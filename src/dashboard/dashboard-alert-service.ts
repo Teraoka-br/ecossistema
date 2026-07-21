@@ -215,6 +215,21 @@ export function getOperationalAlerts(db: Db): OperationalAlert[] {
     });
   }
 
+  // 7b. Bugs aguardando validacao em producao
+  const awaitingTest = db
+    .prepare(`SELECT COUNT(*) as c FROM issue_reports WHERE status='AWAITING_TEST'`)
+    .get() as { c: number };
+  if (awaitingTest.c > 0) {
+    alerts.push({
+      code: "ISSUES_AWAITING_TEST",
+      title: "Problemas aguardando validacao",
+      description: `${awaitingTest.c} problema(s) com correcao aplicada aguardando confirmacao em producao.`,
+      severity: "INFO",
+      count: awaitingTest.c,
+      suggestedAction: "Validar em producao e marcar como Resolvido",
+    });
+  }
+
   // 8. Ausencia de regra de match ativa
   const activeRuleRow = db
     .prepare(

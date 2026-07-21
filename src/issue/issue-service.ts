@@ -6,7 +6,10 @@ export type IssueModule =
   | "USUARIOS" | "OUTRO";
 
 export type IssueSeverityReport = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
-export type IssueStatus = "OPEN" | "IN_ANALYSIS" | "RESOLVED" | "DISMISSED";
+export type IssueStatus =
+  | "OPEN" | "IN_ANALYSIS"
+  | "AWAITING_TEST"   // correção aplicada, aguardando validação em produção
+  | "RESOLVED" | "DISMISSED";
 
 export interface IssueReport {
   id: number;
@@ -22,6 +25,10 @@ export interface IssueReport {
   resolved_at: string | null;
   resolved_by_user_id: number | null;
   resolution_notes: string | null;
+  fix_commit: string | null;
+  validated_by_user_id: number | null;
+  validated_at: string | null;
+  metadata_json: string | null;
 }
 
 export interface CreateIssueInput {
@@ -38,6 +45,8 @@ export interface UpdateIssueInput {
   status?: IssueStatus;
   resolution_notes?: string;
   resolvedByUserId?: number;
+  fix_commit?: string;
+  validatedByUserId?: number;
 }
 
 export function listIssues(
@@ -99,22 +108,34 @@ export function updateIssue(
   if (!existing) return null;
 
   const now = new Date().toISOString();
-  const resolvedAt =
-    input.status === "RESOLVED" ? now : existing.resolved_at;
+  const isReopening = input.status === "OPEN" || input.status === "IN_ANALYSIS";
+  const isResolving = input.status === "RESOLVED" || input.status === "AWAITING_TEST";
+  const isValidating = input.status === "RESOLVED" && input.validatedByUserId;
+
+  // resolved_at: seta ao resolver, limpa ao reabrir
+  const resolvedAt = isReopening ? null : isResolving ? (existing.resolved_at ?? now) : existing.resolved_at;
+  // validated_at: seta ao validar (RESOLVED com validador)
+  const validatedAt = isValidating ? now : (isReopening ? null : existing.validated_at);
 
   db.prepare(
     `UPDATE issue_reports SET
-       status             = COALESCE(?, status),
-       resolution_notes   = COALESCE(?, resolution_notes),
-       resolved_at        = ?,
-       resolved_by_user_id= COALESCE(?, resolved_by_user_id),
-       updated_at         = ?
+       status              = COALESCE(?, status),
+       resolution_notes    = COALESCE(?, resolution_notes),
+       resolved_at         = ?,
+       resolved_by_user_id = COALESCE(?, resolved_by_user_id),
+       fix_commit          = COALESCE(?, fix_commit),
+       validated_by_user_id= COALESCE(?, validated_by_user_id),
+       validated_at        = ?,
+       updated_at          = ?
      WHERE id=?`,
   ).run(
     input.status ?? null,
     input.resolution_notes ?? null,
     resolvedAt,
     input.resolvedByUserId ?? null,
+    input.fix_commit ?? null,
+    input.validatedByUserId ?? null,
+    validatedAt,
     now,
     id,
   );
@@ -127,13 +148,15 @@ export function updateIssue(
 export function getIssueSummary(db: Db): {
   openCount: number;
   criticalCount: number;
+  awaitingTestCount: number;
   recent: IssueReport[];
+  awaitingTest: IssueReport[];
   resolved: IssueReport[];
 } {
   const openCount = (
     db
       .prepare(
-        `SELECT COUNT(*) as c FROM issue_reports WHERE status IN ('OPEN','IN_ANALYSIS')`,
+        `SELECT COUNT(*) as c FROM issue_reports WHERE status IN ('OPEN','IN_ANALYSIS','AWAITING_TEST')`,
       )
       .get() as { c: number }
   ).c;
@@ -145,12 +168,23 @@ export function getIssueSummary(db: Db): {
       )
       .get() as { c: number }
   ).c;
+  const awaitingTestCount = (
+    db
+      .prepare(`SELECT COUNT(*) as c FROM issue_reports WHERE status='AWAITING_TEST'`)
+      .get() as { c: number }
+  ).c;
   const recent = db
     .prepare(
       `SELECT * FROM issue_reports
        WHERE status IN ('OPEN','IN_ANALYSIS')
        ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
                 created_at DESC LIMIT 20`,
+    )
+    .all() as unknown as IssueReport[];
+  const awaitingTest = db
+    .prepare(
+      `SELECT * FROM issue_reports WHERE status='AWAITING_TEST'
+       ORDER BY updated_at DESC LIMIT 20`,
     )
     .all() as unknown as IssueReport[];
   const resolved = db
@@ -160,5 +194,5 @@ export function getIssueSummary(db: Db): {
        ORDER BY resolved_at DESC LIMIT 20`,
     )
     .all() as unknown as IssueReport[];
-  return { openCount, criticalCount, recent, resolved };
+  return { openCount, criticalCount, awaitingTestCount, recent, awaitingTest, resolved };
 }

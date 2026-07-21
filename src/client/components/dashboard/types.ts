@@ -87,18 +87,26 @@ export interface IssueReport {
   description: string | null;
   module: string;
   severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
-  status: "OPEN" | "IN_ANALYSIS" | "RESOLVED" | "DISMISSED";
+  status: "OPEN" | "IN_ANALYSIS" | "AWAITING_TEST" | "RESOLVED" | "DISMISSED";
+  created_by_user_id: number | null;
   created_by_name: string | null;
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
+  resolved_by_user_id: number | null;
   resolution_notes: string | null;
+  fix_commit: string | null;
+  validated_by_user_id: number | null;
+  validated_at: string | null;
+  metadata_json: string | null;
 }
 
 export interface IssueSummary {
   openCount: number;
   criticalCount: number;
+  awaitingTestCount: number;
   recent: IssueReport[];
+  awaitingTest: IssueReport[];
   resolved: IssueReport[];
 }
 
