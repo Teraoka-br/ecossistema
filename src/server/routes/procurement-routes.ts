@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import { Router } from "express";
+import multer from "multer";
 import { z } from "zod";
 import { getDb } from "../../db/database.js";
 import { getSystemState } from "../../system/system-service.js";
@@ -7,8 +9,15 @@ import { ProcurementError } from "../../operational/procurement-service.js";
 import * as recv from "../../operational/receiving-service.js";
 import { getCurrentOperationalStock, listMovements, StockError } from "../../operational/stock-service.js";
 import * as cotacaoSvc from "../../operational/cotacao-service.js";
+import { projectCotacaoImpact, savePurchaseDecisionSnapshot } from "../../match/cotacao-projection-service.js";
+import { config } from "../config.js";
 
 export const procurementRouter = Router();
+
+const uploadCotacao = multer({
+  dest: config.uploadTmpDir,
+  limits: { fileSize: config.maxUploadBytes },
+});
 
 function handleError(err: unknown, res: import("express").Response): void {
   if (err instanceof ProcurementError || err instanceof StockError) {
@@ -262,18 +271,53 @@ procurementRouter.get("/necessidades/leverage", (req, res) => {
   } catch (err) { handleError(err, res); }
 });
 
-procurementRouter.get("/necessidades/export.csv", (req, res) => {
+procurementRouter.get("/necessidades/export.xlsx", (req, res) => {
   try {
     const items = cotacaoSvc.listNecessidades(getDb());
     const selected = typeof req.query.pecas === "string"
       ? new Set(req.query.pecas.split(",").map(s => s.trim()).filter(Boolean))
       : null;
     const rows = selected ? items.filter(i => selected.has(i.chavePeca)) : items;
-    const header = "PECA,QTDE,VALOR UN,VALOR TOTAL";
-    const lines = rows.map(r => `"${r.chavePeca.replace(/"/g, '""')}",${r.qtdeNecessaria},,`);
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="cotacao_${new Date().toISOString().slice(0,10)}.csv"`);
-    res.send("﻿" + [header, ...lines].join("\r\n"));
+    const buffer = cotacaoSvc.buildNecessidadesXlsx(rows);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="cotacao_${new Date().toISOString().slice(0,10)}.xlsx"`);
+    res.send(buffer);
+  } catch (err) { handleError(err, res); }
+});
+
+// Recebe o template preenchido pelo fornecedor (.xlsx) e devolve os itens
+// interpretados — evita o parser CSV frágil a locale (vírgula decimal pt-BR).
+procurementRouter.post("/cotacoes/parse", uploadCotacao.single("file"), (req, res) => {
+  if (!req.file) { res.status(400).json({ error: "Arquivo não enviado." }); return; }
+  try {
+    const items = cotacaoSvc.parseCotacaoXlsx(req.file.path);
+    res.json({ items });
+  } catch (err) {
+    handleError(err, res);
+  } finally {
+    try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+  }
+});
+
+// ===========================================================================
+// Projeção canônica de match para aprovação de cotação
+// ===========================================================================
+
+const projectMatchSchema = z.object({
+  items: z.array(z.object({
+    id: z.number().int().positive(),
+    chavePeca: z.string().min(1),
+    qtde: z.number().int().positive(),
+    valorUnitario: z.number().nonnegative(),
+  })).min(1),
+});
+
+procurementRouter.post("/cotacoes/project-match", (req, res) => {
+  const parsed = projectMatchSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Corpo inválido.", details: parsed.error.flatten() });
+  try {
+    const result = projectCotacaoImpact(getDb(), parsed.data.items);
+    res.json(result);
   } catch (err) { handleError(err, res); }
 });
 
@@ -313,16 +357,36 @@ procurementRouter.get("/cotacoes/:id", (req, res) => {
   } catch (err) { handleError(err, res); }
 });
 
-const aprovaCotacaoSchema = z.object({
-  aprovados: z.array(z.number().int().positive()).min(1),
+const aprovaCotacaoSchema2 = z.object({
+  aprovados: z.array(z.object({
+    id:           z.number().int().positive(),
+    qtde:         z.number().int().positive(),
+    chavePeca:    z.string().min(1).optional(),
+    valorUnitario: z.number().nonnegative().optional(),
+  })).min(1),
 });
 
 procurementRouter.post("/cotacoes/:id/aprovar", (req, res) => {
-  const parsed = aprovaCotacaoSchema.safeParse(req.body);
+  const parsed = aprovaCotacaoSchema2.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Corpo inválido.", details: parsed.error.flatten() });
   try {
+    const db = getDb();
+    const cotacaoId = idParam(req.params.id);
     const approvedBy = req.sessionUser?.displayName ?? "Sistema";
-    const result = cotacaoSvc.aprovaCotacao(getDb(), idParam(req.params.id), { ...parsed.data, approvedBy });
+    const result = cotacaoSvc.aprovaCotacao(db, cotacaoId, { aprovados: parsed.data.aprovados, approvedBy });
+
+    // Persistir snapshot de decisão (não-crítico — falha não desfaz a aprovação)
+    try {
+      const snapshotItems = parsed.data.aprovados
+        .filter((a): a is typeof a & { chavePeca: string; valorUnitario: number } =>
+          typeof a.chavePeca === "string" && typeof a.valorUnitario === "number")
+        .map((a) => ({ id: a.id, chavePeca: a.chavePeca, qtde: a.qtde, valorUnitario: a.valorUnitario }));
+      if (snapshotItems.length > 0) {
+        const projection = projectCotacaoImpact(db, snapshotItems);
+        savePurchaseDecisionSnapshot(db, cotacaoId, approvedBy, projection);
+      }
+    } catch { /* snapshot não-crítico */ }
+
     res.json(result);
   } catch (err) { handleError(err, res); }
 });

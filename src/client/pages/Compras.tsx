@@ -3,7 +3,7 @@ import {
   confirmReceipt, cancelPurchaseOrder, getPurchaseOrders,
   type PurchaseOrder,
 } from "../api.js";
-import { ErrorBanner, Loading, fmtMoney } from "../ui.js";
+import { ErrorBanner, Loading, fmtMoney, AlertBar, useAlert } from "../ui.js";
 import {
   ShoppingCart, Package, CheckCircle2, X, Loader2, RefreshCw,
   Download, Upload, FileText, Check, Ban, Search, Zap, ArrowRight, Info,
@@ -17,6 +17,7 @@ interface NecessidadeItem {
   chavePeca: string;
   qtdeNecessaria: number;
   casesBlocked: number;
+  fullMatchCount: number;
   marginReleased: number | null;
   saleReleased: number | null;
 }
@@ -26,6 +27,48 @@ interface LeverageResult {
   costReleased: number | null;
   saleReleased: number | null;
   marginReleased: number | null;
+}
+
+interface LineProjection {
+  id: number;
+  chavePeca: string;
+  chavePecaNorm: string;
+  selectedQtde: number;
+  valorUnitario: number;
+  currentAvailable: number;
+  marginalFullMatches: number;
+  marginalPartialMatches: number;
+}
+
+interface ProjectedCase {
+  caseId: number;
+  imei: string | null;
+  model: string | null;
+  estimatedSale: number | null;
+  margin: number | null;
+  isIncremental: boolean;
+}
+
+interface CotacaoProjectionResult {
+  baselineFullMatches: number;
+  projectedFullMatches: number;
+  incrementalFullMatches: number;
+  baselinePartialMatches: number;
+  projectedPartialMatches: number;
+  partialToFullConversions: number;
+  projectedCaseIds: number[];
+  incrementalCaseIds: number[];
+  projectedCases: ProjectedCase[];
+  orderCost: number;
+  projectedRevenue: number | null;
+  incrementalRevenue: number | null;
+  projectedMargin: number | null;
+  incrementalMargin: number | null;
+  marginToCostRatio: number | null;
+  costPerIncrementalMatch: number | null;
+  selectedItemCount: number;
+  selectedUnitCount: number;
+  lineProjections: LineProjection[];
 }
 
 interface CaseNeedingPart {
@@ -64,13 +107,22 @@ export function Compras() {
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const alert = useAlert(6000);
 
   async function loadAll() {
     setLoading(true); setError(null);
     try {
+      const safeFetch = async (url: string) => {
+        const r = await fetch(url);
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({})) as { error?: string };
+          throw new Error(body.error ?? `Erro ${r.status} em ${url}`);
+        }
+        return r.json();
+      };
       const [rN, rC, rO] = await Promise.all([
-        fetch("/api/necessidades").then(r => r.json()),
-        fetch("/api/cotacoes").then(r => r.json()),
+        safeFetch("/api/necessidades"),
+        safeFetch("/api/cotacoes"),
         getPurchaseOrders(),
       ]);
       setNecessidades(rN.items ?? []);
@@ -108,6 +160,7 @@ export function Compras() {
       </div>
 
       {error && <ErrorBanner message={error} />}
+      <AlertBar ok={alert.ok} err={alert.err} onDismiss={alert.clear} />
 
       <div className="tab-bar">
         {tabs.map(t => (
@@ -120,10 +173,17 @@ export function Compras() {
       {loading && <Loading what="compras" />}
 
       {!loading && tab === "NECESSIDADES" && (
-        <NecessidadesTab items={necessidades} onCotacaoCreated={() => { loadAll(); setTab("COTACOES"); }} />
+        <NecessidadesTab
+          items={necessidades}
+          onCotacaoCreated={(info) => {
+            loadAll();
+            setTab("COTACOES");
+            alert.success(`Cotação registrada: ${info.supplier} — ${info.itemCount} ite${info.itemCount !== 1 ? "ns" : "m"} aguardando aprovação.`);
+          }}
+        />
       )}
       {!loading && tab === "COTACOES" && (
-        <CotacoesTab cotacoes={cotacoes} onChanged={loadAll} />
+        <CotacoesTab cotacoes={cotacoes} necessidades={necessidades} onChanged={loadAll} />
       )}
       {!loading && tab === "AGUARDANDO" && (
         <AguardandoTab orders={aguardando} onChanged={loadAll} />
@@ -140,7 +200,7 @@ export function Compras() {
 
 function NecessidadesTab({ items, onCotacaoCreated }: {
   items: NecessidadeItem[];
-  onCotacaoCreated: () => void;
+  onCotacaoCreated: (info: { supplier: string; itemCount: number }) => void;
 }) {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -197,39 +257,30 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
 
   function exportCotacao() {
     const pecas = selected.size > 0 ? Array.from(selected).join(",") : "";
-    const url = "/api/necessidades/export.csv" + (pecas ? `?pecas=${encodeURIComponent(pecas)}` : "");
+    const url = "/api/necessidades/export.xlsx" + (pecas ? `?pecas=${encodeURIComponent(pecas)}` : "");
     window.open(url, "_blank");
   }
 
-  function parseCSV(text: string): Array<{ chavePeca: string; qtde: number; valorUnitario: number }> {
-    const lines = text.split(/\r?\n/).filter(l => l.trim());
-    // Detectar header
-    const start = lines[0].toUpperCase().includes("PECA") || lines[0].toUpperCase().includes("VALOR") ? 1 : 0;
-    const result: Array<{ chavePeca: string; qtde: number; valorUnitario: number }> = [];
-    for (const line of lines.slice(start)) {
-      // CSV simples: PECA,QTDE,VALOR UN,VALOR TOTAL
-      const cols = line.split(",").map(c => c.trim().replace(/^"|"$/g, ""));
-      if (cols.length < 3) continue;
-      const chavePeca = cols[0];
-      const qtde = parseInt(cols[1]);
-      const valorUnitario = parseFloat(cols[2].replace(",", "."));
-      if (!chavePeca || isNaN(qtde) || isNaN(valorUnitario) || valorUnitario <= 0) continue;
-      result.push({ chavePeca, qtde, valorUnitario });
-    }
-    return result;
-  }
-
-  function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+  async function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const text = ev.target?.result as string;
-      const parsed = parseCSV(text);
-      setUploadedItems(parsed);
+    setBusy(true); setError(null);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const r = await fetch("/api/cotacoes/parse", { method: "POST", body: form });
+      if (!r.ok) { const d = await r.json(); throw new Error(d.error ?? "Erro ao ler o arquivo."); }
+      const d = await r.json() as { items: Array<{ chavePeca: string; qtde: number; valorUnitario: number }> };
+      if (d.items.length === 0) {
+        throw new Error("Nenhum item com preço válido encontrado no arquivo. Confira se as colunas PECA, QTDE e VALOR UN foram preenchidas.");
+      }
+      setUploadedItems(d.items);
       setMode("upload");
-    };
-    reader.readAsText(file, "utf-8");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function submitCotacao() {
@@ -243,9 +294,10 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
         body: JSON.stringify({ supplier: supplier.trim(), items: uploadedItems }),
       });
       if (!r.ok) { const d = await r.json(); throw new Error(d.error ?? "Erro ao registrar cotação."); }
+      const info = { supplier: supplier.trim(), itemCount: uploadedItems.length };
       setMode("list"); setSupplier(""); setUploadedItems([]); setSelected(new Set());
       if (fileRef.current) fileRef.current.value = "";
-      onCotacaoCreated();
+      onCotacaoCreated(info);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }
@@ -417,7 +469,7 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
         </button>
         <label className="btn btn-primary btn-sm" style={{ cursor: "pointer" }}>
           <Upload size={12} /> Importar cotação
-          <input ref={fileRef} type="file" accept=".csv" style={{ display: "none" }} onChange={onFileChange} />
+          <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={onFileChange} />
         </label>
       </div>
 
@@ -430,7 +482,7 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
               </th>
               <th style={{ padding: "0.5rem 0.75rem", textAlign: "left", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", letterSpacing: "0.05em" }}>CHAVE DA PEÇA</th>
               <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>UNID.</th>
-              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>APARELHOS</th>
+              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }} title="Aparelhos que viram MATCH completo comprando só esta peça">APARELHOS</th>
               <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>VENDA EST.</th>
               <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>MARGEM</th>
               <th style={{ padding: "0.5rem 0.75rem", width: 32 }} />
@@ -454,12 +506,21 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
                 <td style={{ padding: "0.5rem 0.75rem", fontFamily: "monospace", fontSize: "0.82rem" }}>{item.chavePeca}</td>
                 <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{item.qtdeNecessaria}</td>
                 <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>
-                  <span style={{
-                    display: "inline-flex", alignItems: "center", gap: "0.3rem",
-                    fontWeight: 600, color: "var(--accent)", fontVariantNumeric: "tabular-nums",
-                  }}>
+                  <span
+                    title={item.casesBlocked > item.fullMatchCount
+                      ? `${item.fullMatchCount} fecham sozinho(s) · ${item.casesBlocked} bloqueado(s) no total (outros aguardam mais peças)`
+                      : `${item.fullMatchCount} fecham sozinho(s)`}
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: "0.3rem",
+                      fontWeight: 600, color: "var(--accent)", fontVariantNumeric: "tabular-nums",
+                    }}>
                     <Zap size={11} style={{ opacity: 0.7 }} />
-                    {item.casesBlocked}
+                    {item.fullMatchCount}
+                    {item.casesBlocked > item.fullMatchCount && (
+                      <span style={{ fontWeight: 400, color: "var(--text-muted)", fontSize: "0.72rem" }}>
+                        /{item.casesBlocked}
+                      </span>
+                    )}
                   </span>
                 </td>
                 <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.8rem", color: "var(--info-text)", fontVariantNumeric: "tabular-nums" }}>
@@ -572,7 +633,7 @@ function NecessidadesTab({ items, onCotacaoCreated }: {
 // Tab: Cotações pendentes de aprovação
 // ---------------------------------------------------------------------------
 
-function CotacoesTab({ cotacoes, onChanged }: { cotacoes: Cotacao[]; onChanged: () => void }) {
+function CotacoesTab({ cotacoes, necessidades, onChanged }: { cotacoes: Cotacao[]; necessidades: NecessidadeItem[]; onChanged: () => void }) {
   const [approving, setApproving] = useState<Cotacao | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -596,6 +657,7 @@ function CotacoesTab({ cotacoes, onChanged }: { cotacoes: Cotacao[]; onChanged: 
     return (
       <AprovacaoScreen
         cotacao={approving}
+        necessidades={necessidades}
         busy={busy}
         error={error}
         onCancel={() => setApproving(null)}
@@ -680,25 +742,71 @@ function CotacoesTab({ cotacoes, onChanged }: { cotacoes: Cotacao[]; onChanged: 
 // Tela de aprovação de cotação
 // ---------------------------------------------------------------------------
 
-function AprovacaoScreen({ cotacao, busy, error, onCancel, onAprovar }: {
+function AprovacaoScreen({ cotacao, necessidades, busy, error, onCancel, onAprovar }: {
   cotacao: Cotacao;
+  necessidades: NecessidadeItem[];
   busy: boolean;
   error: string | null;
   onCancel: () => void;
-  onAprovar: (aprovados: number[]) => Promise<string | null>;
+  onAprovar: (aprovados: Array<{ id: number; qtde: number; chavePeca: string; valorUnitario: number }>) => Promise<string | null>;
 }) {
   const [selecionados, setSelecionados] = useState<Set<number>>(new Set(cotacao.items.map(i => i.id)));
+  const [qtdes, setQtdes] = useState<Map<number, number>>(() => new Map(cotacao.items.map(i => [i.id, i.qtde])));
   const [done, setDone] = useState<string | null>(null);
+  const [projection, setProjection] = useState<CotacaoProjectionResult | null>(null);
+  const [projLoading, setProjLoading] = useState(false);
+  const [showProjectedModal, setShowProjectedModal] = useState(false);
+
+  function setQtde(id: number, val: number) {
+    setQtdes(m => { const n = new Map(m); n.set(id, Math.max(1, val)); return n; });
+  }
+
+  const necMap = useMemo(() => {
+    const m = new Map<string, NecessidadeItem>();
+    for (const n of necessidades) m.set(n.chavePeca, n);
+    return m;
+  }, [necessidades]);
 
   const aprovados = cotacao.items.filter(i => selecionados.has(i.id));
-  const total = aprovados.reduce((s, i) => s + i.qtde * i.valorUnitario, 0);
+  const total = aprovados.reduce((s, i) => s + (qtdes.get(i.id) ?? i.qtde) * i.valorUnitario, 0);
+
+  // Motor canônico: POST /api/cotacoes/project-match com todos os itens selecionados
+  useEffect(() => {
+    const selected = cotacao.items
+      .filter(i => selecionados.has(i.id))
+      .map(i => ({ id: i.id, chavePeca: i.chavePeca, qtde: qtdes.get(i.id) ?? i.qtde, valorUnitario: i.valorUnitario }));
+    if (selected.length === 0) { setProjection(null); return; }
+    const t = setTimeout(() => {
+      setProjLoading(true);
+      fetch("/api/cotacoes/project-match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: selected }),
+      })
+        .then(r => r.ok ? r.json() as Promise<CotacaoProjectionResult> : null)
+        .then(d => { if (d) setProjection(d); })
+        .finally(() => setProjLoading(false));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [selecionados, qtdes, cotacao.items]);
+
+  // Mapa lineProjections por item.id
+  const lineMap = useMemo(() => {
+    const m = new Map<number, LineProjection>();
+    if (projection) for (const lp of projection.lineProjections) m.set(lp.id, lp);
+    return m;
+  }, [projection]);
 
   function toggle(id: number) {
     setSelecionados(p => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   }
 
   async function handleAprovar() {
-    const orderNumber = await onAprovar(Array.from(selecionados));
+    const items = Array.from(selecionados).map(id => {
+      const item = cotacao.items.find(i => i.id === id)!;
+      return { id, qtde: qtdes.get(id) ?? item.qtde, chavePeca: item.chavePeca, valorUnitario: item.valorUnitario };
+    });
+    const orderNumber = await onAprovar(items);
     if (orderNumber) setDone(orderNumber);
   }
 
@@ -717,62 +825,215 @@ function AprovacaoScreen({ cotacao, busy, error, onCancel, onAprovar }: {
     );
   }
 
+  const incr = projection?.incrementalFullMatches ?? 0;
+  const proj = projection?.projectedFullMatches ?? 0;
+  const base = projection?.baselineFullMatches ?? 0;
+
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
         <button className="btn btn-ghost btn-sm" onClick={onCancel}><X size={12} /> Voltar</button>
         <div>
           <div style={{ fontWeight: 600 }}>Aprovar cotação — {cotacao.supplier}</div>
-          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Desmarque as peças que não quer pedir</div>
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Desmarque ou ajuste as quantidades. O motor recalcula ao vivo.</div>
         </div>
       </div>
 
       {error && <ErrorBanner message={error} />}
 
+      {/* Barra de projeção canônica */}
+      {aprovados.length > 0 && (
+        <div style={{
+          background: "linear-gradient(135deg, rgba(124,58,237,0.12) 0%, rgba(99,102,241,0.06) 100%)",
+          border: "1px solid rgba(124,58,237,0.3)",
+          borderRadius: "var(--r-lg)",
+          padding: "0.75rem 1.25rem",
+          marginBottom: "0.875rem",
+          display: "flex", alignItems: "center", gap: "1.25rem", flexWrap: "wrap",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", color: "var(--accent)" }}>
+            <Zap size={14} />
+            <span style={{ fontWeight: 700, fontSize: "0.8rem" }}>Projeção canônica</span>
+          </div>
+
+          {projLoading ? (
+            <Loader2 size={14} className="spin" style={{ color: "var(--muted)" }} />
+          ) : (
+            <div style={{ display: "flex", gap: "1.5rem", flexWrap: "wrap", alignItems: "flex-start" }}>
+              {/* Incremento de matches */}
+              <div>
+                <div style={{ fontSize: "0.6rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Novos matches</div>
+                <div style={{ fontWeight: 800, fontSize: "1.1rem", letterSpacing: "-0.03em", fontVariantNumeric: "tabular-nums",
+                  color: incr > 0 ? "var(--ok-text)" : "var(--muted)" }}>
+                  +{incr}
+                </div>
+                <div style={{ fontSize: "0.6rem", color: "var(--muted)", marginTop: "0.1rem" }}>
+                  {base} → {proj} aparelhos
+                </div>
+              </div>
+
+              {projection && (
+                <>
+                  <div style={{ width: 1, background: "var(--border)", alignSelf: "stretch" }} />
+                  <div>
+                    <div style={{ fontSize: "0.6rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Venda incremental</div>
+                    <div style={{ fontWeight: 700, fontSize: "0.9rem", color: "var(--info-text)", fontVariantNumeric: "tabular-nums" }}>
+                      {projection.incrementalRevenue != null ? fmtMoney(projection.incrementalRevenue) : "—"}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "0.6rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Margem incremental</div>
+                    <div style={{ fontWeight: 700, fontSize: "0.9rem", fontVariantNumeric: "tabular-nums",
+                      color: (projection.incrementalMargin ?? 0) >= 0 ? "var(--ok-text)" : "var(--err-text)" }}>
+                      {projection.incrementalMargin != null ? fmtMoney(projection.incrementalMargin) : "—"}
+                    </div>
+                  </div>
+                  <div style={{ width: 1, background: "var(--border)", alignSelf: "stretch" }} />
+                  <div>
+                    <div style={{ fontSize: "0.6rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Custo do pedido</div>
+                    <div style={{ fontWeight: 700, fontSize: "0.9rem", color: "var(--accent)", fontVariantNumeric: "tabular-nums" }}>
+                      {fmtMoney(total)}
+                    </div>
+                  </div>
+                  {projection.marginToCostRatio != null && (
+                    <div>
+                      <div style={{ fontSize: "0.6rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Retorno/custo</div>
+                      <div style={{ fontWeight: 700, fontSize: "0.9rem", fontVariantNumeric: "tabular-nums",
+                        color: projection.marginToCostRatio >= 1 ? "var(--ok-text)" : projection.marginToCostRatio >= 0.5 ? "var(--warn-text)" : "var(--err-text)" }}>
+                        {projection.marginToCostRatio.toFixed(1)}×
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {projection && incr > 0 && (
+            <>
+              <span style={{ flex: 1 }} />
+              <button
+                className="btn btn-ghost btn-sm"
+                style={{ flexShrink: 0, fontSize: "0.78rem" }}
+                onClick={() => setShowProjectedModal(true)}
+              >
+                <ArrowRight size={12} /> Ver {proj} aparelhos
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="card" style={{ padding: 0, overflow: "hidden", marginBottom: "1rem" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ background: "var(--surface-alt)", borderBottom: "1px solid var(--border)" }}>
-              <th style={{ padding: "0.5rem 1rem", width: 36 }}></th>
-              <th style={{ padding: "0.5rem 0.75rem", textAlign: "left", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>PEÇA</th>
-              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>QTDE</th>
-              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>VALOR UN</th>
-              <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>TOTAL</th>
-            </tr>
-          </thead>
-          <tbody>
-            {cotacao.items.map((item, idx) => {
-              const checked = selecionados.has(item.id);
-              return (
-                <tr
-                  key={item.id}
-                  style={{ borderBottom: idx < cotacao.items.length - 1 ? "1px solid var(--border)" : "none",
-                    opacity: checked ? 1 : 0.4, cursor: "pointer",
-                    background: checked ? undefined : "rgba(239,68,68,0.03)" }}
-                  onClick={() => toggle(item.id)}
-                >
-                  <td style={{ padding: "0.5rem 1rem" }}>
-                    <input type="checkbox" checked={checked} onChange={() => toggle(item.id)} onClick={e => e.stopPropagation()} />
-                  </td>
-                  <td style={{ padding: "0.5rem 0.75rem", fontFamily: "monospace", fontSize: "0.82rem" }}>{item.chavePeca}</td>
-                  <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>{item.qtde}</td>
-                  <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>{fmtMoney(item.valorUnitario)}</td>
-                  <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontWeight: 600 }}>{fmtMoney(item.qtde * item.valorUnitario)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-          <tfoot>
-            <tr style={{ borderTop: "2px solid var(--border)" }}>
-              <td colSpan={4} style={{ padding: "0.625rem 0.75rem", textAlign: "right", fontWeight: 600, fontSize: "0.85rem" }}>
-                Total aprovado ({aprovados.length} iten{aprovados.length !== 1 ? "s" : ""})
-              </td>
-              <td style={{ padding: "0.625rem 0.75rem", textAlign: "right", fontWeight: 700, color: "var(--accent)" }}>
-                {fmtMoney(total)}
-              </td>
-            </tr>
-          </tfoot>
-        </table>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
+            <thead>
+              <tr style={{ background: "var(--surface-alt)", borderBottom: "1px solid var(--border)" }}>
+                <th style={{ padding: "0.5rem 1rem", width: 36 }}></th>
+                <th style={{ padding: "0.5rem 0.75rem", textAlign: "left", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>PEÇA</th>
+                <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>QTDE</th>
+                <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>VALOR UN</th>
+                <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>TOTAL</th>
+                <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }} title="Matches isolados por peça (motor histórico)">MATCH ×1</th>
+                <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--accent)", letterSpacing: "0.04em" }} title="Quantos matches a mais se remover esta linha da seleção — impacto marginal canônico">⚡ MARGINAL</th>
+                <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>VENDA EST.</th>
+                <th style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)" }}>MARGEM</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cotacao.items.map((item, idx) => {
+                const checked = selecionados.has(item.id);
+                const nec = necMap.get(item.chavePeca);
+                const lp = lineMap.get(item.id);
+                return (
+                  <tr
+                    key={item.id}
+                    style={{ borderBottom: idx < cotacao.items.length - 1 ? "1px solid var(--border)" : "none",
+                      opacity: checked ? 1 : 0.4, cursor: "pointer",
+                      background: checked ? undefined : "rgba(239,68,68,0.03)" }}
+                    onClick={() => toggle(item.id)}
+                  >
+                    <td style={{ padding: "0.5rem 1rem" }}>
+                      <input type="checkbox" checked={checked} onChange={() => toggle(item.id)} onClick={e => e.stopPropagation()} />
+                    </td>
+                    <td style={{ padding: "0.5rem 0.75rem", fontFamily: "monospace", fontSize: "0.82rem" }}>{item.chavePeca}</td>
+                    <td style={{ padding: "0.25rem 0.5rem", textAlign: "right" }} onClick={e => e.stopPropagation()}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "0.25rem" }}>
+                        {checked && item.qtde > 1 && (qtdes.get(item.id) ?? item.qtde) < item.qtde && (
+                          <span style={{ fontSize: "0.65rem", color: "var(--warn-text)", whiteSpace: "nowrap" }} title={`Cotado: ${item.qtde}`}>
+                            /{item.qtde}
+                          </span>
+                        )}
+                        <input
+                          type="number" min={1} max={item.qtde}
+                          value={qtdes.get(item.id) ?? item.qtde}
+                          disabled={!checked}
+                          onChange={e => setQtde(item.id, Number(e.target.value))}
+                          style={{
+                            width: 56, textAlign: "right", padding: "0.2rem 0.35rem",
+                            fontSize: "0.82rem", fontVariantNumeric: "tabular-nums",
+                            border: checked && (qtdes.get(item.id) ?? item.qtde) < item.qtde
+                              ? "1px solid var(--warn-text)" : "1px solid var(--border)",
+                            borderRadius: "var(--radius)", background: "var(--surface)",
+                            color: "var(--text)", opacity: checked ? 1 : 0.5,
+                          }}
+                        />
+                      </div>
+                    </td>
+                    <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>{fmtMoney(item.valorUnitario)}</td>
+                    <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontWeight: 600 }}>{fmtMoney((qtdes.get(item.id) ?? item.qtde) * item.valorUnitario)}</td>
+                    <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>
+                      {nec ? (
+                        <span style={{ fontWeight: 600, color: nec.fullMatchCount > 0 ? "var(--ok-text)" : "var(--muted)", fontVariantNumeric: "tabular-nums", fontSize: "0.82rem" }}>
+                          {nec.fullMatchCount}
+                        </span>
+                      ) : <span style={{ color: "var(--muted)", fontSize: "0.75rem" }}>—</span>}
+                    </td>
+                    <td style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>
+                      {checked && lp ? (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: "0.2rem",
+                          fontWeight: 700, fontSize: "0.85rem", fontVariantNumeric: "tabular-nums",
+                          color: lp.marginalFullMatches > 0 ? "var(--accent)" : "var(--muted)" }}
+                          title={`Esta linha contribui com +${lp.marginalFullMatches} matches no cenário combinado`}>
+                          {lp.marginalFullMatches > 0 && <Zap size={10} />}
+                          +{lp.marginalFullMatches}
+                        </span>
+                      ) : projLoading && checked ? (
+                        <Loader2 size={12} className="spin" style={{ color: "var(--muted)" }} />
+                      ) : <span style={{ color: "var(--muted)", fontSize: "0.75rem" }}>—</span>}
+                    </td>
+                    <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.8rem", color: "var(--info-text)", fontVariantNumeric: "tabular-nums" }}>
+                      {nec?.saleReleased != null ? fmtMoney(nec.saleReleased) : <span style={{ color: "var(--muted)" }}>—</span>}
+                    </td>
+                    <td style={{ padding: "0.5rem 0.75rem", textAlign: "right", fontSize: "0.8rem", fontVariantNumeric: "tabular-nums",
+                      color: nec?.marginReleased != null && nec.marginReleased >= 0 ? "var(--ok-text)" : nec?.marginReleased != null ? "var(--err-text)" : undefined }}>
+                      {nec?.marginReleased != null ? fmtMoney(nec.marginReleased) : <span style={{ color: "var(--muted)" }}>—</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr style={{ borderTop: "2px solid var(--border)" }}>
+                <td colSpan={2} style={{ padding: "0.625rem 0.75rem", textAlign: "right", fontWeight: 600, fontSize: "0.85rem" }}>
+                  {aprovados.length} iten{aprovados.length !== 1 ? "s" : ""} selecionado{aprovados.length !== 1 ? "s" : ""}
+                </td>
+                <td style={{ padding: "0.625rem 0.5rem", textAlign: "right", fontWeight: 600, fontSize: "0.82rem", fontVariantNumeric: "tabular-nums", color: "var(--text-muted)" }}>
+                  {aprovados.reduce((s, i) => s + (qtdes.get(i.id) ?? i.qtde), 0)} un
+                </td>
+                <td />
+                <td style={{ padding: "0.625rem 0.75rem", textAlign: "right", fontWeight: 700, color: "var(--accent)", fontVariantNumeric: "tabular-nums" }}>
+                  {fmtMoney(total)}
+                </td>
+                <td />
+                <td style={{ padding: "0.625rem 0.75rem", textAlign: "right", fontWeight: 700, color: incr > 0 ? "var(--ok-text)" : "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+                  {projLoading ? <Loader2 size={12} className="spin" /> : `+${incr}`}
+                </td>
+                <td colSpan={2} />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
@@ -788,7 +1049,99 @@ function AprovacaoScreen({ cotacao, busy, error, onCancel, onAprovar }: {
           }
         </button>
       </div>
+
+      {/* Modal: aparelhos projetados */}
+      {showProjectedModal && projection && (
+        <ProjectedCasesModal
+          projection={projection}
+          onClose={() => setShowProjectedModal(false)}
+        />
+      )}
     </div>
+  );
+}
+
+function ProjectedCasesModal({ projection, onClose }: { projection: CotacaoProjectionResult; onClose: () => void }) {
+  const incremental = projection.projectedCases.filter(c => c.isIncremental);
+  const existing = projection.projectedCases.filter(c => !c.isIncremental);
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.5)",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem" }}
+      onClick={onClose}
+    >
+      <div
+        className="card"
+        style={{ maxWidth: 700, width: "100%", maxHeight: "85vh", display: "flex", flexDirection: "column", overflow: "hidden" }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: "1rem 1.25rem", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+          <Zap size={15} style={{ color: "var(--accent)" }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, fontSize: "0.95rem" }}>
+              Aparelhos com match no cenário projetado
+            </div>
+            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.1rem" }}>
+              Base: {projection.baselineFullMatches} · Projetado: {projection.projectedFullMatches} · <span style={{ color: "var(--ok-text)", fontWeight: 600 }}>+{projection.incrementalFullMatches} novos</span>
+            </div>
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}><X size={14} /></button>
+        </div>
+
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          {incremental.length > 0 && (
+            <>
+              <div style={{ padding: "0.625rem 1.25rem 0.25rem", fontSize: "0.7rem", fontWeight: 700, color: "var(--ok-text)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Novos matches — gerados por esta compra ({incremental.length})
+              </div>
+              <CaseTable cases={incremental} />
+            </>
+          )}
+          {existing.length > 0 && (
+            <>
+              <div style={{ padding: "0.625rem 1.25rem 0.25rem", fontSize: "0.7rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", borderTop: incremental.length > 0 ? "1px solid var(--border)" : undefined, marginTop: incremental.length > 0 ? "0.5rem" : undefined }}>
+                Já em match na baseline ({existing.length})
+              </div>
+              <CaseTable cases={existing} muted />
+            </>
+          )}
+        </div>
+
+        <div style={{ padding: "0.75rem 1.25rem", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, fontSize: "0.8rem", color: "var(--text-muted)" }}>
+          <span>
+            Venda projetada: <strong style={{ color: "var(--info-text)" }}>{projection.projectedRevenue != null ? fmtMoney(projection.projectedRevenue) : "—"}</strong>
+            {" · "}
+            Margem projetada: <strong style={{ color: "var(--ok-text)" }}>{projection.projectedMargin != null ? fmtMoney(projection.projectedMargin) : "—"}</strong>
+          </span>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>Fechar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CaseTable({ cases, muted }: { cases: ProjectedCase[]; muted?: boolean }) {
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem", opacity: muted ? 0.65 : 1 }}>
+      <tbody>
+        {cases.map((c, i) => (
+          <tr key={c.caseId} style={{ borderTop: i > 0 ? "1px solid var(--border)" : undefined }}>
+            <td style={{ padding: "0.45rem 1.25rem", fontFamily: "monospace", fontSize: "0.75rem", color: "var(--text-2)", width: 140 }}>
+              {c.imei ?? `#${c.caseId}`}
+            </td>
+            <td style={{ padding: "0.45rem 0.75rem" }}>{c.model ?? "—"}</td>
+            <td style={{ padding: "0.45rem 0.75rem", textAlign: "right", fontVariantNumeric: "tabular-nums", color: "var(--info-text)" }}>
+              {c.estimatedSale != null ? fmtMoney(c.estimatedSale) : "—"}
+            </td>
+            <td style={{ padding: "0.45rem 1.25rem 0.45rem 0.75rem", textAlign: "right", fontVariantNumeric: "tabular-nums",
+              color: c.margin != null && c.margin >= 0 ? "var(--ok-text)" : c.margin != null ? "var(--err-text)" : "var(--muted)" }}>
+              {c.margin != null ? fmtMoney(c.margin) : "—"}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
