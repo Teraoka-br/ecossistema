@@ -10,6 +10,7 @@ import {
 import { getDb } from "../../db/database.js";
 import { requireAuth } from "../middleware/auth-middleware.js";
 import { logAudit } from "../../audit/audit-service.js";
+import { requestMatchRecompute } from "../../match/engine-orchestrator.js";
 
 export const repairRouter = Router();
 
@@ -200,6 +201,7 @@ repairRouter.post("/repair-cases/:id/parts", requireAuth, (req, res, next) => {
     if (!rc) { res.status(404).json({ error: "Caso não encontrado." }); return; }
     const part = addPart(getDb(), Number(req.params.id), { ...body as any, createdByUserId: req.sessionUser!.id });
     logAudit(getDb(), { userId: req.sessionUser!.id, action: "PART_ADDED", entityType: "PART_REQUEST", entityId: String(part.id), meta: { repairCaseId: Number(req.params.id) } });
+    requestMatchRecompute(getDb(), "PART_ADDED", "REPAIR_CASE", Number(req.params.id));
     res.status(201).json({ part });
   } catch (err) {
     if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
@@ -213,6 +215,7 @@ repairRouter.patch("/part-requests/:id", requireAuth, (req, res, next) => {
     const body = PartSchema.parse(req.body);
     const part = updatePart(getDb(), Number(req.params.id), { ...body as any, updatedByUserId: req.sessionUser!.id });
     logAudit(getDb(), { userId: req.sessionUser!.id, action: "PART_UPDATED", entityType: "PART_REQUEST", entityId: req.params.id });
+    requestMatchRecompute(getDb(), "PART_UPDATED", "REPAIR_CASE", part.repairCaseId);
     res.json({ part });
   } catch (err) {
     if (err instanceof z.ZodError) { res.status(400).json({ error: "Dados inválidos." }); return; }
@@ -225,6 +228,7 @@ repairRouter.post("/part-requests/:id/cancel", requireAuth, (req, res, next) => 
   try {
     const part = cancelPart(getDb(), Number(req.params.id), req.sessionUser!.id);
     logAudit(getDb(), { userId: req.sessionUser!.id, action: "PART_CANCELLED", entityType: "PART_REQUEST", entityId: req.params.id });
+    requestMatchRecompute(getDb(), "PART_CANCELLED", "REPAIR_CASE", part.repairCaseId);
     res.json({ part });
   } catch (err) {
     if (handleRepairError(err, res)) return;
