@@ -43,13 +43,14 @@ function pathToLabel(pathname: string): string {
   return pathname;
 }
 
-type Step = "idle" | "open" | "sent";
+type Step = "idle" | "open" | "sent" | "error";
 
 export function BugReportWidget() {
   const location = useLocation();
   const [step, setStep]             = useState<Step>("idle");
   const [description, setDescription] = useState("");
   const [sending, setSending]       = useState(false);
+  const [sendError, setSendError]   = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const pageLabel  = pathToLabel(location.pathname);
@@ -62,6 +63,7 @@ export function BugReportWidget() {
   async function submit() {
     if (!description.trim()) return;
     setSending(true);
+    setSendError(null);
     try {
       const meta = JSON.stringify({
         path:       location.pathname,
@@ -70,7 +72,7 @@ export function BugReportWidget() {
         module,
         reportedAt: new Date().toISOString(),
       });
-      await fetch("/api/issue-reports", {
+      const r = await fetch("/api/issue-reports", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -81,8 +83,14 @@ export function BugReportWidget() {
           metadata_json: meta,
         }),
       });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `Erro ${r.status}`);
+      }
       setStep("sent");
       setDescription("");
+    } catch (e) {
+      setSendError(e instanceof Error ? e.message : "Erro ao enviar");
     } finally {
       setSending(false);
     }
@@ -91,6 +99,7 @@ export function BugReportWidget() {
   function close() {
     setStep("idle");
     setDescription("");
+    setSendError(null);
   }
 
   return (
@@ -199,7 +208,12 @@ export function BugReportWidget() {
                     {sending ? "Enviando…" : "Enviar"}
                   </button>
                 </div>
-                <div style={{ fontSize: "0.67rem", color: "var(--text-disabled)", marginTop: "0.4rem", textAlign: "right" }}>
+                {sendError && (
+                  <div style={{ fontSize: "0.72rem", color: "var(--err-text)", marginTop: "0.4rem" }}>
+                    {sendError}
+                  </div>
+                )}
+                <div style={{ fontSize: "0.67rem", color: "var(--text-disabled)", marginTop: "0.3rem", textAlign: "right" }}>
                   Ctrl+Enter para enviar
                 </div>
               </>

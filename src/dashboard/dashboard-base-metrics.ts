@@ -9,6 +9,7 @@ export interface BaseMetrics {
   aptoReparo: number;
   comTecnico: number;
   emAnalise: number;
+  vendaEstado: number;
   finalizados: number;
   totalCases: number;
   totalUniqueImeis: number;
@@ -38,7 +39,8 @@ export function getBaseMetrics(db: Db): BaseMetrics {
   const aptoReparo  = get(workflowMap, "APTO_REPARO", "EM_SEPARACAO");
   const comTecnico  = get(workflowMap, "DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO");
   const emAnalise   = get(workflowMap, "EM_ANALISE");
-  const finalizados = get(workflowMap, "CONCLUIDO", "CANCELADO", "VENDA_ESTADO");
+  const vendaEstado = get(workflowMap, "VENDA_ESTADO");
+  const finalizados = get(workflowMap, "CONCLUIDO", "CANCELADO");
   const totalCases  = [...workflowMap.values()].reduce((s, v) => s + v, 0);
 
   const activeRow = db
@@ -51,6 +53,7 @@ export function getBaseMetrics(db: Db): BaseMetrics {
     aptoReparo,
     comTecnico,
     emAnalise,
+    vendaEstado,
     finalizados,
     totalCases,
     totalUniqueImeis: (db.prepare(`SELECT COUNT(DISTINCT imei) as c FROM repair_cases`).get() as { c: number }).c,

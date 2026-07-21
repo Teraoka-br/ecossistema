@@ -9,6 +9,7 @@ export interface CardCounts {
   emAnalise: number;
   aguardandoPeca: number;
   comTecnico: number;
+  vendaEstado: number;
   finalizados: number;
   total: number;
 }
@@ -59,7 +60,7 @@ export function getDashboardOverview(db: Db): OverviewData {
 
   // -- Cards (usa metricas base compartilhadas com snapshot-service) -----------
   const base = getBaseMetrics(db);
-  const { workflowMap: wf, aptoReparo, comTecnico, emAnalise, finalizados } = base;
+  const { workflowMap: wf, aptoReparo, comTecnico, emAnalise, vendaEstado, finalizados } = base;
   const aguardandoPeca = (wf.get("PEDIR_PECA") ?? 0) + (wf.get("AGUARDANDO_RECEBIMENTO") ?? 0);
 
   const cards: CardCounts = {
@@ -70,6 +71,7 @@ export function getDashboardOverview(db: Db): OverviewData {
     emAnalise,
     aguardandoPeca,
     comTecnico,
+    vendaEstado,
     finalizados,
     total: base.totalCases,
   };
@@ -89,6 +91,7 @@ export function getDashboardOverview(db: Db): OverviewData {
       emAnalise: cards.emAnalise - yesterday.em_analise_count,
       aguardandoPeca: cards.aguardandoPeca - yesterday.aguardando_peca_count,
       comTecnico: cards.comTecnico - yesterday.com_tecnico_count,
+      vendaEstado: cards.vendaEstado - (yesterday.venda_estado_count as number ?? 0),
       finalizados: cards.finalizados - yesterday.finalizados_count,
       total: cards.total - (yesterday.total_cases as number),
     };

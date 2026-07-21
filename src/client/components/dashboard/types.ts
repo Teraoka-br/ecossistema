@@ -6,6 +6,7 @@ export interface CardCounts {
   emAnalise: number;
   aguardandoPeca: number;
   comTecnico: number;
+  vendaEstado: number;
   finalizados: number;
   total: number;
 }
@@ -122,6 +123,7 @@ export interface FinancialByBucket {
   emAnalise:      FinancialSlice;
   aguardandoPeca: FinancialSlice;
   comTecnico:     FinancialSlice;
+  vendaEstado:    FinancialSlice;
   finalizados:    FinancialSlice;
 }
 
@@ -143,13 +145,14 @@ export interface HomeData {
 export type CardMetric = keyof CardCounts;
 
 export const CARD_LABELS: Record<CardMetric, string> = {
-  match: "Match completo",
-  matchParcial: "Match parcial",
+  match: "Match",
+  matchParcial: "Parcial",
   aptoReparo: "Apto reparo",
   verificar: "Verificar",
   emAnalise: "Em analise",
   aguardandoPeca: "Aguardando peca",
   comTecnico: "Com tecnico",
+  vendaEstado: "Venda estado",
   finalizados: "Finalizados",
   total: "Todos",
 };

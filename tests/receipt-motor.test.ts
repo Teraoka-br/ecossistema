@@ -42,6 +42,24 @@ function seedTech(db: Db): number {
 }
 
 /**
+ * O motor mantém sempre 10 casos elegíveis-mas-sem-match em VENDA_ESTADO
+ * (piores margin_points), preenchendo vagas a cada run. Em bancos de teste
+ * pequenos, o caso sob teste seria varrido para VENDA_ESTADO por ser o único
+ * elegível. Pré-preenchemos as 10 vagas com casos já em VENDA_ESTADO — o motor
+ * não mexe neles (permanente) e o caso testado fica protegido desde o primeiro run.
+ */
+function seedFillerCases(db: Db, count = 10): void {
+  for (let i = 0; i < count; i++) {
+    const rc = createRepairCase(db, { imei: `FILLER${i}`, createdByUserId: 1 });
+    addPart(db, rc.id, { description: "Filler", chavePeca: `FILLER-PART-${i}`, createdByUserId: 1 });
+    db.prepare(
+      "UPDATE repair_cases SET analysis_status='COMPLETED', workflow_status='VENDA_ESTADO', age_days=30, cost=100000, estimated_sale=1, margin=-99999, deposito_atual='AGUARDANDO PECA' WHERE id=?",
+    ).run(rc.id);
+    db.prepare("UPDATE part_requests SET status='PEDIR_PECA' WHERE repair_case_id=?").run(rc.id);
+  }
+}
+
+/**
  * Cria pedido de compra com item vinculado a uma purchase_request.
  * Retorna os IDs para controle no teste.
  */
@@ -137,6 +155,7 @@ describe("recebimento → motor → MATCH", () => {
   });
 
   it("caso AGUARDANDO_RECEBIMENTO vira MATCH quando peça é recebida", async () => {
+    seedFillerCases(db);
     // Cria aparelho com análise completa
     const rc = createRepairCase(db, { imei: "444", os: "OS-4", createdByUserId: 1 });
     const partA32 = addPart(db, rc.id, { description: "Bateria", chavePeca: "BATERIA A32", createdByUserId: 1 });

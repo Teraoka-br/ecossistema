@@ -36,9 +36,9 @@ const updateSchema = z.object({
 issueRouter.get("/issue-reports", requireAuth, (req, res, next) => {
   try {
     const db = getDb();
-    const user = (req as unknown as { user?: { id: number; role: string; username?: string } }).user;
-    const isAdmin = user?.role === "ADMIN";
-    const issues = listIssues(db, { userId: user?.id, isAdmin });
+    const user = req.sessionUser!;
+    const isAdmin = user.role === "ADMIN";
+    const issues = listIssues(db, { userId: user.id, isAdmin });
     res.json({ issues });
   } catch (err) {
     next(err);
@@ -48,15 +48,15 @@ issueRouter.get("/issue-reports", requireAuth, (req, res, next) => {
 issueRouter.post("/issue-reports", requireAuth, (req, res, next) => {
   try {
     const db = getDb();
-    const user = (req as unknown as { user?: { id: number; role: string; username?: string } }).user;
+    const user = req.sessionUser!;
     const body = createSchema.parse(req.body);
     const issue = createIssue(db, {
       title:        body.title,
       description:  body.description,
       module:       body.module as IssueModule,
       severity:     body.severity as IssueSeverityReport,
-      userId:       user?.id ?? null,
-      userName:     user?.username ?? null,
+      userId:       user.id,
+      userName:     user.username,
       metadataJson: body.metadata_json,
     });
     res.status(201).json({ issue });
@@ -68,14 +68,14 @@ issueRouter.post("/issue-reports", requireAuth, (req, res, next) => {
 issueRouter.patch("/issue-reports/:id", requireAuth, requireAdmin, (req, res, next) => {
   try {
     const db = getDb();
-    const user = (req as unknown as { user?: { id: number } }).user;
+    const user = req.sessionUser!;
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) { res.status(400).json({ error: "ID inválido" }); return; }
     const body = updateSchema.parse(req.body);
     const updated = updateIssue(db, id, {
       status:           body.status as IssueStatus | undefined,
       resolution_notes: body.resolution_notes,
-      resolvedByUserId: user?.id,
+      resolvedByUserId: user.id,
     });
     if (!updated) { res.status(404).json({ error: "Problema não encontrado" }); return; }
     res.json({ issue: updated });

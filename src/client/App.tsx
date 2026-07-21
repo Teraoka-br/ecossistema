@@ -105,133 +105,149 @@ function AuthenticatedShell() {
   const isAdmin = user.role === "ADMIN";
   const isTechnician = user.role === "TECHNICIAN";
   const roleLabel = isAdmin ? "Admin" : isTechnician ? "Técnico" : "Operador";
+  const avatarLetter = (user.displayName ?? user.username ?? "?")[0].toUpperCase();
+
+  const link = (to: string, icon: React.ReactNode, label: string, end?: boolean) => (
+    <NavLink
+      to={to} end={end}
+      title={label}
+      className={({ isActive }) => `sidebar-link${isActive ? " active" : ""}`}
+    >
+      {icon} <span className="nav-text">{label}</span>
+    </NavLink>
+  );
 
   return (
     <div className="app-shell">
       <UIVersionMarker />
       <BugReportWidget />
+
+      {/* ── Topbar simplificada ── */}
       <header className="topbar">
-        <button className="topbar-btn" onClick={() => setSidebarOpen((v) => !v)} title="Recolher menu">
+        <button className="topbar-btn" onClick={() => setSidebarOpen(v => !v)} title="Recolher menu">
           {sidebarOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
         </button>
-        <span className="topbar-brand">
-          <span className="topbar-brand-dot" />
-          Sistema de Peças
-        </span>
+        <span style={{ flex: 1 }} />
         <BetaBanner />
-        <span className="topbar-user">
-          <NotificationBell role={user.role as "ADMIN" | "OPERATOR" | "TECHNICIAN"} />
-          <span>{user.displayName}</span>
-          <span className="topbar-role">{roleLabel}</span>
-          <button className="topbar-btn" onClick={logout} title="Sair">
+        <NotificationBell role={user.role as "ADMIN" | "OPERATOR" | "TECHNICIAN"} />
+        <span className="topbar-user" style={{ gap: "0.4rem" }}>
+          <span
+            style={{
+              width: 28, height: 28, borderRadius: "50%",
+              background: "linear-gradient(135deg, #5C7CFA 0%, #3B5BDB 100%)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: "0.7rem", fontWeight: 800, color: "#fff", flexShrink: 0,
+            }}
+          >
+            {avatarLetter}
+          </span>
+          <span style={{ fontSize: "0.78rem" }}>{user.displayName}</span>
+          <button className="topbar-btn" onClick={logout} title="Sair" style={{ padding: "5px 7px" }}>
             <LogOut size={14} />
-            Sair
           </button>
         </span>
       </header>
 
       <div className={`layout ${sidebarOpen ? "" : "sidebar-collapsed"}`}>
         <nav className={`sidebar ${sidebarOpen ? "" : "collapsed"}`}>
-          {isTechnician ? (
-            <div className="sidebar-section">
-              <div className="sidebar-label">Meu trabalho</div>
-              <NavLink to="/inicio" title="Início" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <LayoutDashboard size={15} /> <span className="nav-text">Início</span>
-              </NavLink>
-              <NavLink to="/minha-fila" title="Minha fila" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                <Wrench size={15} /> <span className="nav-text">Minha fila</span>
-              </NavLink>
+
+          {/* Brand */}
+          <div className="sidebar-brand">
+            <div className="sidebar-brand-icon">⚙</div>
+            <div className="sidebar-brand-text">
+              <div className="sidebar-brand-name">Outlet do Celular</div>
+              <div className="sidebar-brand-sub">Sistema de Peças</div>
             </div>
-          ) : (
-            <>
-              {isAdmin && (
-                <div className="sidebar-section">
-                  <div className="sidebar-label">Visão geral</div>
-                  <NavLink to="/admin/dashboards" title="Dashboards" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <LayoutDashboard size={15} /> <span className="nav-text">Dashboards</span>
-                  </NavLink>
-                </div>
-              )}
+          </div>
 
+          {/* Nav */}
+          <div className="sidebar-nav">
+            {isTechnician ? (
               <div className="sidebar-section">
-                <div className="sidebar-label">Operação</div>
-                <NavLink to="/fila-reparos" title="Fila de reparos" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <List size={15} /> <span className="nav-text">Fila de reparos</span>
-                </NavLink>
-                <NavLink to="/analise" title="Analisar aparelho" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <Wrench size={15} /> <span className="nav-text">Analisar aparelho</span>
-                </NavLink>
+                <div className="sidebar-label">Meu trabalho</div>
+                {link("/inicio",      <LayoutDashboard size={15} />, "Início")}
+                {link("/minha-fila", <Wrench size={15} />,           "Minha fila")}
               </div>
-
-              <div className="sidebar-section">
-                <div className="sidebar-label">Suprimentos</div>
-                <NavLink to="/compras" title="Pedidos de peças" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <ShoppingCart size={15} /> <span className="nav-text">Pedidos de peças</span>
-                </NavLink>
-                <NavLink to="/estoque" end title="Estoque" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <Boxes size={15} /> <span className="nav-text">Estoque</span>
-                </NavLink>
-                <NavLink to="/estoque/referencias" title="Referências de peças" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`} style={{ paddingLeft: sidebarOpen ? "2rem" : undefined, fontSize: "0.82rem" }}>
-                  <Tag size={13} /> <span className="nav-text">Referências de peças</span>
-                </NavLink>
-                <NavLink to="/bipagem" title="Contagem" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                  <ScanBarcode size={15} /> <span className="nav-text">Contagem</span>
-                </NavLink>
-              </div>
-
-              {isAdmin && (
+            ) : (
+              <>
+                {isAdmin && (
+                  <div className="sidebar-section">
+                    <div className="sidebar-label">Visão geral</div>
+                    {link("/admin/dashboards", <LayoutDashboard size={15} />, "Central operacional")}
+                  </div>
+                )}
                 <div className="sidebar-section">
-                  <div className="sidebar-label">Administração</div>
-                  <NavLink to="/admin/dados" title="Dados" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Database size={15} /> <span className="nav-text">Dados</span>
-                  </NavLink>
-                  <NavLink to="/admin/usuarios" title="Pessoas e Usuários" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Users size={15} /> <span className="nav-text">Pessoas e Usuários</span>
-                  </NavLink>
-                  <NavLink to="/admin/regras-match" title="Regras do Match" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Sliders size={15} /> <span className="nav-text">Regras do Match</span>
-                  </NavLink>
-                  <NavLink to="/diagnostico" title="Diagnóstico" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <Stethoscope size={15} /> <span className="nav-text">Diagnóstico</span>
-                  </NavLink>
-                  <NavLink to="/importar" title="Importação inicial" className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`}>
-                    <FileInput size={15} /> <span className="nav-text">Importação inicial</span>
-                  </NavLink>
+                  <div className="sidebar-label">Operação</div>
+                  {link("/fila-reparos", <List size={15} />,  "Fila de reparos")}
+                  {link("/analise",      <Wrench size={15} />, "Analisar aparelho")}
                 </div>
-              )}
-            </>
-          )}
+                <div className="sidebar-section">
+                  <div className="sidebar-label">Suprimentos</div>
+                  {link("/compras",            <ShoppingCart size={15} />, "Pedidos de peças")}
+                  {link("/estoque",            <Boxes size={15} />,        "Estoque", true)}
+                  {link("/estoque/referencias",<Tag size={14} />,          "Referências")}
+                  {link("/bipagem",            <ScanBarcode size={15} />,  "Contagem")}
+                </div>
+                {isAdmin && (
+                  <div className="sidebar-section">
+                    <div className="sidebar-label">Admin</div>
+                    {link("/admin/dados",       <Database size={15} />,    "Dados")}
+                    {link("/admin/usuarios",    <Users size={15} />,       "Usuários")}
+                    {link("/admin/regras-match",<Sliders size={15} />,     "Regras do Match")}
+                    {link("/diagnostico",       <Stethoscope size={15} />, "Diagnóstico")}
+                    {link("/importar",          <FileInput size={15} />,   "Importação")}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* User ancorado no fundo */}
+          <div className="sidebar-user">
+            <div className="sidebar-avatar">{avatarLetter}</div>
+            <div className="sidebar-user-info">
+              <div className="sidebar-user-name">{user.displayName}</div>
+              <div className="sidebar-user-role">{roleLabel}</div>
+            </div>
+            <button
+              className="topbar-btn"
+              onClick={logout}
+              title="Sair"
+              style={{ padding: "5px 6px", flexShrink: 0 }}
+            >
+              <LogOut size={14} />
+            </button>
+          </div>
         </nav>
 
         <main className="main-content">
           <Suspense fallback={<LoadingScreen />}>
-          <Routes>
-            <Route path="/" element={<Navigate to={isTechnician ? "/inicio" : isAdmin ? "/admin/dashboards" : "/fila-reparos"} replace />} />
-            <Route path="/inicio" element={<TecnicoHome />} />
-            <Route path="/minha-fila" element={<TecnicoFila />} />
-            <Route path="/fila-reparos" element={<FilaReparos />} />
-            <Route path="/analise" element={<Analise />} />
-            <Route path="/importar" element={<Importar />} />
-            <Route path="/diagnostico" element={<Diagnostico />} />
-            <Route path="/pedidos" element={<Pedidos />} />
-            <Route path="/compras" element={<Compras />} />
-            <Route path="/bipagem" element={<Bipagem />} />
-            <Route path="/estoque" element={<Estoque />} />
-            <Route path="/estoque/movimentacoes" element={<Movimentacoes />} />
-            <Route path="/estoque/referencias" element={<Referencias />} />
-            <Route path="/cotacoes" element={<Cotacoes />} />
-            {/* Compatibilidade — telas antigas redirecionam para a fila */}
-            <Route path="/match" element={<Navigate to="/fila-reparos" replace />} />
-            <Route path="/separacao" element={<Navigate to="/fila-reparos" replace />} />
-            <Route path="/admin/usuarios" element={<AdminUsuarios />} />
-            <Route path="/admin/tecnicos" element={<Navigate to="/admin/usuarios" replace />} />
-            <Route path="/admin/pessoas" element={<Navigate to="/admin/usuarios" replace />} />
-            <Route path="/admin/datasys" element={<AdminDatasys />} />
-            <Route path="/admin/dados" element={<AdminDados />} />
-            <Route path="/admin/dashboards" element={<AdminDashboards />} />
-            <Route path="/admin/regras-match" element={<AdminMatchRules />} />
-            <Route path="*" element={<Navigate to={isTechnician ? "/inicio" : isAdmin ? "/admin/dashboards" : "/fila-reparos"} replace />} />
-          </Routes>
+            <Routes>
+              <Route path="/" element={<Navigate to={isTechnician ? "/inicio" : isAdmin ? "/admin/dashboards" : "/fila-reparos"} replace />} />
+              <Route path="/inicio" element={<TecnicoHome />} />
+              <Route path="/minha-fila" element={<TecnicoFila />} />
+              <Route path="/fila-reparos" element={<FilaReparos />} />
+              <Route path="/analise" element={<Analise />} />
+              <Route path="/importar" element={<Importar />} />
+              <Route path="/diagnostico" element={<Diagnostico />} />
+              <Route path="/pedidos" element={<Pedidos />} />
+              <Route path="/compras" element={<Compras />} />
+              <Route path="/bipagem" element={<Bipagem />} />
+              <Route path="/estoque" element={<Estoque />} />
+              <Route path="/estoque/movimentacoes" element={<Movimentacoes />} />
+              <Route path="/estoque/referencias" element={<Referencias />} />
+              <Route path="/cotacoes" element={<Cotacoes />} />
+              <Route path="/match" element={<Navigate to="/fila-reparos" replace />} />
+              <Route path="/separacao" element={<Navigate to="/fila-reparos" replace />} />
+              <Route path="/admin/usuarios" element={<AdminUsuarios />} />
+              <Route path="/admin/tecnicos" element={<Navigate to="/admin/usuarios" replace />} />
+              <Route path="/admin/pessoas" element={<Navigate to="/admin/usuarios" replace />} />
+              <Route path="/admin/datasys" element={<AdminDatasys />} />
+              <Route path="/admin/dados" element={<AdminDados />} />
+              <Route path="/admin/dashboards" element={<AdminDashboards />} />
+              <Route path="/admin/regras-match" element={<AdminMatchRules />} />
+              <Route path="*" element={<Navigate to={isTechnician ? "/inicio" : isAdmin ? "/admin/dashboards" : "/fila-reparos"} replace />} />
+            </Routes>
           </Suspense>
         </main>
       </div>

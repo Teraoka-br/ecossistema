@@ -1,4 +1,4 @@
-﻿import type { Db } from "../db/database.js";
+import type { Db } from "../db/database.js";
 
 /** Retorna a data local no fuso America/Sao_Paulo como 'YYYY-MM-DD'. */
 export function todaySaoPaulo(): string {
@@ -27,6 +27,7 @@ export interface DashboardSnapshot {
   aguardando_peca_count: number;
   com_tecnico_count: number;
   finalizados_count: number;
+  venda_estado_count: number;
   stock_total_units: number;
   stock_total_references: number;
   stock_available_units: number;
@@ -35,161 +36,100 @@ export interface DashboardSnapshot {
   updated_at: string;
 }
 
-/** Agrega os dados atuais do banco e persiste (ou atualiza) o snapshot do dia. Idempotente. */
 export function createOrUpdateDashboardSnapshot(
   db: Db,
   date: string = todaySaoPaulo(),
 ): DashboardSnapshot {
-  // â”€â”€ repair_cases â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const casesRow = db
-    .prepare(
-      `SELECT COUNT(*) as total_cases,
-              COUNT(DISTINCT imei) as total_unique_imeis
-       FROM repair_cases
-       WHERE workflow_status NOT IN ('ENTREGUE','CANCELADO')`,
-    )
-    .get() as { total_cases: number; total_unique_imeis: number };
-
-  // â”€â”€ repair_cases workflow counts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- repair_cases workflow counts --------------------------------------------
   type StatusRow = { workflow_status: string; c: number };
   const workflowRows = db
-    .prepare(
-      `SELECT workflow_status, COUNT(*) as c
-       FROM repair_cases
-       WHERE workflow_status NOT IN ('ENTREGUE','CANCELADO')
-       GROUP BY workflow_status`,
-    )
+    .prepare(`SELECT workflow_status, COUNT(*) as c FROM repair_cases GROUP BY workflow_status`)
     .all() as StatusRow[];
-
   const wf = new Map(workflowRows.map((r) => [r.workflow_status, r.c]));
-  const aptoReparo =
-    (wf.get("APTO_REPARO") ?? 0) +
-    (wf.get("PECA_DISPONIVEL") ?? 0) +
-    (wf.get("EM_SEPARACAO") ?? 0);
-  const comTecnico =
-    (wf.get("DIRECIONADO_TECNICO") ?? 0) +
-    (wf.get("EM_REPARO") ?? 0) +
-    (wf.get("REPARO_EXECUTADO") ?? 0) +
-    (wf.get("TRIAGEM_FINAL") ?? 0) +
-    (wf.get("RETORNO_TECNICO") ?? 0);
-  const finalizados =
-    db
-      .prepare(
-        `SELECT COUNT(*) as c FROM repair_cases WHERE workflow_status IN ('ENTREGUE','CANCELADO')`,
-      )
-      .get() as { c: number };
 
-  // â”€â”€ part_requests (match status) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  type PartRow = { status: string; c: number };
-  const partRows = db
-    .prepare(
-      `SELECT status, COUNT(*) as c
-       FROM part_requests WHERE cancelled_at IS NULL
-       GROUP BY status`,
-    )
-    .all() as PartRow[];
-  const pr = new Map(partRows.map((r) => [r.status, r.c]));
+  const get = (...keys: string[]) => keys.reduce((s, k) => s + (wf.get(k) ?? 0), 0);
 
-  // â”€â”€ estoque operacional â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // Base: Ãºltimo snapshot OFFICIAL ou contagem de source_inventory_items
+  const matchCount      = get("MATCH");
+  const matchPartial    = get("MATCH_PARCIAL");
+  const aptoReparo      = get("APTO_REPARO", "EM_SEPARACAO");
+  const verificar       = get("VERIFICAR");
+  const emAnalise       = get("EM_ANALISE");
+  const aguardandoPeca  = get("PEDIR_PECA", "AGUARDANDO_RECEBIMENTO");
+  const comTecnico      = get("DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO");
+  const vendaEstado     = get("VENDA_ESTADO");
+  const finalizados     = get("CONCLUIDO", "CANCELADO");
+  const totalCases      = [...wf.values()].reduce((s, v) => s + v, 0);
+  const uniqueImeisRow  = db.prepare(`SELECT COUNT(DISTINCT imei) as c FROM repair_cases`).get() as { c: number };
+
+  // -- estoque operacional -----------------------------------------------------
   const lastSnap = db
-    .prepare(
-      `SELECT id, total_units, baseline_movement_id_max
-       FROM stock_snapshots WHERE status='OFFICIAL' ORDER BY id DESC LIMIT 1`,
-    )
+    .prepare(`SELECT id, total_units, baseline_movement_id_max FROM stock_snapshots WHERE status='OFFICIAL' ORDER BY id DESC LIMIT 1`)
     .get() as { id: number; total_units: number; baseline_movement_id_max: number | null } | undefined;
 
   let baseUnits = 0;
-  let baseRefs = 0;
+  let baseRefs  = 0;
 
   if (lastSnap) {
     baseUnits = lastSnap.total_units;
-    baseRefs = (
-      db
-        .prepare(
-          `SELECT COUNT(DISTINCT chave_peca_norm) as c
-           FROM stock_snapshot_items WHERE snapshot_id=? AND chave_peca_norm IS NOT NULL`,
-        )
-        .get(lastSnap.id) as { c: number }
-    ).c;
+    baseRefs  = (db.prepare(`SELECT COUNT(DISTINCT chave_peca_norm) as c FROM stock_snapshot_items WHERE snapshot_id=? AND chave_peca_norm IS NOT NULL`).get(lastSnap.id) as { c: number }).c;
   } else {
-    const src = db
-      .prepare(
-        `SELECT COUNT(*) as units, COUNT(DISTINCT chave_peca_norm) as refs
-         FROM source_inventory_items`,
-      )
-      .get() as { units: number; refs: number };
+    const src = db.prepare(`SELECT COUNT(*) as units, COUNT(DISTINCT chave_peca_norm) as refs FROM source_inventory_items`).get() as { units: number; refs: number };
     baseUnits = src.units;
-    baseRefs = src.refs;
+    baseRefs  = src.refs;
   }
 
-  // MovimentaÃ§Ãµes posteriores ao corte
-  const movCut = lastSnap?.baseline_movement_id_max ?? 0;
-  const movRow = db
-    .prepare(
-      `SELECT COALESCE(SUM(quantity),0) as q
-       FROM stock_movements WHERE reversed_at IS NULL AND id > ?`,
-    )
-    .get(movCut) as { q: number };
+  const movCut    = lastSnap?.baseline_movement_id_max ?? 0;
+  const movRow    = db.prepare(`SELECT COALESCE(SUM(quantity),0) as q FROM stock_movements WHERE reversed_at IS NULL AND id > ?`).get(movCut) as { q: number };
   const stockTotal = baseUnits + movRow.q;
+  const reservedRow = db.prepare(`SELECT COALESCE(SUM(quantity),0) as q FROM stock_movements WHERE reversed_at IS NULL AND movement_type='REPAIR_RESERVATION'`).get() as { q: number };
+  const reserved  = Math.abs(reservedRow.q);
 
-  // Reservas ativas
-  const reservedRow = db
-    .prepare(
-      `SELECT COALESCE(SUM(quantity),0) as q
-       FROM stock_movements
-       WHERE reversed_at IS NULL
-         AND movement_type='REPAIR_RESERVATION'`,
-    )
-    .get() as { q: number };
-  const reserved = Math.abs(reservedRow.q);
+  // -- contagens ---------------------------------------------------------------
+  const countRow = db.prepare(`SELECT COUNT(*) as c FROM count_sessions WHERE status='FINALIZED' AND finished_at IS NOT NULL`).get() as { c: number };
 
-  // â”€â”€ contagens â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const countRow = db
-    .prepare(`SELECT COUNT(*) as c FROM count_sessions WHERE status='FINALIZED' AND finished_at IS NOT NULL`)
-    .get() as { c: number };
-
-  // â”€â”€ UPSERT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- UPSERT ------------------------------------------------------------------
   const now = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO dashboard_daily_snapshots
-       (snapshot_date, total_cases, total_unique_imeis,
-        match_count, match_partial_count, apto_reparo_count,
-        verificar_count, em_analise_count, aguardando_peca_count,
-        com_tecnico_count, finalizados_count,
-        stock_total_units, stock_total_references,
-        stock_available_units, stock_reserved_units,
-        counting_sessions_count, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-     ON CONFLICT(snapshot_date) DO UPDATE SET
-       total_cases             = excluded.total_cases,
-       total_unique_imeis      = excluded.total_unique_imeis,
-       match_count             = excluded.match_count,
-       match_partial_count     = excluded.match_partial_count,
-       apto_reparo_count       = excluded.apto_reparo_count,
-       verificar_count         = excluded.verificar_count,
-       em_analise_count        = excluded.em_analise_count,
-       aguardando_peca_count   = excluded.aguardando_peca_count,
-       com_tecnico_count       = excluded.com_tecnico_count,
-       finalizados_count       = excluded.finalizados_count,
-       stock_total_units       = excluded.stock_total_units,
-       stock_total_references  = excluded.stock_total_references,
-       stock_available_units   = excluded.stock_available_units,
-       stock_reserved_units    = excluded.stock_reserved_units,
-       counting_sessions_count = excluded.counting_sessions_count,
-       updated_at              = excluded.updated_at`,
-  ).run(
+  db.prepare(`
+    INSERT INTO dashboard_daily_snapshots
+      (snapshot_date, total_cases, total_unique_imeis,
+       match_count, match_partial_count, apto_reparo_count,
+       verificar_count, em_analise_count, aguardando_peca_count,
+       com_tecnico_count, finalizados_count, venda_estado_count,
+       stock_total_units, stock_total_references,
+       stock_available_units, stock_reserved_units,
+       counting_sessions_count, updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(snapshot_date) DO UPDATE SET
+      total_cases             = excluded.total_cases,
+      total_unique_imeis      = excluded.total_unique_imeis,
+      match_count             = excluded.match_count,
+      match_partial_count     = excluded.match_partial_count,
+      apto_reparo_count       = excluded.apto_reparo_count,
+      verificar_count         = excluded.verificar_count,
+      em_analise_count        = excluded.em_analise_count,
+      aguardando_peca_count   = excluded.aguardando_peca_count,
+      com_tecnico_count       = excluded.com_tecnico_count,
+      finalizados_count       = excluded.finalizados_count,
+      venda_estado_count      = excluded.venda_estado_count,
+      stock_total_units       = excluded.stock_total_units,
+      stock_total_references  = excluded.stock_total_references,
+      stock_available_units   = excluded.stock_available_units,
+      stock_reserved_units    = excluded.stock_reserved_units,
+      counting_sessions_count = excluded.counting_sessions_count,
+      updated_at              = excluded.updated_at
+  `).run(
     date,
-    casesRow.total_cases,
-    casesRow.total_unique_imeis,
-    pr.get("MATCH") ?? 0,
-    pr.get("MATCH_PARCIAL") ?? 0,
+    totalCases,
+    uniqueImeisRow.c,
+    matchCount,
+    matchPartial,
     aptoReparo,
-    pr.get("VERIFICAR") ?? 0,
-    (wf.get("DRAFT") ?? 0) + (wf.get("ANALISE") ?? 0),
-    (wf.get("AGUARDANDO_PECA") ?? 0) + (pr.get("AGUARDANDO_RECEBIMENTO") ?? 0),
+    verificar,
+    emAnalise,
+    aguardandoPeca,
     comTecnico,
-    finalizados.c,
+    finalizados,
+    vendaEstado,
     stockTotal,
     baseRefs,
     Math.max(0, stockTotal - reserved),
@@ -198,7 +138,5 @@ export function createOrUpdateDashboardSnapshot(
     now,
   );
 
-  return db
-    .prepare(`SELECT * FROM dashboard_daily_snapshots WHERE snapshot_date=?`)
-    .get(date) as unknown as DashboardSnapshot;
+  return db.prepare(`SELECT * FROM dashboard_daily_snapshots WHERE snapshot_date=?`).get(date) as unknown as DashboardSnapshot;
 }

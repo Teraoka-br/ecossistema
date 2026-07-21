@@ -23,6 +23,7 @@ export interface FinancialByBucket {
   emAnalise:      FinancialSlice;
   aguardandoPeca: FinancialSlice;
   comTecnico:     FinancialSlice;
+  vendaEstado:    FinancialSlice;
   finalizados:    FinancialSlice;
 }
 
@@ -71,7 +72,8 @@ export function getFinancialByBucket(db: Db): FinancialByBucket {
     emAnalise:      ["EM_ANALISE"],
     aguardandoPeca: ["PEDIR_PECA", "AGUARDANDO_RECEBIMENTO"],
     comTecnico:     ["DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO"],
-    finalizados:    ["CONCLUIDO", "CANCELADO", "VENDA_ESTADO"],
+    vendaEstado:    ["VENDA_ESTADO"],
+    finalizados:    ["CONCLUIDO", "CANCELADO"],
   };
   const result = {} as FinancialByBucket;
   for (const [key, statuses] of Object.entries(BUCKETS) as [keyof FinancialByBucket, string[]][]) {

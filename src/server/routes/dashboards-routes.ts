@@ -15,7 +15,7 @@ import {
 export const dashboardsRouter = Router();
 
 // ── GET /api/dashboards/home ──────────────────────────────────────────────────
-dashboardsRouter.get("/dashboards/home", requireAuth, (_req, res, next) => {
+dashboardsRouter.get("/dashboards/home", requireAuth, requireAdmin, (_req, res, next) => {
   try {
     const t0 = Date.now();
     const db = getDb();
@@ -68,7 +68,7 @@ dashboardsRouter.get("/dashboards/timeline", requireAuth, (req, res, next) => {
       "total_cases","total_unique_imeis",
       "match_count","match_partial_count","apto_reparo_count",
       "verificar_count","em_analise_count","aguardando_peca_count",
-      "com_tecnico_count","finalizados_count",
+      "com_tecnico_count","venda_estado_count","finalizados_count",
       "stock_total_units","stock_available_units","stock_reserved_units",
     ];
     if (!ALLOWED_METRICS.includes(metric)) {
@@ -93,13 +93,46 @@ dashboardsRouter.get("/dashboards/timeline", requireAuth, (req, res, next) => {
   }
 });
 
+// ── GET /api/dashboards/timeline/multi ───────────────────────────────────────
+// Retorna todos os status como séries para o gráfico multi-linha
+dashboardsRouter.get("/dashboards/timeline/multi", requireAuth, (req, res, next) => {
+  try {
+    const db = getDb();
+    const from = req.query.from as string | undefined;
+    const to   = req.query.to   as string | undefined;
+
+    type Row = {
+      snapshot_date: string;
+      match_count: number; match_partial_count: number; apto_reparo_count: number;
+      verificar_count: number; em_analise_count: number; aguardando_peca_count: number;
+      com_tecnico_count: number; venda_estado_count: number; finalizados_count: number;
+      total_cases: number;
+    };
+    const rows = db.prepare(`
+      SELECT snapshot_date,
+        match_count, match_partial_count, apto_reparo_count,
+        verificar_count, em_analise_count, aguardando_peca_count,
+        com_tecnico_count, venda_estado_count, finalizados_count,
+        total_cases
+      FROM dashboard_daily_snapshots
+      WHERE (?1 IS NULL OR snapshot_date >= ?1)
+        AND (?2 IS NULL OR snapshot_date <= ?2)
+      ORDER BY snapshot_date ASC
+    `).all(from ?? null, to ?? null) as Row[];
+
+    res.json({ data: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── POST /api/dashboards/counting/justify ────────────────────────────────────
 dashboardsRouter.post("/dashboards/counting/justify", requireAuth, requireAdmin, (req, res, next) => {
   try {
     const db = getDb();
     const { date, justification } = req.body as { date?: string; justification?: string };
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) { res.status(400).json({ error: "Data inválida" }); return; }
-    const createdBy = (req as { user?: { name?: string } }).user?.name ?? null;
+    const createdBy = req.sessionUser?.displayName ?? null;
     if (!justification || !justification.trim()) {
       db.prepare(`DELETE FROM counting_day_justifications WHERE date = ?`).run(date);
     } else {

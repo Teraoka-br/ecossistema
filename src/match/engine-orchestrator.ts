@@ -164,6 +164,7 @@ export async function runRepairMatchEngine(
         JOIN repair_cases rc ON rc.id = rmcr.repair_case_id
         WHERE rmcr.run_id = ?
           AND rmcr.eligible = 1
+          AND rmcr.result_status NOT IN ('MATCH','MATCH_PARCIAL')
           AND rc.workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
         ORDER BY rmcr.margin_points ASC NULLS LAST, rmcr.score ASC
         LIMIT ?

@@ -95,6 +95,19 @@ function caseStatus(db: Db, caseId: number): string {
   return (db.prepare("SELECT workflow_status AS s FROM repair_cases WHERE id = ?").get(caseId) as { s: string }).s;
 }
 
+/**
+ * O motor mantém sempre 10 casos elegíveis-mas-sem-match em VENDA_ESTADO
+ * (piores margin_points), preenchendo vagas a cada run. Em bancos de teste
+ * pequenos, o caso sob teste seria varrido para VENDA_ESTADO por ser o único
+ * elegível. Pré-preenchemos as 10 vagas com casos já em VENDA_ESTADO — o motor
+ * não mexe neles (permanente) e o caso testado fica protegido desde o primeiro run.
+ */
+function seedFillerCases(db: Db, count = 10): void {
+  for (let i = 0; i < count; i++) {
+    seedCase(db, { cost: 100000, sale: 1, chaves: [`FILLER-PART-${i}`], workflow: "VENDA_ESTADO" });
+  }
+}
+
 let db: Db;
 beforeEach(() => {
   db = makeDb();
@@ -188,6 +201,7 @@ describe("33/34. reserva manual e estoque disponível", () => {
   });
 
   it("unidade reservada não é sinalizada pelo motor para outro card", async () => {
+    seedFillerCases(db);
     seedStock(db, "BATERIA X", "R1", 1);
     const a = seedCase(db, { chaves: ["BATERIA X"], workflow: "MATCH" });
     const b = seedCase(db, { chaves: ["BATERIA X"] });
@@ -206,6 +220,7 @@ describe("33/34. reserva manual e estoque disponível", () => {
 
 describe("38. compatibilidade (grupos simétricos) dispara recálculo", () => {
   it("criar grupo com dois membros dispara recálculo e motor passa a usar o membro compatível", async () => {
+    seedFillerCases(db);
     seedStock(db, "BATERIA IPHONE 12/12 PRO", "RF9", 2);
     const { caseId } = seedCase(db, { chaves: ["BATERIA IPHONE 12"] });
 
@@ -224,6 +239,7 @@ describe("38. compatibilidade (grupos simétricos) dispara recálculo", () => {
   });
 
   it("remover membro do grupo dispara recálculo e card volta a PEDIR_PECA", async () => {
+    seedFillerCases(db);
     seedStock(db, "BATERIA IPHONE 12/12 PRO", "RF9", 2);
     const { caseId } = seedCase(db, { chaves: ["BATERIA IPHONE 12"] });
     const group = createCompatibilityGroup(db, { name: "G" });
@@ -301,6 +317,7 @@ describe("39/40. simulação", () => {
 
 describe("41. rodar o motor duas vezes é idempotente", () => {
   it("segunda execução sem mudanças não altera nada", async () => {
+    seedFillerCases(db);
     seedStock(db, "BATERIA X", "R1", 1);
     seedCase(db, { chaves: ["BATERIA X"] });
     seedCase(db, { chaves: ["BATERIA X"] });
@@ -504,6 +521,7 @@ describe("grupos de compatibilidade simétrica — integração DB", () => {
   });
 
   it("remover membro do grupo dispara recálculo e caso volta a PEDIR_PECA", async () => {
+    seedFillerCases(db);
     seedStock(db, "CHAVE-B", "REF-B", 1);
     const { caseId } = seedCase(db, { chaves: ["CHAVE-A"] });
     const group = createCompatibilityGroup(db, { name: "G" });

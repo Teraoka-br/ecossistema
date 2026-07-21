@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Loading } from "../ui.js";
 import type { HomeData, CardMetric } from "../components/dashboard/types.js";
+import type { SparkRow } from "../components/dashboard/OperationalCards.js";
 import { OperationalCards } from "../components/dashboard/OperationalCards.js";
 import { OperationalTimeline } from "../components/dashboard/OperationalTimeline.js";
 import { PanoramaBlock } from "../components/dashboard/PanoramaBlock.js";
@@ -23,8 +24,9 @@ export function AdminDashboards() {
   const [data, setData] = useState<HomeData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<CardMetric>("total");
+  const [activeFilter, setActiveFilter] = useState<CardMetric | null>(null);
   const [period, setPeriod] = useState(7);
+  const [sparkData, setSparkData] = useState<SparkRow[]>([]);
 
   const load = useCallback(() => {
     setError(null);
@@ -36,6 +38,14 @@ export function AdminDashboards() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const from = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    fetch(`/api/dashboards/timeline/multi?from=${from}`)
+      .then(r => r.ok ? r.json() as Promise<{ data: SparkRow[] }> : Promise.reject())
+      .then(j => setSparkData(j.data))
+      .catch(() => {});
+  }, []);
 
   if (error) return (
     <div>
@@ -82,16 +92,25 @@ export function AdminDashboards() {
         <FinancialBlock financial={data.financial} />
 
         {/* ── Cards operacionais ─────────────────────────────────── */}
+        {activeFilter && (
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span className="muted" style={{ fontSize: "0.8rem" }}>Filtro ativo:</span>
+            <button className="btn btn-ghost btn-sm" onClick={() => setActiveFilter(null)}>
+              ✕ Limpar filtro
+            </button>
+          </div>
+        )}
         <OperationalCards
           current={data.current}
           comparison={data.comparison}
-          selected={selected}
-          onSelect={setSelected}
+          selected={activeFilter}
+          onSelect={setActiveFilter}
           financial={data.financialByBucket}
+          sparkData={sparkData}
         />
 
         {/* ── Grafico temporal ───────────────────────────────────── */}
-        <OperationalTimeline metric={selected} period={period} />
+        <OperationalTimeline activeFilter={activeFilter} period={period} />
 
         {/* ── Panorama + Tecnicos ────────────────────────────────── */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>

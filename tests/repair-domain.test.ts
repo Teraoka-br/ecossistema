@@ -63,16 +63,25 @@ describe("repair_cases", () => {
     ).toThrow(RepairError);
   });
 
-  it("permite caso com mesmo IMEI+OS mas data diferente", () => {
+  it("bloqueia segundo caso ativo para o mesmo IMEI mesmo com data diferente", () => {
     createRepairCase(db, { imei: "222222222222222", os: "OS-Y", repairDate: "2024-01-01", createdByUserId: userId });
+    expect(() =>
+      createRepairCase(db, { imei: "222222222222222", os: "OS-Y", repairDate: "2024-02-01", createdByUserId: userId }),
+    ).toThrow(RepairError);
+  });
+
+  it("permite reabrir o mesmo IMEI após o caso anterior ser encerrado", () => {
+    const rc1 = createRepairCase(db, { imei: "222222222222222", os: "OS-Y", repairDate: "2024-01-01", createdByUserId: userId });
+    closeRepairCase(db, rc1.id, { status: "CONCLUIDO", userId });
     const rc2 = createRepairCase(db, { imei: "222222222222222", os: "OS-Y", repairDate: "2024-02-01", createdByUserId: userId });
     expect(rc2.id).toBeGreaterThan(0);
   });
 
-  it("permite caso sem repairDate mesmo com mesmo IMEI+OS (regra não se aplica sem data)", () => {
+  it("bloqueia segundo caso ativo para o mesmo IMEI mesmo sem repairDate (regra de IMEI ativo não depende de data)", () => {
     createRepairCase(db, { imei: "333333333333333", os: "OS-Z", createdByUserId: userId });
-    const rc2 = createRepairCase(db, { imei: "333333333333333", os: "OS-Z", createdByUserId: userId });
-    expect(rc2.id).toBeGreaterThan(0);
+    expect(() =>
+      createRepairCase(db, { imei: "333333333333333", os: "OS-Z", createdByUserId: userId }),
+    ).toThrow(RepairError);
   });
 
   it("finalizar análise requer campos obrigatórios e ao menos uma peça", () => {
@@ -206,8 +215,9 @@ describe("searchRepairCases", () => {
   beforeEach(() => {
     db = makeDb();
     userId = seedUser(db);
-    createRepairCase(db, { imei: "100000000000001", os: "OS-A", repairDate: "2024-01-01", brand: "Samsung", model: "Galaxy", createdByUserId: userId });
+    const rc1 = createRepairCase(db, { imei: "100000000000001", os: "OS-A", repairDate: "2024-01-01", brand: "Samsung", model: "Galaxy", createdByUserId: userId });
     createRepairCase(db, { imei: "100000000000002", os: "OS-B", repairDate: "2024-02-01", brand: "Apple", model: "iPhone", createdByUserId: userId });
+    closeRepairCase(db, rc1.id, { status: "CONCLUIDO", userId });
     createRepairCase(db, { imei: "100000000000001", os: "OS-A", repairDate: "2024-03-01", createdByUserId: userId });
   });
 

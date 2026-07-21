@@ -187,6 +187,23 @@ export function createRepairCase(
     }
   }
 
+  // Bloquear se já existe um caso ATIVO (não terminal) para o mesmo IMEI —
+  // espelha o índice único parcial idx_repair_cases_active_imei (migration 050).
+  if (imeiNorm && !params.legacyCaseKey) {
+    const placeholders = TERMINAL_WORKFLOW_STATUSES.map(() => "?").join(",");
+    const activeExisting = db
+      .prepare(
+        `SELECT id FROM repair_cases WHERE imei_norm = ? AND workflow_status NOT IN (${placeholders}) LIMIT 1`,
+      )
+      .get(imeiNorm, ...TERMINAL_WORKFLOW_STATUSES) as { id: number } | undefined;
+    if (activeExisting) {
+      throw new RepairError(
+        "DUPLICATE_ACTIVE_IMEI",
+        `Já existe um caso ativo para o IMEI ${params.imei} (id ${activeExisting.id}). Encerre-o antes de abrir um novo.`,
+      );
+    }
+  }
+
   const margin =
     params.cost != null && params.estimatedSale != null
       ? params.estimatedSale - params.cost
