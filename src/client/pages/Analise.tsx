@@ -1,5 +1,9 @@
 import { useState, useCallback } from "react";
 import { Search, Plus, Save, CheckCircle, X, AlertTriangle, Info } from "lucide-react";
+import {
+  buildChavePeca, buildValidPartsPayload, fetchPartSuggestions as fetchSuggestions,
+  type PartDraft, type PartSuggestion,
+} from "../utils/part-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -22,20 +26,6 @@ interface PrefillResult {
   vendaEstimada: number;
   sources: Partial<Record<string, FieldSource>>;
   warnings: string[];
-}
-
-interface PartDraft {
-  key: string;
-  pecaNome: string;
-  incluirCor: boolean;
-  /** Quando true, pecaNome já é o CHAVEPECA completo — não concatenar modelo */
-  isChavePecaExistente?: boolean;
-  // cor é sempre a do aparelho — não editável por peça
-}
-
-interface PartSuggestion {
-  text: string;
-  type: "nome" | "chave";
 }
 
 interface SavedCase {
@@ -64,64 +54,6 @@ function SourceBadge({ src }: { src: FieldSource | undefined }) {
 }
 
 // ---------------------------------------------------------------------------
-// Parts payload — validação unificada (mesma lógica para preview, blocker e submit)
-// ---------------------------------------------------------------------------
-
-interface PartPayload {
-  pecaNome: string;
-  incluirCor: boolean;
-  corUsada: string;
-  chavePeca: string;
-}
-
-type ValidPartsResult =
-  | { ok: true; parts: PartPayload[] }
-  | { ok: false; error: string };
-
-function buildValidPartsPayload(parts: PartDraft[], form: FormState): ValidPartsResult {
-  // Linhas sem nome são ignoradas silenciosamente
-  const nonEmpty = parts.filter((p) => p.pecaNome.trim() !== "");
-
-  if (nonEmpty.length === 0) {
-    return { ok: false, error: "Adicione pelo menos uma peça necessária." };
-  }
-
-  const corTrim = form.color.trim();
-  const result: PartPayload[] = [];
-
-  for (const p of nonEmpty) {
-    if (p.incluirCor && !corTrim) {
-      return {
-        ok: false,
-        error: "A cor do aparelho é obrigatória quando 'Incluir cor' estiver marcado.",
-      };
-    }
-
-    let chavePeca: string;
-    if (p.isChavePecaExistente) {
-      chavePeca = (p.incluirCor && corTrim)
-        ? (p.pecaNome.trim() + " " + corTrim).toUpperCase()
-        : p.pecaNome.trim().toUpperCase();
-    } else {
-      chavePeca = buildChavePeca(p.pecaNome, form.model, p.incluirCor, form.color);
-    }
-
-    if (!chavePeca) {
-      return { ok: false, error: "Não foi possível gerar a CHAVEPECA da peça." };
-    }
-
-    result.push({
-      pecaNome: p.pecaNome.trim(),
-      incluirCor: p.incluirCor,
-      corUsada: (p.incluirCor && corTrim) ? corTrim : "",
-      chavePeca,
-    });
-  }
-
-  return { ok: true, parts: result };
-}
-
-// ---------------------------------------------------------------------------
 // Blockers
 // ---------------------------------------------------------------------------
 
@@ -139,19 +71,9 @@ function computeBlockers(form: FormState, parts: PartDraft[]): Blockers {
   if (!form.model) b.model = "Modelo obrigatório.";
   if (!form.cost || Number(form.cost) <= 0) b.cost = "Custo deve ser maior que zero.";
   if (!form.estimatedSale || Number(form.estimatedSale) <= 0) b.estimatedSale = "Venda estimada deve ser maior que zero.";
-  const partsResult = buildValidPartsPayload(parts, form);
+  const partsResult = buildValidPartsPayload(parts, form.model, form.color);
   if (!partsResult.ok) b.parts = partsResult.error;
   return b;
-}
-
-// ---------------------------------------------------------------------------
-// CHAVEPECA preview
-// ---------------------------------------------------------------------------
-
-function buildChavePeca(pecaNome: string, modelo: string, incluirCor: boolean, corUsada: string): string {
-  const parts = [pecaNome.trim(), modelo.trim()];
-  if (incluirCor && corUsada.trim()) parts.push(corUsada.trim());
-  return parts.filter(Boolean).join(" ").toUpperCase();
 }
 
 // ---------------------------------------------------------------------------
@@ -308,12 +230,10 @@ export function Analise() {
   }
 
   // Busca de sugestões para a barra de adição
-  const fetchPartSuggestions = useCallback(async (q: string) => {
+  const fetchPartSuggestionsLocal = useCallback(async (q: string) => {
     if (q.length < 2) { setPartInputSuggs([]); setPartInputHighlighted(-1); return; }
-    const r = await fetch(`/api/analise/part-suggestions?q=${encodeURIComponent(q)}`).catch(() => null);
-    if (!r?.ok) return;
-    const d = await r.json() as { suggestions: PartSuggestion[] };
-    setPartInputSuggs(d.suggestions);
+    const suggs = await fetchSuggestions(q);
+    setPartInputSuggs(suggs);
     setPartInputHighlighted(-1);
   }, []);
 
@@ -360,7 +280,7 @@ export function Analise() {
           setSaving(false);
           return;
         }
-        const partsResult = buildValidPartsPayload(parts, form);
+        const partsResult = buildValidPartsPayload(parts, form.model, form.color);
         if (!partsResult.ok) {
           setSaveError(partsResult.error);
           setSaving(false);
@@ -383,7 +303,7 @@ export function Analise() {
         setParts([]);
       } else {
         // Draft: envia o que houver (pode ser zero peças); sem validação de mínimo
-        const draftPartsResult = buildValidPartsPayload(parts, form);
+        const draftPartsResult = buildValidPartsPayload(parts, form.model, form.color);
         const draftParts = draftPartsResult.ok ? draftPartsResult.parts
           : parts
               .filter((p) => p.pecaNome.trim() !== "")
@@ -587,7 +507,7 @@ export function Analise() {
                       onChange={(e) => {
                         setPartInput(e.target.value);
                         setPartInputIsExistente(false);
-                        fetchPartSuggestions(e.target.value);
+                        fetchPartSuggestionsLocal(e.target.value);
                       }}
                       onBlur={() => setTimeout(() => setPartInputSuggs([]), 150)}
                       onKeyDown={(e) => {

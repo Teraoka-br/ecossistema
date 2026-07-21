@@ -16,6 +16,11 @@ const src = fs.readFileSync(
   "utf8",
 );
 
+const partHelpersSrc = fs.readFileSync(
+  path.join(ROOT, "src", "client", "utils", "part-helpers.ts"),
+  "utf8",
+);
+
 // ---------------------------------------------------------------------------
 // 1–12. Cenários obrigatórios (source-inspection)
 // ---------------------------------------------------------------------------
@@ -23,9 +28,10 @@ const src = fs.readFileSync(
 describe("Analise.tsx: cenários obrigatórios de peças", () => {
   // 1. Tela inicial sem peça mostra pendência
   it("1. computeBlockers retorna b.parts quando parts está vazio", () => {
-    expect(src).toContain("buildValidPartsPayload(parts, form)");
+    expect(src).toContain("buildValidPartsPayload(parts,");
     expect(src).toContain("if (!partsResult.ok) b.parts = partsResult.error;");
-    expect(src).toContain("Adicione pelo menos uma peça necessária.");
+    // mensagem vive em part-helpers.ts (lógica compartilhada)
+    expect(partHelpersSrc).toContain("Adicione pelo menos uma peça necessária.");
   });
 
   // 2. Usuário adiciona primeira peça via commitPartInput
@@ -39,9 +45,10 @@ describe("Analise.tsx: cenários obrigatórios de peças", () => {
 
   // 3. Erro desaparece após adicionar (buildValidPartsPayload detecta nonEmpty.length > 0)
   it("3. buildValidPartsPayload retorna ok:true quando há pelo menos um item não-vazio", () => {
-    const fnStart = src.indexOf("function buildValidPartsPayload");
-    const fnEnd   = src.indexOf("\n}", fnStart);
-    const fn = src.slice(fnStart, fnEnd);
+    // lógica vive em part-helpers.ts (compartilhada)
+    const fnStart = partHelpersSrc.indexOf("export function buildValidPartsPayload");
+    const fnEnd   = partHelpersSrc.indexOf("\n}", fnStart);
+    const fn = partHelpersSrc.slice(fnStart, fnEnd);
     expect(fn).toContain("nonEmpty.length === 0");
     expect(fn).toContain("return { ok: true, parts: result }");
   });
@@ -57,9 +64,10 @@ describe("Analise.tsx: cenários obrigatórios de peças", () => {
 
   // 5. Payload contém exatamente as peças adicionadas (buildValidPartsPayload → result.push)
   it("5. buildValidPartsPayload monta payload com pecaNome e chavePeca", () => {
-    expect(src).toContain("result.push({");
-    expect(src).toContain("pecaNome: p.pecaNome.trim()");
-    expect(src).toContain("chavePeca,");
+    // lógica vive em part-helpers.ts (compartilhada)
+    expect(partHelpersSrc).toContain("result.push({");
+    expect(partHelpersSrc).toContain("pecaNome: p.pecaNome.trim()");
+    expect(partHelpersSrc).toContain("chavePeca,");
   });
 
   // 6. Finalizar análise com peça válida → setSavedCase chamado
@@ -151,8 +159,8 @@ describe("Analise.tsx: autocomplete da barra de busca de peças", () => {
     expect(src).toContain("setPartInputHighlighted(idx)");
   });
 
-  it("fetchPartSuggestions reseta partInputHighlighted ao receber novas sugestões", () => {
-    const fetchIdx = src.indexOf("fetchPartSuggestions");
+  it("fetchPartSuggestionsLocal reseta partInputHighlighted ao receber novas sugestões", () => {
+    const fetchIdx = src.indexOf("fetchPartSuggestionsLocal");
     const resetIdx = src.indexOf("setPartInputHighlighted(-1)", fetchIdx);
     expect(resetIdx).toBeGreaterThan(fetchIdx);
   });

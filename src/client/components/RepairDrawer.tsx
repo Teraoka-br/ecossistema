@@ -1,11 +1,12 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   X, Package, Clock, Star, ChevronRight, AlertTriangle, CheckCircle2,
   UserCheck, History, Info, Loader2, Users, ShoppingCart, MessageSquarePlus,
   RefreshCw, MapPin, Edit2, Save, Wrench, CheckCheck, ArrowRight,
-  CircleDot, FileText,
+  CircleDot, FileText, Plus,
 } from "lucide-react";
 import { addToPurchase } from "../api.js";
+import { buildChavePeca, fetchPartSuggestions, type PartSuggestion } from "../utils/part-helpers.js";
 
 interface PartInfo {
   id: number;
@@ -220,6 +221,19 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
 
   // Confirm modal
   const [confirmState, setConfirmState] = useState<ActionConfirmState | null>(null);
+
+  // Adicionar peça
+  const [partInput, setPartInput] = useState("");
+  const [partInputSuggs, setPartInputSuggs] = useState<PartSuggestion[]>([]);
+  const [partInputHighlighted, setPartInputHighlighted] = useState(-1);
+  const [addingPart, setAddingPart] = useState(false);
+  const [addPartMsg, setAddPartMsg] = useState<string | null>(null);
+
+  // Editar peça existente
+  const [editingPartId, setEditingPartId] = useState<number | null>(null);
+  const [editPartChave, setEditPartChave] = useState("");
+  const [savingPartEdit, setSavingPartEdit] = useState(false);
+  const [editPartMsg, setEditPartMsg] = useState<string | null>(null);
 
   const isAdmin = userRole === "ADMIN" || userPermissions?.includes("OVERRIDE_REPAIR_STATUS");
 
@@ -453,6 +467,68 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
       setError(e instanceof Error ? e.message : "Erro");
     } finally {
       setWorking(false);
+    }
+  }
+
+  // Part suggestions
+  const fetchSuggs = useCallback(async (q: string) => {
+    if (q.length < 2) { setPartInputSuggs([]); setPartInputHighlighted(-1); return; }
+    const suggs = await fetchPartSuggestions(q);
+    setPartInputSuggs(suggs);
+    setPartInputHighlighted(-1);
+  }, []);
+
+  async function handleAddPart() {
+    const nome = partInput.trim();
+    if (!nome || !data) return;
+    const model = data.model ?? "";
+    const color = data.color ?? "";
+    const chavePeca = buildChavePeca(nome, model, false, color);
+    setAddingPart(true);
+    setAddPartMsg(null);
+    try {
+      const r = await fetch(`/api/repair-cases/${repairCaseId}/parts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: nome, chavePeca }),
+      });
+      if (!r.ok) throw new Error((await r.json() as { error?: string }).error ?? "Erro ao adicionar peça");
+      setPartInput("");
+      setPartInputSuggs([]);
+      setAddPartMsg("Peça adicionada.");
+      refresh();
+    } catch (e) {
+      setAddPartMsg(e instanceof Error ? e.message : "Erro");
+    } finally {
+      setAddingPart(false);
+    }
+  }
+
+  function startEditPart(p: PartInfo) {
+    setEditingPartId(p.id);
+    setEditPartChave(p.chavePeca ?? p.description ?? "");
+    setEditPartMsg(null);
+  }
+
+  async function savePartEdit() {
+    if (editingPartId === null) return;
+    const chave = editPartChave.trim().toUpperCase();
+    if (!chave) return;
+    setSavingPartEdit(true);
+    setEditPartMsg(null);
+    try {
+      const r = await fetch(`/api/part-requests/${editingPartId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chavePeca: chave }),
+      });
+      if (!r.ok) throw new Error((await r.json() as { error?: string }).error ?? "Erro ao salvar");
+      setEditingPartId(null);
+      refresh();
+    } catch (e) {
+      setEditPartMsg(e instanceof Error ? e.message : "Erro");
+    } finally {
+      setSavingPartEdit(false);
     }
   }
 
@@ -859,45 +935,161 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
               {/* Lista de peças */}
               <div className="parts-list">
                 {data.parts.map(p => (
-                  <div key={p.id} className="part-row">
-                    <div className="part-info">
-                      <span className="part-desc">{p.description || p.chavePeca || "(sem descrição)"}</span>
-                      {p.chavePeca && <span className="part-chave">{p.chavePeca}</span>}
-                      {p.allocatedReference && <span className="part-ref">REF {p.allocatedReference}</span>}
-                    </div>
-                    <div className="part-stock">
-                      <span className={p.availableQty > 0 ? "stock-ok" : "stock-zero"}>{p.availableQty} disp.</span>
-                      {p.reservedQty > 0 && <span className="stock-reserved">{p.reservedQty} res.</span>}
-                    </div>
-                    <div className="part-status">
-                      {p.matchResultStatus === "MATCH" && <CheckCircle2 size={13} style={{ color: "var(--success)" }} />}
-                      {p.matchResultStatus === "MATCH_PARCIAL" && <Package size={13} style={{ color: "var(--warning)" }} />}
-                      {p.matchResultStatus === "PEDIR_PECA" && <AlertTriangle size={13} style={{ color: "var(--muted)" }} />}
-                      <span>{p.status}</span>
-                      {p.activePurchaseRequestId != null && (
-                        <span style={{
-                          fontSize: "0.72rem", padding: "1px 5px", borderRadius: "4px",
-                          background: p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED"
-                            ? "var(--warning-subtle, rgba(234,179,8,0.15))" : "var(--accent-subtle, rgba(99,102,241,0.1))",
-                          color: p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED"
-                            ? "var(--warning)" : "var(--accent)",
-                        }}>
-                          {p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED" ? "Em pedido" : "Em compra"}
-                        </span>
-                      )}
-                    </div>
-                    {p.reservationId !== null && (
-                      <button
-                        className="btn-ghost-sm danger"
-                        onClick={() => { setCancelingPartId(p.id); setCancelReason(""); setCancelReasonCode(""); }}
-                        title="Cancelar reserva"
-                      >
-                        <X size={12} /> Cancelar
-                      </button>
+                  <div key={p.id} className="part-row" style={{ flexDirection: "column", alignItems: "stretch", gap: "0.3rem" }}>
+                    {editingPartId === p.id ? (
+                      <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+                        <input
+                          className="input"
+                          style={{ flex: 1, fontSize: "0.82rem", padding: "0.25rem 0.5rem" }}
+                          value={editPartChave}
+                          onChange={e => setEditPartChave(e.target.value.toUpperCase())}
+                          onKeyDown={e => { if (e.key === "Enter") void savePartEdit(); if (e.key === "Escape") setEditingPartId(null); }}
+                          autoFocus
+                        />
+                        <button className="btn btn-primary btn-sm" onClick={() => void savePartEdit()} disabled={savingPartEdit} style={{ fontSize: "0.75rem" }}>
+                          {savingPartEdit ? <Loader2 size={11} className="spin" /> : <Save size={11} />} OK
+                        </button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => setEditingPartId(null)} style={{ fontSize: "0.75rem" }}><X size={11} /></button>
+                        {editPartMsg && <span style={{ fontSize: "0.72rem", color: "var(--danger)" }}>{editPartMsg}</span>}
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", width: "100%" }}>
+                        <div className="part-info" style={{ flex: 1 }}>
+                          <span className="part-desc">{p.description || p.chavePeca || "(sem descrição)"}</span>
+                          {p.chavePeca && <span className="part-chave">{p.chavePeca}</span>}
+                          {p.allocatedReference && <span className="part-ref">REF {p.allocatedReference}</span>}
+                        </div>
+                        <div className="part-stock">
+                          <span className={p.availableQty > 0 ? "stock-ok" : "stock-zero"}>{p.availableQty} disp.</span>
+                          {p.reservedQty > 0 && <span className="stock-reserved">{p.reservedQty} res.</span>}
+                        </div>
+                        <div className="part-status">
+                          {p.matchResultStatus === "MATCH" && <CheckCircle2 size={13} style={{ color: "var(--success)" }} />}
+                          {p.matchResultStatus === "MATCH_PARCIAL" && <Package size={13} style={{ color: "var(--warning)" }} />}
+                          {p.matchResultStatus === "PEDIR_PECA" && <AlertTriangle size={13} style={{ color: "var(--muted)" }} />}
+                          <span>{p.status}</span>
+                          {p.activePurchaseRequestId != null && (
+                            <span style={{
+                              fontSize: "0.72rem", padding: "1px 5px", borderRadius: "4px",
+                              background: p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED"
+                                ? "var(--warning-subtle, rgba(234,179,8,0.15))" : "var(--accent-subtle, rgba(99,102,241,0.1))",
+                              color: p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED"
+                                ? "var(--warning)" : "var(--accent)",
+                            }}>
+                              {p.purchaseOrderStatus === "AWAITING_RECEIPT" || p.purchaseOrderStatus === "PARTIALLY_RECEIVED" ? "Em pedido" : "Em compra"}
+                            </span>
+                          )}
+                        </div>
+                        {isAdmin && p.reservationId === null && p.status !== "CANCELADA" && (
+                          <button
+                            className="btn-ghost-sm"
+                            onClick={() => startEditPart(p)}
+                            title="Editar CHAVEPECA"
+                            style={{ fontSize: "0.72rem", color: "var(--muted)" }}
+                          >
+                            <Edit2 size={11} />
+                          </button>
+                        )}
+                        {p.reservationId !== null && (
+                          <button
+                            className="btn-ghost-sm danger"
+                            onClick={() => { setCancelingPartId(p.id); setCancelReason(""); setCancelReasonCode(""); }}
+                            title="Cancelar reserva"
+                          >
+                            <X size={12} /> Cancelar
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 ))}
               </div>
+
+              {/* Adicionar peça */}
+              {isAdmin && (
+                <div style={{ marginTop: "0.75rem", borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
+                  <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--muted)", marginBottom: "0.4rem", display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                    <Plus size={12} /> Adicionar peça necessária
+                  </div>
+                  <div style={{ position: "relative", display: "flex", gap: "0.4rem" }}>
+                    <div style={{ flex: 1, position: "relative" }}>
+                      <input
+                        className="input"
+                        style={{ fontSize: "0.83rem" }}
+                        value={partInput}
+                        onChange={e => { setPartInput(e.target.value); void fetchSuggs(e.target.value); }}
+                        onBlur={() => setTimeout(() => setPartInputSuggs([]), 150)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            if (partInputHighlighted >= 0 && partInputSuggs[partInputHighlighted]) {
+                              setPartInput(partInputSuggs[partInputHighlighted].text);
+                              setPartInputSuggs([]);
+                              setPartInputHighlighted(-1);
+                            } else {
+                              void handleAddPart();
+                            }
+                          } else if (e.key === "ArrowDown") {
+                            e.preventDefault();
+                            setPartInputHighlighted(i => Math.min(i + 1, partInputSuggs.length - 1));
+                          } else if (e.key === "ArrowUp") {
+                            e.preventDefault();
+                            setPartInputHighlighted(i => Math.max(i - 1, 0));
+                          } else if (e.key === "Escape") {
+                            setPartInputSuggs([]);
+                            setPartInputHighlighted(-1);
+                          }
+                        }}
+                        placeholder="Nome da peça (ex.: TELA, BATERIA)…"
+                        autoComplete="off"
+                      />
+                      {partInputSuggs.length > 0 && (
+                        <div style={{
+                          position: "absolute", zIndex: 20, top: "100%", left: 0, right: 0,
+                          background: "var(--surface)", border: "1px solid var(--border)",
+                          borderRadius: 4, maxHeight: 160, overflowY: "auto",
+                          boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                        }}>
+                          {partInputSuggs.map((s, idx) => (
+                            <div
+                              key={s.text + s.type}
+                              style={{
+                                padding: "5px 10px", cursor: "pointer", fontSize: "0.8rem",
+                                display: "flex", justifyContent: "space-between", alignItems: "center",
+                                background: idx === partInputHighlighted ? "var(--surface-alt)" : "transparent",
+                              }}
+                              onMouseEnter={() => setPartInputHighlighted(idx)}
+                              onMouseDown={() => { setPartInput(s.text); setPartInputSuggs([]); setPartInputHighlighted(-1); }}
+                            >
+                              <span>{s.text}</span>
+                              {s.type === "chave" && <span style={{ fontSize: "0.7rem", color: "var(--muted)", marginLeft: 6 }}>chave</span>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => void handleAddPart()}
+                      disabled={!partInput.trim() || addingPart}
+                      style={{ whiteSpace: "nowrap" }}
+                    >
+                      {addingPart ? <Loader2 size={13} className="spin" /> : <Plus size={13} />}
+                      Adicionar
+                    </button>
+                  </div>
+                  {addPartMsg && (
+                    <div style={{ fontSize: "0.78rem", marginTop: "0.3rem", color: addPartMsg.startsWith("Peça") ? "var(--success)" : "var(--danger)" }}>
+                      {addPartMsg}
+                    </div>
+                  )}
+                  {data.model && partInput.trim() && (
+                    <div style={{ fontSize: "0.73rem", color: "var(--muted)", marginTop: "0.25rem" }}>
+                      CHAVEPECA: <strong>{buildChavePeca(partInput.trim(), data.model, false, data.color ?? "")}</strong>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Modal de cancelar reserva */}
               {cancelingPartId !== null && (
