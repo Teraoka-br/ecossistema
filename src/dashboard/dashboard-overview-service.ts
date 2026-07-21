@@ -1,5 +1,6 @@
 import type { Db } from "../db/database.js";
 import { getBaseMetrics } from "./dashboard-base-metrics.js";
+import { WF_AGUARDANDO, sumGroup } from "../domain/workflow-groups.js";
 
 export interface CardCounts {
   match: number;
@@ -61,7 +62,7 @@ export function getDashboardOverview(db: Db): OverviewData {
   // -- Cards (usa metricas base compartilhadas com snapshot-service) -----------
   const base = getBaseMetrics(db);
   const { workflowMap: wf, aptoReparo, comTecnico, emAnalise, vendaEstado, finalizados } = base;
-  const aguardandoPeca = (wf.get("PEDIR_PECA") ?? 0) + (wf.get("AGUARDANDO_RECEBIMENTO") ?? 0);
+  const aguardandoPeca = sumGroup(wf, WF_AGUARDANDO);
 
   const cards: CardCounts = {
     match: wf.get("MATCH") ?? 0,
@@ -77,8 +78,9 @@ export function getDashboardOverview(db: Db): OverviewData {
   };
 
   // -- Comparacao com snapshot anterior ----------------------------------------
+  // Snapshot do dia anterior — exclui o de hoje para a comparação "vs ontem" ser real.
   const yesterday = db
-    .prepare(`SELECT * FROM dashboard_daily_snapshots ORDER BY snapshot_date DESC LIMIT 1`)
+    .prepare(`SELECT * FROM dashboard_daily_snapshots WHERE snapshot_date < date('now','localtime') ORDER BY snapshot_date DESC LIMIT 1`)
     .get() as Record<string, number> | undefined;
 
   let cardComparison: Partial<CardCounts> | null = null;
@@ -144,11 +146,9 @@ export function getDashboardOverview(db: Db): OverviewData {
     .get(movCut) as { q: number };
   const stockTotal = baseUnits + movRow.q;
 
+  // Reservas via tabela oficial (operational_reservations), não via stock_movements.
   const reservedRow = db
-    .prepare(
-      `SELECT COALESCE(SUM(ABS(quantity)),0) as q
-       FROM stock_movements WHERE reversed_at IS NULL AND movement_type='REPAIR_RESERVATION'`,
-    )
+    .prepare(`SELECT COALESCE(SUM(quantity),0) as q FROM operational_reservations WHERE status='ACTIVE'`)
     .get() as { q: number };
   const reserved = reservedRow.q;
 

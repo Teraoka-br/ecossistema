@@ -1,4 +1,8 @@
 import type { Db } from "../db/database.js";
+import {
+  WF_APTO_REPARO, WF_COM_TECNICO, WF_EM_ANALISE, WF_AGUARDANDO,
+  WF_VENDA_ESTADO, WF_FINALIZADOS, sumGroup,
+} from "../domain/workflow-groups.js";
 
 /** Retorna a data local no fuso America/Sao_Paulo como 'YYYY-MM-DD'. */
 export function todaySaoPaulo(): string {
@@ -47,17 +51,15 @@ export function createOrUpdateDashboardSnapshot(
     .all() as StatusRow[];
   const wf = new Map(workflowRows.map((r) => [r.workflow_status, r.c]));
 
-  const get = (...keys: string[]) => keys.reduce((s, k) => s + (wf.get(k) ?? 0), 0);
-
-  const matchCount      = get("MATCH");
-  const matchPartial    = get("MATCH_PARCIAL");
-  const aptoReparo      = get("APTO_REPARO", "EM_SEPARACAO");
-  const verificar       = get("VERIFICAR");
-  const emAnalise       = get("EM_ANALISE");
-  const aguardandoPeca  = get("PEDIR_PECA", "AGUARDANDO_RECEBIMENTO");
-  const comTecnico      = get("DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO");
-  const vendaEstado     = get("VENDA_ESTADO");
-  const finalizados     = get("CONCLUIDO", "CANCELADO");
+  const matchCount      = wf.get("MATCH") ?? 0;
+  const matchPartial    = wf.get("MATCH_PARCIAL") ?? 0;
+  const aptoReparo      = sumGroup(wf, WF_APTO_REPARO);
+  const verificar       = wf.get("VERIFICAR") ?? 0;
+  const emAnalise       = sumGroup(wf, WF_EM_ANALISE);
+  const aguardandoPeca  = sumGroup(wf, WF_AGUARDANDO);
+  const comTecnico      = sumGroup(wf, WF_COM_TECNICO);
+  const vendaEstado     = sumGroup(wf, WF_VENDA_ESTADO);
+  const finalizados     = sumGroup(wf, WF_FINALIZADOS);
   const totalCases      = [...wf.values()].reduce((s, v) => s + v, 0);
   const uniqueImeisRow  = db.prepare(`SELECT COUNT(DISTINCT imei) as c FROM repair_cases`).get() as { c: number };
 
@@ -81,8 +83,8 @@ export function createOrUpdateDashboardSnapshot(
   const movCut    = lastSnap?.baseline_movement_id_max ?? 0;
   const movRow    = db.prepare(`SELECT COALESCE(SUM(quantity),0) as q FROM stock_movements WHERE reversed_at IS NULL AND id > ?`).get(movCut) as { q: number };
   const stockTotal = baseUnits + movRow.q;
-  const reservedRow = db.prepare(`SELECT COALESCE(SUM(quantity),0) as q FROM stock_movements WHERE reversed_at IS NULL AND movement_type='REPAIR_RESERVATION'`).get() as { q: number };
-  const reserved  = Math.abs(reservedRow.q);
+  const reservedRow = db.prepare(`SELECT COALESCE(SUM(quantity),0) as q FROM operational_reservations WHERE status='ACTIVE'`).get() as { q: number };
+  const reserved  = reservedRow.q;
 
   // -- contagens ---------------------------------------------------------------
   const countRow = db.prepare(`SELECT COUNT(*) as c FROM count_sessions WHERE status='FINALIZED' AND finished_at IS NOT NULL`).get() as { c: number };
@@ -97,8 +99,8 @@ export function createOrUpdateDashboardSnapshot(
        com_tecnico_count, finalizados_count, venda_estado_count,
        stock_total_units, stock_total_references,
        stock_available_units, stock_reserved_units,
-       counting_sessions_count, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       counting_sessions_count, updated_at, recalculated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(snapshot_date) DO UPDATE SET
       total_cases             = excluded.total_cases,
       total_unique_imeis      = excluded.total_unique_imeis,
@@ -116,7 +118,8 @@ export function createOrUpdateDashboardSnapshot(
       stock_available_units   = excluded.stock_available_units,
       stock_reserved_units    = excluded.stock_reserved_units,
       counting_sessions_count = excluded.counting_sessions_count,
-      updated_at              = excluded.updated_at
+      updated_at              = excluded.updated_at,
+      recalculated_at         = excluded.recalculated_at
   `).run(
     date,
     totalCases,
@@ -135,6 +138,7 @@ export function createOrUpdateDashboardSnapshot(
     Math.max(0, stockTotal - reserved),
     reserved,
     countRow.c,
+    now,
     now,
   );
 

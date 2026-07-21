@@ -79,6 +79,19 @@ export function AdminDashboards() {
             {loading ? "Atualizando…" : "Atualizar"}
           </button>
 
+          <button
+            className="btn btn-ghost btn-sm"
+            title="Grava o snapshot do dia para registrar o histórico"
+            onClick={() => {
+              fetch("/api/dashboards/snapshots/recalculate", { method: "POST" })
+                .then(r => r.ok ? r.json() : Promise.reject())
+                .then(() => load())
+                .catch(() => {});
+            }}
+          >
+            Recalcular snapshot
+          </button>
+
           <span className="muted" style={{ fontSize: "0.75rem" }}>
             {fmtDt(data.lastUpdatedAt)}
             {" "}&middot; {data._queryMs}ms

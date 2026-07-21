@@ -9,7 +9,6 @@ import { getFinancialData, getFinancialByBucket } from "../../dashboard/dashboar
 import {
   createOrUpdateDashboardSnapshot,
   todaySaoPaulo,
-  type DashboardSnapshot,
 } from "../../dashboard/dashboard-snapshot-service.js";
 
 export const dashboardsRouter = Router();
@@ -27,14 +26,6 @@ dashboardsRouter.get("/dashboards/home", requireAuth, requireAdmin, (_req, res, 
     const financial         = getFinancialData(db);
     const financialByBucket = getFinancialByBucket(db);
 
-    // Atualiza snapshot do dia ao acessar a home
-    let todaySnapshot: DashboardSnapshot | null = null;
-    try {
-      todaySnapshot = createOrUpdateDashboardSnapshot(db, todaySaoPaulo());
-    } catch {
-      // não bloqueia a resposta se o snapshot falhar
-    }
-
     res.json({
       current: overview.cards,
       comparison: overview.cardComparison,
@@ -46,7 +37,6 @@ dashboardsRouter.get("/dashboards/home", requireAuth, requireAdmin, (_req, res, 
       recentIssues: issues,
       financial,
       financialByBucket,
-      todaySnapshot,
       lastUpdatedAt: overview.lastUpdatedAt,
       _queryMs: Date.now() - t0,
     });

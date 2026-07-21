@@ -141,23 +141,23 @@ export function getOperationalAlerts(db: Db): OperationalAlert[] {
     alerts.push({
       code: "NO_DASHBOARD_SNAPSHOT",
       title: "Sem snapshot de dashboard",
-      description: "Nenhum snapshot diario encontrado. O historico comecara a aparecer apos o primeiro registro.",
+      description: "Nenhum snapshot diario encontrado. O historico aparece apos o primeiro snapshot ser gerado.",
       severity: "INFO",
       count: 0,
-      suggestedAction: "O sistema criara automaticamente ao abrir esta pagina",
+      suggestedAction: 'Clique em "Recalcular snapshot" no cabecalho do dashboard',
     });
   } else {
     const daysSince = Math.floor(
-      (Date.now() - new Date(lastSnapRow.snapshot_date).getTime()) / 86400000,
+      (Date.now() - new Date(lastSnapRow.snapshot_date + "T12:00:00").getTime()) / 86400000,
     );
     if (daysSince > 2) {
       alerts.push({
         code: "STALE_DASHBOARD_SNAPSHOT",
         title: "Snapshot desatualizado",
-        description: `Ultimo snapshot em ${lastSnapRow.snapshot_date} (${daysSince} dias atras).`,
+        description: `Ultimo snapshot em ${lastSnapRow.snapshot_date} (${daysSince} dia(s) atras). O grafico de historico pode estar incompleto.`,
         severity: "WARN",
         count: daysSince,
-        suggestedAction: "Recarregar esta pagina para atualizar",
+        suggestedAction: 'Clique em "Recalcular snapshot" no cabecalho do dashboard',
       });
     }
   }
@@ -195,6 +195,27 @@ export function getOperationalAlerts(db: Db): OperationalAlert[] {
       count: 0,
       suggestedAction: "Ativar uma regra de match",
       route: "/admin/regras-match",
+    });
+  }
+
+  // 9. Reservas ativas ligadas a casos já encerrados (vazamento de reserva)
+  const leakedReservations = db
+    .prepare(
+      `SELECT COUNT(*) as c FROM operational_reservations orr
+       JOIN repair_cases rc ON rc.id = orr.repair_case_id
+       WHERE orr.status = 'ACTIVE'
+         AND rc.workflow_status IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')`,
+    )
+    .get() as { c: number };
+  if (leakedReservations.c > 0) {
+    alerts.push({
+      code: "LEAKED_RESERVATIONS",
+      title: "Reservas inconsistentes",
+      description: `${leakedReservations.c} reserva(s) ATIVA(S) ligadas a casos já encerrados (CONCLUIDO/CANCELADO/VENDA_ESTADO). O estoque disponível pode estar subestimado.`,
+      severity: "WARN",
+      count: leakedReservations.c,
+      suggestedAction: "Revisar reservas em Estoque ou acionar o administrador",
+      route: "/estoque",
     });
   }
 

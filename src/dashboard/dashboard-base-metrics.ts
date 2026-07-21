@@ -1,11 +1,16 @@
 import type { Db } from "../db/database.js";
+import {
+  WF_APTO_REPARO, WF_COM_TECNICO, WF_EM_ANALISE,
+  WF_VENDA_ESTADO, WF_FINALIZADOS, WF_ENCERRADOS,
+  sumGroup,
+} from "../domain/workflow-groups.js";
 
 export interface BaseMetrics {
-  /** repair_cases por workflow_status (inclui ENTREGUE/CANCELADO) */
+  /** repair_cases por workflow_status */
   workflowMap: Map<string, number>;
   /** part_requests por status (excluindo canceladas) */
   partMap: Map<string, number>;
-  /** Contagens derivadas */
+  /** Contagens derivadas por grupo canônico */
   aptoReparo: number;
   comTecnico: number;
   emAnalise: number;
@@ -20,6 +25,7 @@ export interface BaseMetrics {
 /**
  * Executa as queries de métricas base uma única vez.
  * Usado por overview-service e snapshot-service para evitar queries duplicadas.
+ * Os grupos são definidos em src/domain/workflow-groups.ts.
  */
 export function getBaseMetrics(db: Db): BaseMetrics {
   type WfRow = { workflow_status: string; c: number };
@@ -34,18 +40,17 @@ export function getBaseMetrics(db: Db): BaseMetrics {
     .all() as PrRow[];
   const partMap = new Map(prRows.map(r => [r.status, r.c]));
 
-  const get = (m: Map<string, number>, ...keys: string[]) => keys.reduce((s, k) => s + (m.get(k) ?? 0), 0);
-
-  const aptoReparo  = get(workflowMap, "APTO_REPARO", "EM_SEPARACAO");
-  const comTecnico  = get(workflowMap, "DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO");
-  const emAnalise   = get(workflowMap, "EM_ANALISE");
-  const vendaEstado = get(workflowMap, "VENDA_ESTADO");
-  const finalizados = get(workflowMap, "CONCLUIDO", "CANCELADO");
+  const aptoReparo  = sumGroup(workflowMap, WF_APTO_REPARO);
+  const comTecnico  = sumGroup(workflowMap, WF_COM_TECNICO);
+  const emAnalise   = sumGroup(workflowMap, WF_EM_ANALISE);
+  const vendaEstado = sumGroup(workflowMap, WF_VENDA_ESTADO);
+  const finalizados = sumGroup(workflowMap, WF_FINALIZADOS);
   const totalCases  = [...workflowMap.values()].reduce((s, v) => s + v, 0);
 
+  const encerradosPlaceholders = WF_ENCERRADOS.map(() => "?").join(",");
   const activeRow = db
-    .prepare(`SELECT COUNT(*) as c, COUNT(DISTINCT imei) as u FROM repair_cases WHERE workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')`)
-    .get() as { c: number; u: number };
+    .prepare(`SELECT COUNT(*) as c, COUNT(DISTINCT imei) as u FROM repair_cases WHERE workflow_status NOT IN (${encerradosPlaceholders})`)
+    .get(...WF_ENCERRADOS) as { c: number; u: number };
 
   return {
     workflowMap,

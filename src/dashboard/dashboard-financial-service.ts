@@ -1,4 +1,5 @@
 import type { Db } from "../db/database.js";
+import { WF } from "../domain/workflow-groups.js";
 
 export interface FinancialSlice {
   totalCost: number | null;
@@ -64,16 +65,16 @@ export function getFinancialData(db: Db): FinancialData {
 }
 
 export function getFinancialByBucket(db: Db): FinancialByBucket {
-  const BUCKETS: Record<keyof FinancialByBucket, string[]> = {
-    match:          ["MATCH"],
-    matchParcial:   ["MATCH_PARCIAL"],
-    aptoReparo:     ["APTO_REPARO", "EM_SEPARACAO"],
-    verificar:      ["VERIFICAR"],
-    emAnalise:      ["EM_ANALISE"],
-    aguardandoPeca: ["PEDIR_PECA", "AGUARDANDO_RECEBIMENTO"],
-    comTecnico:     ["DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "TRIAGEM_FINAL", "RETORNO_TECNICO"],
-    vendaEstado:    ["VENDA_ESTADO"],
-    finalizados:    ["CONCLUIDO", "CANCELADO"],
+  const BUCKETS: Record<keyof FinancialByBucket, readonly string[]> = {
+    match:          WF.match,
+    matchParcial:   WF.matchParcial,
+    aptoReparo:     WF.aptoReparo,
+    verificar:      WF.verificar,
+    emAnalise:      WF.emAnalise,
+    aguardandoPeca: WF.aguardandoPeca,
+    comTecnico:     WF.comTecnico,
+    vendaEstado:    WF.vendaEstado,
+    finalizados:    WF.finalizados,
   };
   const result = {} as FinancialByBucket;
   for (const [key, statuses] of Object.entries(BUCKETS) as [keyof FinancialByBucket, string[]][]) {
