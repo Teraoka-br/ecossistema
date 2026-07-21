@@ -23,6 +23,34 @@ import {
   MatchRuleStateError,
   type LoadedEngineInput,
 } from "./engine-loader.js";
+import { ensurePurchaseRequestsForCase } from "../operational/purchase-request-service.js";
+
+// ---------------------------------------------------------------------------
+// Auto-purchase para casos PEDIR_PECA
+// ---------------------------------------------------------------------------
+
+/**
+ * Para cada caso em PEDIR_PECA, garante que suas part_requests PEDIR_PECA
+ * tenham purchase_requests criadas. Chamado automaticamente após cada run do motor.
+ * Nunca lança — falhas individuais são silenciadas para não abortar o run.
+ */
+export function autoEnsurePurchasesForPedirPeca(db: Db): void {
+  try {
+    const caseIds = (db.prepare(
+      "SELECT id FROM repair_cases WHERE workflow_status = 'PEDIR_PECA'",
+    ).all() as { id: number }[]).map((r) => r.id);
+
+    for (const id of caseIds) {
+      try {
+        ensurePurchaseRequestsForCase(db, id, null);
+      } catch {
+        // individual failure — non-critical
+      }
+    }
+  } catch {
+    // non-critical
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Fila de recálculo
@@ -96,6 +124,11 @@ export async function processPendingRecompute(db: Db): Promise<RepairMatchRunRes
 
   const reason = requests.map(r => r.reason).join("; ");
   const result = await runRepairMatchEngine(db, { triggerReason: reason });
+
+  // Auto-vincular purchase_requests para todos os casos em PEDIR_PECA.
+  // Idempotente: ensurePurchaseRequestsForCase só cria se não existe.
+  // Não-bloqueante: falhas individuais não abortam o resultado do motor.
+  autoEnsurePurchasesForPedirPeca(db);
 
   const ids = requests.map(r => r.id);
   const placeholders = ids.map(() => "?").join(",");

@@ -22,7 +22,7 @@ import {
 } from "../../operational/purchase-request-service.js";
 import {
   getEngineState, runRepairMatchEngine, getPendingRequestCount,
-  requestMatchRecompute, processPendingRecompute,
+  requestMatchRecompute, processPendingRecompute, autoEnsurePurchasesForPedirPeca,
 } from "../../match/engine-orchestrator.js";
 import { getCurrentOperationalStock } from "../../operational/stock-service.js";
 
@@ -108,6 +108,7 @@ repairQueueRouter.post("/engine/run", requireAuth, requireAdmin, async (req, res
     const db = getDb();
     const userId = (req as Request).sessionUser?.id ?? null;
     const result = await runRepairMatchEngine(db, { triggerReason: "MANUAL_ADMIN", userId });
+    autoEnsurePurchasesForPedirPeca(db);
     res.json(result);
   } catch (err) {
     next(err);

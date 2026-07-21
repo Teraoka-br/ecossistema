@@ -537,7 +537,7 @@ export function RepairDrawer({ repairCaseId, onClose, userRole, userPermissions 
 
   const showSeparateKit = ws === "MATCH";
   const showSeparatePartial = ws === "MATCH_PARCIAL";
-  const showAddToPurchase = ws === "PEDIR_PECA" || ws === "MATCH_PARCIAL";
+  const showAddToPurchase = ws === "MATCH_PARCIAL";
   const showDirectTech = ws === "APTO_REPARO";
   const showRedirectTech = ["DIRECIONADO_TECNICO", "EM_REPARO", "REPARO_EXECUTADO", "RETORNO_TECNICO", "TRIAGEM_FINAL"].includes(ws);
   const showStartRepair = ws === "DIRECIONADO_TECNICO";
