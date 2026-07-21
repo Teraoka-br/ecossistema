@@ -1,12 +1,13 @@
 import { useNavigate } from "react-router-dom";
-import { ArrowRight } from "lucide-react";
-import type { OperationalAlert } from "./types.js";
+import { ArrowRight, Filter } from "lucide-react";
+import type { CardMetric, OperationalAlert } from "./types.js";
 
 interface Props {
   alerts: OperationalAlert[];
+  onFilter?: (m: CardMetric) => void;
 }
 
-export function AlertsBlock({ alerts }: Props) {
+export function AlertsBlock({ alerts, onFilter }: Props) {
   const navigate = useNavigate();
 
   const iconFor = (s: "INFO" | "WARN" | "CRITICAL") =>
@@ -24,36 +25,47 @@ export function AlertsBlock({ alerts }: Props) {
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-          {alerts.map((a) => (
-            <div
-              key={a.code}
-              className={`alert ${classFor(a.severity)}`}
-              style={{
-                display: "flex", alignItems: "flex-start", gap: "0.5rem",
-                padding: "0.6rem 0.75rem", margin: 0,
-                cursor: a.route ? "pointer" : undefined,
-                transition: "opacity 0.15s",
-              }}
-              onClick={() => a.route && navigate(a.route)}
-              role={a.route ? "button" : undefined}
-              tabIndex={a.route ? 0 : undefined}
-              onKeyDown={e => { if (a.route && (e.key === "Enter" || e.key === " ")) navigate(a.route); }}
-            >
-              <span style={{ flexShrink: 0, marginTop: "0.05rem" }}>{iconFor(a.severity)}</span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 600, fontSize: "0.85rem" }}>{a.title}</div>
-                <div className="muted" style={{ fontSize: "0.78rem", marginTop: "0.15rem" }}>{a.description}</div>
-                {a.count > 0 && (
-                  <span className="badge badge-muted" style={{ fontSize: "0.7rem", marginTop: "0.25rem" }}>
-                    {a.count.toLocaleString("pt-BR")} ocorrencia(s)
-                  </span>
-                )}
+          {alerts.map((a) => {
+            const isClickable = !!(a.cardFilter || a.route);
+            function handleClick() {
+              if (a.cardFilter && onFilter) { onFilter(a.cardFilter); return; }
+              if (a.route) navigate(a.route);
+            }
+            return (
+              <div
+                key={a.code}
+                className={`alert ${classFor(a.severity)}`}
+                style={{
+                  display: "flex", alignItems: "flex-start", gap: "0.5rem",
+                  padding: "0.6rem 0.75rem", margin: 0,
+                  cursor: isClickable ? "pointer" : undefined,
+                  transition: "opacity 0.15s",
+                }}
+                onClick={isClickable ? handleClick : undefined}
+                role={isClickable ? "button" : undefined}
+                tabIndex={isClickable ? 0 : undefined}
+                onKeyDown={e => { if (isClickable && (e.key === "Enter" || e.key === " ")) handleClick(); }}
+              >
+                <span style={{ flexShrink: 0, marginTop: "0.05rem" }}>{iconFor(a.severity)}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: "0.85rem" }}>{a.title}</div>
+                  <div className="muted" style={{ fontSize: "0.78rem", marginTop: "0.15rem" }}>{a.description}</div>
+                  {a.count > 0 && (
+                    <span className="badge badge-muted" style={{ fontSize: "0.7rem", marginTop: "0.25rem" }}>
+                      {a.count.toLocaleString("pt-BR")} ocorrencia(s)
+                    </span>
+                  )}
+                  {a.suggestedAction && (
+                    <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "0.25rem", fontStyle: "italic" }}>
+                      {a.suggestedAction}
+                    </div>
+                  )}
+                </div>
+                {a.cardFilter && <Filter size={12} style={{ flexShrink: 0, opacity: 0.5, marginTop: "0.15rem" }} />}
+                {!a.cardFilter && a.route && <ArrowRight size={14} style={{ flexShrink: 0, opacity: 0.5, marginTop: "0.15rem" }} />}
               </div>
-              {a.route && (
-                <ArrowRight size={14} style={{ flexShrink: 0, opacity: 0.5, marginTop: "0.15rem" }} />
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

@@ -241,11 +241,20 @@ function MultiChart({ data }: { data: MultiRow[] }) {
   );
 }
 
+// ─── Modo fluxo diário ───────────────────────────────────────────────────────
+function toDailyDelta(rows: MultiRow[], col: keyof MultiRow): SinglePoint[] {
+  return rows.slice(1).map((r, i) => ({
+    snapshot_date: r.snapshot_date,
+    value: (r[col] as number) - (rows[i][col] as number),
+  }));
+}
+
 // ─── Componente principal ────────────────────────────────────────────────────
 export function OperationalTimeline({ activeFilter, period }: Props) {
   const [multiData, setMultiData] = useState<MultiRow[]>([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
+  const [mode, setMode]         = useState<"absoluto" | "fluxo">("absoluto");
 
   useEffect(() => {
     setLoading(true);
@@ -260,13 +269,27 @@ export function OperationalTimeline({ activeFilter, period }: Props) {
 
   return (
     <div className="card" style={{ margin: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.6rem" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.6rem", flexWrap: "wrap", gap: "0.5rem" }}>
         <h2 style={{ margin: 0 }}>Historico operacional</h2>
-        {activeFilter && (
-          <span className="badge badge-muted" style={{ fontSize: "0.73rem" }}>
-            {CARD_LABELS[activeFilter]}
-          </span>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          {activeFilter && (
+            <span className="badge badge-muted" style={{ fontSize: "0.73rem" }}>
+              {CARD_LABELS[activeFilter]}
+            </span>
+          )}
+          <div style={{ display: "flex", gap: "0.2rem" }}>
+            {(["absoluto", "fluxo"] as const).map(m => (
+              <button
+                key={m}
+                className={`btn btn-sm ${mode === m ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: "0.72rem", padding: "0.2rem 0.55rem" }}
+                onClick={() => setMode(m)}
+              >
+                {m === "absoluto" ? "Absoluto" : "Fluxo diario"}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {loading && <p className="spinner">Carregando grafico…</p>}
@@ -279,11 +302,24 @@ export function OperationalTimeline({ activeFilter, period }: Props) {
       )}
 
       {!loading && !error && multiData.length > 0 && (() => {
-        if (activeFilter && activeFilter !== "total") {
-          const col = METRIC_MAP[activeFilter];
-          const color = SINGLE_COLOR[activeFilter] ?? "var(--accent)";
+        const metric = (activeFilter && activeFilter !== "total") ? activeFilter : null;
+
+        if (mode === "fluxo") {
+          const col = metric ? METRIC_MAP[metric] : "total_cases";
+          const color = metric ? (SINGLE_COLOR[metric] ?? "var(--accent)") : "var(--accent)";
+          const label = metric ? CARD_LABELS[metric] : "Total";
+          const delta = toDailyDelta(multiData, col);
+          if (delta.length === 0) return (
+            <p className="muted" style={{ fontSize: "0.85rem" }}>Dados insuficientes (minimo 2 snapshots).</p>
+          );
+          return <SingleChart data={delta} color={color} label={`Fluxo diario — ${label}`} />;
+        }
+
+        if (metric) {
+          const col = METRIC_MAP[metric];
+          const color = SINGLE_COLOR[metric] ?? "var(--accent)";
           const single: SinglePoint[] = multiData.map(r => ({ snapshot_date: r.snapshot_date, value: r[col] as number }));
-          return <SingleChart data={single} color={color} label={CARD_LABELS[activeFilter]} />;
+          return <SingleChart data={single} color={color} label={CARD_LABELS[metric]} />;
         }
         return <MultiChart data={multiData} />;
       })()}

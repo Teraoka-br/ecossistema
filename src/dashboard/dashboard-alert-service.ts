@@ -10,6 +10,8 @@ export interface OperationalAlert {
   count: number;
   suggestedAction: string;
   route?: string;
+  /** Se definido, clicar no alerta ativa este filtro no dashboard em vez de navegar. */
+  cardFilter?: string;
 }
 
 function isWeekday(date: Date): boolean {
@@ -51,20 +53,33 @@ export function getOperationalAlerts(db: Db): OperationalAlert[] {
     });
   }
 
-  // 2. Cards em VERIFICAR
-  const verificarRow = db
-    .prepare(
-      `SELECT COUNT(*) as c FROM part_requests
-       WHERE status='VERIFICAR' AND cancelled_at IS NULL`,
-    )
+  // 2a. Aparelhos em VERIFICAR (repair_cases)
+  const casesVerificarRow = db
+    .prepare(`SELECT COUNT(*) as c FROM repair_cases WHERE workflow_status='VERIFICAR'`)
     .get() as { c: number };
-  if (verificarRow.c > 0) {
+  if (casesVerificarRow.c > 0) {
+    alerts.push({
+      code: "CASES_VERIFICAR",
+      title: "Aparelhos para verificar",
+      description: `${casesVerificarRow.c} aparelho(s) aguardando verificacao manual na fila.`,
+      severity: casesVerificarRow.c > 10 ? "CRITICAL" : "WARN",
+      count: casesVerificarRow.c,
+      suggestedAction: "Filtrar VERIFICAR na fila de reparos",
+      cardFilter: "verificar",
+    });
+  }
+
+  // 2b. Peças em VERIFICAR (part_requests)
+  const partsVerificarRow = db
+    .prepare(`SELECT COUNT(*) as c FROM part_requests WHERE status='VERIFICAR' AND cancelled_at IS NULL`)
+    .get() as { c: number };
+  if (partsVerificarRow.c > 0) {
     alerts.push({
       code: "PARTS_VERIFICAR",
-      title: "Pecas em VERIFICAR",
-      description: `${verificarRow.c} peca(s) com status VERIFICAR precisam de revisao manual.`,
-      severity: verificarRow.c > 20 ? "CRITICAL" : "WARN",
-      count: verificarRow.c,
+      title: "Pecas com status VERIFICAR",
+      description: `${partsVerificarRow.c} peca(s) em VERIFICAR na fila de reparos precisam de revisao.`,
+      severity: partsVerificarRow.c > 20 ? "CRITICAL" : "WARN",
+      count: partsVerificarRow.c,
       suggestedAction: "Revisar pecas na fila",
       route: "/fila-reparos",
     });
@@ -108,6 +123,26 @@ export function getOperationalAlerts(db: Db): OperationalAlert[] {
       count: semRefRow.c,
       suggestedAction: "Resolver referencias pendentes",
       route: "/estoque/referencias",
+    });
+  }
+
+  // 4b. Aparelhos aguardando peca ha mais de 7 dias
+  const longWaitRow = db
+    .prepare(
+      `SELECT COUNT(*) as c FROM repair_cases
+       WHERE workflow_status IN ('PEDIR_PECA','AGUARDANDO_RECEBIMENTO')
+         AND julianday('now') - julianday(updated_at) > 7`,
+    )
+    .get() as { c: number };
+  if (longWaitRow.c > 0) {
+    alerts.push({
+      code: "CASES_LONG_WAIT_PART",
+      title: "Aparelhos aguardando peca ha mais de 7 dias",
+      description: `${longWaitRow.c} aparelho(s) em espera de peca por mais de 7 dias.`,
+      severity: longWaitRow.c > 5 ? "CRITICAL" : "WARN",
+      count: longWaitRow.c,
+      suggestedAction: "Verificar pedidos de compra e reservas",
+      cardFilter: "aguardandoPeca",
     });
   }
 

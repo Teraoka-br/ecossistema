@@ -77,6 +77,8 @@ export interface OperationalAlert {
   count: number;
   suggestedAction: string;
   route?: string;
+  /** Se definido, clicar ativa este filtro de card no dashboard em vez de navegar. */
+  cardFilter?: CardMetric;
 }
 
 export interface IssueReport {

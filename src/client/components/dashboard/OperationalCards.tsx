@@ -53,12 +53,34 @@ function fmtBRL(n: number | null) {
 }
 function fmt(n: number) { return n.toLocaleString("pt-BR"); }
 
-function DeltaBadge({ delta }: { delta: number }) {
+/**
+ * Semântica do delta por card:
+ * "good"    — crescer é positivo (match, comTecnico, finalizados, aptoReparo)
+ * "bad"     — crescer é preocupante (verificar, aguardandoPeca, emAnalise, vendaEstado)
+ * "neutral" — sem julgamento (matchParcial, total)
+ */
+const DELTA_MEANING: Partial<Record<CardMetric, "good" | "bad" | "neutral">> = {
+  match:          "good",
+  comTecnico:     "good",
+  finalizados:    "good",
+  aptoReparo:     "good",
+  verificar:      "bad",
+  aguardandoPeca: "bad",
+  emAnalise:      "bad",
+  vendaEstado:    "bad",
+  matchParcial:   "neutral",
+  total:          "neutral",
+};
+
+function DeltaBadge({ delta, metric }: { delta: number; metric: CardMetric }) {
   if (delta === 0) return null;
-  const cls = delta > 0 ? "badge-ok" : "badge-err";
+  const meaning = DELTA_MEANING[metric] ?? "neutral";
+  let cls = "badge-muted";
+  if (meaning === "good")  cls = delta > 0 ? "badge-ok"  : "badge-err";
+  if (meaning === "bad")   cls = delta > 0 ? "badge-err" : "badge-ok";
   return (
     <span className={`badge ${cls}`} style={{ fontSize: "0.68rem", marginLeft: "0.3rem" }}>
-      {delta > 0 ? "+" : ""}{fmt(delta)}
+      {delta > 0 ? "+" : ""}{fmt(delta)} vs ontem
     </span>
   );
 }
@@ -149,7 +171,7 @@ function OperationalCard({ metric, value, delta, selected, onClick, financial, s
             <span style={{ fontSize: "1.65rem", fontWeight: 800, color, letterSpacing: "-0.03em", lineHeight: 1 }}>{fmt(value)}</span>
           </div>
           {delta !== undefined && (
-            <div style={{ marginTop: "0.2rem" }}><DeltaBadge delta={delta} /></div>
+            <div style={{ marginTop: "0.2rem" }}><DeltaBadge delta={delta} metric={metric} /></div>
           )}
           <FinancialMini slice={slice} />
         </div>

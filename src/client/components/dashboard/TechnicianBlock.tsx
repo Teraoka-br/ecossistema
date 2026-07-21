@@ -54,30 +54,39 @@ export function TechnicianBlock({ technicians }: Props) {
               <thead>
                 <tr>
                   <th>Tecnico</th>
-                  <th className="num">Aparelhos</th>
-                  <th className="num">Em reparo</th>
+                  <th className="num" title="Direcionado mas nao iniciado">Atribuídos</th>
+                  <th className="num" title="Em reparo ativo (EM_REPARO, REPARO_EXECUTADO, TRIAGEM_FINAL, RETORNO_TECNICO)">Executando</th>
+                  <th className="num">Total</th>
                   <th>Ultima mov.</th>
                 </tr>
               </thead>
               <tbody>
-                {technicians.map((t) => (
-                  <tr
-                    key={t.technicianId ?? t.technicianName}
-                    style={{ cursor: t.technicianId !== null ? "pointer" : undefined }}
-                    onClick={() => openTech(t)}
-                  >
-                    <td style={{ fontWeight: 600, color: "var(--accent)" }}>{t.technicianName}</td>
-                    <td className="num">{fmt(t.totalCases)}</td>
-                    <td className="num">
-                      <span className={t.inRepair > 0 ? "badge badge-ok" : "badge badge-muted"} style={{ fontSize: "0.75rem" }}>
-                        {fmt(t.inRepair)}
-                      </span>
-                    </td>
-                    <td className="muted" style={{ fontSize: "0.8rem" }}>
-                      {t.lastMovement ? t.lastMovement.slice(0, 16).replace("T", " ") : "—"}
-                    </td>
-                  </tr>
-                ))}
+                {technicians.map((t) => {
+                  const attributed = t.totalCases - t.inRepair;
+                  return (
+                    <tr
+                      key={t.technicianId ?? t.technicianName}
+                      style={{ cursor: t.technicianId !== null ? "pointer" : undefined }}
+                      onClick={() => openTech(t)}
+                    >
+                      <td style={{ fontWeight: 600, color: "var(--accent)" }}>{t.technicianName}</td>
+                      <td className="num">
+                        <span className={attributed > 0 ? "badge badge-warn" : "badge badge-muted"} style={{ fontSize: "0.75rem" }}>
+                          {fmt(attributed)}
+                        </span>
+                      </td>
+                      <td className="num">
+                        <span className={t.inRepair > 0 ? "badge badge-ok" : "badge badge-muted"} style={{ fontSize: "0.75rem" }}>
+                          {fmt(t.inRepair)}
+                        </span>
+                      </td>
+                      <td className="num" style={{ fontSize: "0.82rem", color: "var(--text-2)" }}>{fmt(t.totalCases)}</td>
+                      <td className="muted" style={{ fontSize: "0.8rem" }}>
+                        {t.lastMovement ? t.lastMovement.slice(0, 16).replace("T", " ") : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
