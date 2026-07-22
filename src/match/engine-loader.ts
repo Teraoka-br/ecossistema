@@ -17,6 +17,7 @@
 
 import type { Db } from "../db/database.js";
 import { getCurrentOperationalStock } from "../operational/stock-service.js";
+import { calculateRepairPartsCost } from "../operational/repair-parts-cost-service.js";
 import type {
   ActiveRule,
   CalculateMatchInput,
@@ -96,6 +97,10 @@ export function loadActiveRuleStrict(db: Db): ActiveRule {
     marginWeight: r.margin_weight as number,
     ageWeight: r.age_weight as number,
     manualPriorityEnabled: (r.manual_priority_enabled as number | undefined ?? 0) === 1,
+    includePartsCost: (r.include_parts_cost as number | undefined ?? 0) === 1,
+    shadowMode: (r.shadow_mode as number | undefined ?? 1) === 1,
+    minPartsCostCoverage: (r.min_parts_cost_coverage as number | undefined) ?? 0,
+    missingCostBehavior: (r.missing_cost_behavior as string | undefined ?? "USE_LEGACY_MARGIN") as "USE_LEGACY_MARGIN" | "SEND_TO_VERIFY" | "EXCLUDE",
   };
 
   // Valida parâmetros — regra corrompida aborta o motor como erro de configuração.
@@ -375,6 +380,16 @@ export function loadEngineInput(db: Db, activeRule: ActiveRule): LoadedEngineInp
   }
 
   const compatibility: CompatibilityInput = { groups: compatGroups, aliases, catalog };
+
+  // Carregar custo de peças quando includePartsCost está habilitado
+  if (activeRule.includePartsCost) {
+    for (const c of cases) {
+      const costResult = calculateRepairPartsCost(db, c.caseId);
+      c.partsCost = costResult.totalPartsCost > 0 ? costResult.totalPartsCost : null;
+      c.partsCostCoverage = costResult.coveragePercentage;
+      c.partsCostConfidence = costResult.overallConfidence;
+    }
+  }
 
   return {
     cases,

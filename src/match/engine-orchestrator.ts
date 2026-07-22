@@ -302,8 +302,10 @@ function persistDecisions(
       INSERT INTO repair_match_case_results
         (run_id, repair_case_id, eligible, result_status, verify_reasons_json,
          margin, margin_points, age_points, score, priority_rank,
-         rule_set_id, rule_set_version, deposito_atual)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+         rule_set_id, rule_set_version, deposito_atual,
+         parts_cost, parts_cost_coverage, parts_cost_confidence,
+         repair_margin, repair_score, is_shadow)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `);
 
     const setPartStatus = db.prepare(
@@ -319,6 +321,9 @@ function persistDecisions(
         dec.margin, dec.marginPoints, dec.agePoints, dec.score, dec.rank,
         dec.activeRuleId, dec.activeRuleVersion,
         depositoByCase.get(dec.caseId) ?? null,
+        dec.partsCost ?? null, dec.partsCostCoverage ?? null,
+        dec.partsCostConfidence ?? null, dec.repairMargin ?? null,
+        dec.repairScore ?? null, dec.isShadow ? 1 : 0,
       );
 
       for (const p of dec.requiredParts) {
