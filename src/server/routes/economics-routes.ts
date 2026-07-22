@@ -32,7 +32,7 @@ export const economicsRouter = Router();
 const decisionSchema = z.object({ reason: z.string().min(5) });
 
 // Reavalia todos os casos abertos e retorna o resumo.
-economicsRouter.post("/repair-economics/simulate", requireAuth, requireOperator, (req, res, next) => {
+economicsRouter.post("/repair-economics/simulate", requireAuth, requireOperator, (_req, res, next) => {
   try {
     const report = evaluateEconomics(getDb());
     res.json({ report, policy: loadAsIsPolicy(getDb()) });
@@ -46,7 +46,7 @@ economicsRouter.post("/repair-economics/simulate", requireAuth, requireOperator,
 });
 
 // Candidatos ativos e classificações atuais.
-economicsRouter.get("/repair-economics/candidates", requireAuth, (req, res, next) => {
+economicsRouter.get("/repair-economics/candidates", requireAuth, (_req, res, next) => {
   try {
     const db = getDb();
     const rows = db.prepare(`

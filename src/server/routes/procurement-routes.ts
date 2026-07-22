@@ -373,7 +373,10 @@ procurementRouter.post("/cotacoes/:id/aprovar", (req, res) => {
     const db = getDb();
     const cotacaoId = idParam(req.params.id);
     const approvedBy = req.sessionUser?.displayName ?? "Sistema";
-    const result = cotacaoSvc.aprovaCotacao(db, cotacaoId, { aprovados: parsed.data.aprovados, approvedBy });
+    const result = cotacaoSvc.aprovaCotacao(db, cotacaoId, {
+      aprovados: parsed.data.aprovados.map((a) => a.id),
+      approvedBy,
+    });
 
     // Persistir snapshot de decisão (não-crítico — falha não desfaz a aprovação)
     try {
