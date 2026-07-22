@@ -70,7 +70,7 @@ export interface ParsedCotacaoItem {
 function cellToNumber(v: unknown): number | null {
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
   if (typeof v === "string") {
-    const s = v.replace(/[R$\s]/g, "").replace(/\.(?=\d{3}(\D|$))/g, "").replace(",", ".");
+    const s = v.replace(/[R$\s]/g, "").replace(/[a-zA-Z]+$/g, "").replace(/\.(?=\d{3}(\D|$))/g, "").replace(",", ".");
     if (s === "") return null;
     const n = Number(s);
     return Number.isFinite(n) ? n : null;
@@ -88,10 +88,10 @@ export function parseCotacaoXlsx(filePath: string): ParsedCotacaoItem[] {
   for (const r of raw) {
     const norm: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(r)) norm[k.trim().toUpperCase().replace(/\s+/g, "_")] = v;
-    const chave = String(norm.CHAVEPECA ?? norm.CHAVE_PECA ?? norm.CHAVE ?? "").trim();
+    const chave = String(norm.CHAVEPECA ?? norm.CHAVE_PECA ?? norm.CHAVE ?? norm.PECA ?? "").trim();
     if (!chave) continue;
     const qtde = cellToNumber(norm.QTDE_COTADA ?? norm.QTDE ?? norm.QUANTIDADE ?? norm.QTDE_NECESSARIA);
-    const valor = cellToNumber(norm.VALOR_UNITARIO ?? norm.VALOR ?? norm.PRECO ?? norm["PREÇO"]);
+    const valor = cellToNumber(norm.VALOR_UNITARIO ?? norm.VALOR_UN ?? norm.VALOR ?? norm.PRECO ?? norm["PREÇO"]);
     if (qtde === null || qtde <= 0 || valor === null || valor < 0) continue;
     items.push({ chavePeca: chave.toUpperCase(), qtde: Math.floor(qtde), valorUnitario: valor });
   }
@@ -157,22 +157,6 @@ export function listNecessidades(db: Db): NecessidadeItem[] {
       marginReleased: r.margin_released ?? null,
       saleReleased: r.sale_released ?? null,
     }));
-}
-
-/**
- * Gera um .xlsx (Excel padrão) com o template de cotação — evita o problema
- * de CSV com vírgula não abrir em colunas no Excel em locale pt-BR (que usa
- * vírgula como separador decimal e ponto-e-vírgula como separador de campo).
- */
-export function buildNecessidadesXlsx(rows: Array<{ chavePeca: string; qtdeNecessaria: number }>): Buffer {
-  const aoa: (string | number)[][] = [
-    ["PECA", "QTDE", "VALOR UN", "VALOR TOTAL"],
-    ...rows.map(r => [r.chavePeca, r.qtdeNecessaria, "", ""]),
-  ];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Cotação");
-  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
 
 export interface CaseNeedingPart {
@@ -287,61 +271,6 @@ export function getLeverageData(db: Db, selectedParts: string[]): LeverageResult
 // ---------------------------------------------------------------------------
 // Cotações
 // ---------------------------------------------------------------------------
-
-/**
- * Interpreta um número digitado livremente por um fornecedor (ex.: "R$ 45,90",
- * "1.234,56", "45.9", "5 un"). Remove tudo que não for dígito/vírgula/ponto/
- * sinal, depois decide o separador decimal: se houver vírgula E ponto, o
- * ponto é separador de milhar (formato BR); só vírgula → decimal BR; só
- * ponto ou nenhum dos dois → já está em formato decimal comum.
- */
-function parseFlexibleNumber(raw: unknown): number {
-  if (typeof raw === "number") return raw;
-  const cleaned = String(raw ?? "").trim().replace(/[^\d,.-]/g, "");
-  if (!cleaned) return NaN;
-  if (cleaned.includes(",") && cleaned.includes(".")) {
-    return parseFloat(cleaned.replace(/\./g, "").replace(",", "."));
-  }
-  if (cleaned.includes(",")) {
-    return parseFloat(cleaned.replace(",", "."));
-  }
-  return parseFloat(cleaned);
-}
-
-/** Mesma tolerância de `parseFlexibleNumber`, mas para inteiros (quantidade). */
-function parseFlexibleInt(raw: unknown): number {
-  if (typeof raw === "number") return Math.round(raw);
-  const cleaned = String(raw ?? "").trim().replace(/[^\d-]/g, "");
-  return cleaned ? parseInt(cleaned, 10) : NaN;
-}
-
-/**
- * Lê o template de cotação preenchido (.xlsx) devolvido pelo fornecedor.
- * Mesma tolerância do parser CSV anterior: detecta e pula a linha de
- * cabeçalho se presente, ignora linhas sem chave/quantidade/valor válidos.
- * Números aceitam símbolo de moeda, separador de milhar e vírgula ou ponto
- * decimal — um fornecedor digitando "R$ 45,90" não pode fazer a linha
- * inteira desaparecer silenciosamente da cotação.
- */
-export function parseCotacaoXlsx(filePath: string): Array<{ chavePeca: string; qtde: number; valorUnitario: number }> {
-  const wb = XLSX.readFile(filePath);
-  const sheetName = wb.SheetNames[0];
-  if (!sheetName) return [];
-  const rows = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheetName], { header: 1, defval: null });
-
-  const firstRowJoined = (rows[0] ?? []).map(c => String(c ?? "")).join(",").toUpperCase();
-  const start = firstRowJoined.includes("PECA") || firstRowJoined.includes("VALOR") ? 1 : 0;
-
-  const result: Array<{ chavePeca: string; qtde: number; valorUnitario: number }> = [];
-  for (const row of rows.slice(start)) {
-    const chavePeca = row[0] != null ? String(row[0]).trim() : "";
-    const qtde = parseFlexibleInt(row[1]);
-    const valorUnitario = parseFlexibleNumber(row[2]);
-    if (!chavePeca || !Number.isFinite(qtde) || !Number.isFinite(valorUnitario) || valorUnitario <= 0) continue;
-    result.push({ chavePeca, qtde, valorUnitario });
-  }
-  return result;
-}
 
 function toItem(r: Record<string, unknown>): CotacaoItem {
   return {

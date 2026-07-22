@@ -375,7 +375,7 @@ procurementRouter.post("/cotacoes/:id/aprovar", (req, res) => {
     const cotacaoId = idParam(req.params.id);
     const approvedBy = req.sessionUser?.displayName ?? "Sistema";
     const result = cotacaoSvc.aprovaCotacao(db, cotacaoId, {
-      aprovados: parsed.data.aprovados.map((a) => a.id),
+      aprovados: parsed.data.aprovados.map((a) => ({ id: a.id, qtde: a.qtde })),
       approvedBy,
     });
 
