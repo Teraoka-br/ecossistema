@@ -1,4 +1,5 @@
 import type { Db } from "../db/database.js";
+import { recordPriceEvent } from "./part-price-service.js";
 
 export interface NecessidadeItem {
   chavePeca: string;
@@ -312,6 +313,20 @@ export function aprovaCotacao(db: Db, cotacaoId: number, params: {
       db.prepare("UPDATE cotacao_items SET aprovado = ? WHERE id = ?").run(aprovado ? 1 : 0, item.id);
       // Grava histórico para todos os itens com preço, aprovados ou não
       insertPrice.run(item.chavePeca, cotacao.supplier, item.valorUnitario, cotacaoId);
+      // Evento canônico de preço
+      recordPriceEvent(db, {
+        chavePeca: item.chavePeca,
+        sourceType: aprovado ? "APPROVED_COTACAO" : "COTACAO",
+        unitPrice: item.valorUnitario,
+        quantity: item.qtde,
+        supplier: cotacao.supplier,
+        cotacaoId: cotacaoId,
+        cotacaoItemId: item.id,
+        purchaseOrderId: aprovado ? purchaseOrderId : undefined,
+        confidence: aprovado ? "MEDIUM" : "LOW",
+        createdBy: params.approvedBy,
+        occurredAt: new Date().toISOString(),
+      });
     }
 
     // Atualizar cotação
