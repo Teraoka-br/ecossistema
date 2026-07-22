@@ -145,9 +145,18 @@ function guard017AllocRefNorm(_db: Db, file: string): void {
   }
 }
 
+function guard056IssueStatus(db: Db, file: string): void {
+  if (!tableExists(db, "issue_reports")) return;
+  const sql = (db.prepare("SELECT sql FROM sqlite_master WHERE name='issue_reports'").get() as { sql: string }).sql;
+  if (/AWAITING_TEST/i.test(sql)) {
+    throw new MigrationAlreadyApplied(file);
+  }
+}
+
 const PRE_MIGRATION_GUARDS: Record<string, (db: Db, file: string) => void> = {
   "002_fix_order_identity.sql": (db) => guardOrderIdentityMigration(db),
   "017_fix_allocated_ref_norm_column.sql": guard017AllocRefNorm,
+  "056_issue_status_awaiting_test.sql": guard056IssueStatus,
 };
 
 /** Aplica todas as migrations pendentes, cada uma em sua própria transação. */

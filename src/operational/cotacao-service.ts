@@ -1,5 +1,6 @@
 import XLSX from "xlsx";
 import type { Db } from "../db/database.js";
+import { recordPriceEvent } from "./part-price-service.js";
 
 export interface NecessidadeItem {
   chavePeca: string;
@@ -38,6 +39,63 @@ export interface CotacaoItem {
   qtde: number;
   valorUnitario: number;
   aprovado: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Template XLSX de cotação (export das necessidades + parse do retorno)
+// ---------------------------------------------------------------------------
+
+/** Gera o template .xlsx enviado ao fornecedor a partir das necessidades. */
+export function buildNecessidadesXlsx(items: NecessidadeItem[]): Buffer {
+  const rows = items.map((i) => ({
+    CHAVEPECA: i.chavePeca,
+    QTDE_NECESSARIA: i.qtdeNecessaria,
+    APARELHOS_TRAVADOS: i.casesBlocked,
+    QTDE_COTADA: i.qtdeNecessaria,
+    VALOR_UNITARIO: "",
+  }));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Cotacao");
+  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+}
+
+export interface ParsedCotacaoItem {
+  chavePeca: string;
+  qtde: number;
+  valorUnitario: number;
+}
+
+/** Converte célula numérica tolerando vírgula decimal pt-BR e "R$". */
+function cellToNumber(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string") {
+    const s = v.replace(/[R$\s]/g, "").replace(/\.(?=\d{3}(\D|$))/g, "").replace(",", ".");
+    if (s === "") return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** Lê o template preenchido pelo fornecedor. Linhas sem chave/qtde/preço válidos são ignoradas. */
+export function parseCotacaoXlsx(filePath: string): ParsedCotacaoItem[] {
+  const wb = XLSX.readFile(filePath);
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  if (!ws) return [];
+  const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws);
+  const items: ParsedCotacaoItem[] = [];
+  for (const r of raw) {
+    const norm: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(r)) norm[k.trim().toUpperCase().replace(/\s+/g, "_")] = v;
+    const chave = String(norm.CHAVEPECA ?? norm.CHAVE_PECA ?? norm.CHAVE ?? "").trim();
+    if (!chave) continue;
+    const qtde = cellToNumber(norm.QTDE_COTADA ?? norm.QTDE ?? norm.QUANTIDADE ?? norm.QTDE_NECESSARIA);
+    const valor = cellToNumber(norm.VALOR_UNITARIO ?? norm.VALOR ?? norm.PRECO ?? norm["PREÇO"]);
+    if (qtde === null || qtde <= 0 || valor === null || valor < 0) continue;
+    items.push({ chavePeca: chave.toUpperCase(), qtde: Math.floor(qtde), valorUnitario: valor });
+  }
+  return items;
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +469,20 @@ export function aprovaCotacao(db: Db, cotacaoId: number, params: {
       db.prepare("UPDATE cotacao_items SET aprovado = ? WHERE id = ?").run(aprovado ? 1 : 0, item.id);
       // Grava histórico para todos os itens com preço, aprovados ou não
       insertPrice.run(item.chavePeca, cotacao.supplier, item.valorUnitario, cotacaoId);
+      // Evento canônico de preço
+      recordPriceEvent(db, {
+        chavePeca: item.chavePeca,
+        sourceType: aprovado ? "APPROVED_COTACAO" : "COTACAO",
+        unitPrice: item.valorUnitario,
+        quantity: item.qtde,
+        supplier: cotacao.supplier,
+        cotacaoId: cotacaoId,
+        cotacaoItemId: item.id,
+        purchaseOrderId: aprovado ? purchaseOrderId : undefined,
+        confidence: aprovado ? "MEDIUM" : "LOW",
+        createdBy: params.approvedBy,
+        occurredAt: new Date().toISOString(),
+      });
     }
 
     // Atualizar cotação

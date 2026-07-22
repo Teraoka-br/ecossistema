@@ -499,62 +499,12 @@ reimportação.
 não commitado — ver item 1 abaixo).
 
 **Últimas mudanças relevantes (mais recentes primeiro, máx. 5):**
-1. **Revisão automatizada da Central de Problemas (issues #11–#15)** (2026-07-22, tarefa
-   agendada `revisar-erros`): (a) confirmado que o deploy pendente do item anterior **já
-   aconteceu** — `data/app-beta.sqlite` está em `057_purchase_decision_snapshots.sql`, o log
-   do PM2 mostra boot em produção às 2026-07-21 17:53:51Z (poucos segundos após o build de
-   `cotacao-service.js`), ou seja os fixes de #11/#12/#13 já estavam ao vivo antes desta
-   revisão — a nota "pendente restart" abaixo ficou desatualizada, corrigida aqui. (b) issue
-   #15 ("motor de projeção não funciona, fica vazio"): investigado e reproduzido com dados
-   reais do beta — `projectCotacaoImpact` (`src/match/cotacao-projection-service.ts`) funciona
-   corretamente (ex.: 7→60 MATCH completos testando as 5 peças mais necessárias). Causa raiz
-   provável: a rota foi commitada às 13:14 de 21/07 mas só publicada (build+restart) às
-   14:53 — o usuário relatou o problema às 13:58, quando o servidor ainda rodava a versão sem
-   essa rota (falha silenciosa no frontend, sem mensagem de erro). Sem código novo; marcada
-   `AWAITING_TEST`. (c) issue #14 ("mostrar último registro da OS do IMEI no card"):
-   implementado `getLatestOsByImeis` (`src/datasys/datasys-service.ts`) — fallback que busca o
-   último OS conhecido no Datasys pelo IMEI quando `repair_cases.os` está vazio (~500/1325
-   casos ativos, sobretudo aparelhos de lote sem OS individual no import legado); usado em
-   `GET /api/fila-reparos` e `.../minha-fila`, exibido em `FilaReparos.tsx`/`TecnicoFila.tsx`
-   como "Último OS (Datasys)" sem nunca sobrescrever `os`. Nota: `datasys_records` está vazio
-   no beta hoje (nenhuma importação Datasys confirmada ainda) — o fallback só vai aparecer
-   depois da primeira importação confirmada. Testado (2 testes novos); **buildado mas ainda
-   NÃO publicado** (precisa de novo `npm run build` + restart do PM2 `sistema-pecas-beta`) —
-   marcada `IN_ANALYSIS`, não `AWAITING_TEST`. (d) Status atualizados diretamente via
-   `updateIssue` (mesma função usada pela rota `PATCH /api/issue-reports`): #11/#12/#13/#15 →
-   `AWAITING_TEST` (correção ao vivo, aguardando validação de uso real); #14 →
-   `IN_ANALYSIS` (correção pronta, aguardando publicação). **Pendente:** todo o trabalho de
-   código desta revisão e da revisão anterior (2026-07-21) segue **não commitado** no git —
-   revisão automatizada não commita por padrão; revisar e commitar quando conveniente.
-   Restart do PM2 para publicar o fix de #14 também não foi feito automaticamente (serviço
-   compartilhado, possivelmente em uso).
-2. **Revisão dos 3 problemas abertos na Central de Problemas** (2026-07-21, migration 056):
-   (a) `GET /api/dashboards/technician/:id/cases` selecionava a coluna inexistente
-   `os_number` em `repair_cases` (a coluna real é `os`) — o endpoint quebrava com 500 e o
-   modal "Aparelhos — {técnico}" ficava só com o cabeçalho, vazio; query movida para
-   `getTechnicianCaseDetails` em `src/dashboard/dashboard-overview-service.ts` com o alias
-   corrigido (`os AS os_number`), testada. (b) **Bug pré-existente descoberto durante a
-   revisão, não reportado ainda**: `issue_reports.status` manteve o `CHECK` original da
-   migration 041 (`OPEN/IN_ANALYSIS/RESOLVED/DISMISSED`) mesmo depois da 055 introduzir o
-   status `AWAITING_TEST` — qualquer tentativa de marcar um problema como "correção
-   aplicada, aguardando validação" falhava com `CHECK constraint failed`. Migration 056
-   reconstrói `issue_reports` (mesma estratégia de 016/030) com o CHECK expandido; testado.
-   (c) Export/import de cotação (`/compras`, aba Necessidades) trocado de CSV
-   separado-por-vírgula (abria errado no Excel em locale pt-BR, exigindo conversão manual
-   antes de reenviar ao fornecedor) para `.xlsx` real via `xlsx` — `GET
-   /api/necessidades/export.xlsx` gera o template, `POST /api/cotacoes/parse` (multer +
-   `parseCotacaoXlsx`) lê o arquivo preenchido; `cotacao-service.ts` ganhou
-   `buildNecessidadesXlsx`/`parseCotacaoXlsx`. (d) Coluna "Aparelhos" em Necessidades
-   passou a mostrar separadamente `fullMatchCount` (aparelhos que fecham MATCH completo
-   comprando só aquela peça) do total bloqueado (`casesBlocked`, mostrado como contexto
-   secundário X/Y) — antes só mostrava o total bloqueado, incluindo casos que ainda
-   precisam de outras peças pendentes. (Confirmado na revisão de 2026-07-22 acima: a
-   migration 056 foi aplicada e o PM2 foi de fato reiniciado ainda em 2026-07-21 — a nota de
-   pendência original ficou desatualizada.)
-3. **Correção de regressões deixadas pela sessão de UI/VENDA_ESTADO do dia 2026-07-20** (sem migration nova): os commits da manhã (`78f5e00`, `84269d4`, `2eed25e`) quebraram 16 testes que não tinham sido revalidados. (a) `engine-orchestrator.ts`: a rotina que preenche 10 vagas de `VENDA_ESTADO` com os piores pontuadores podia varrer casos que **acabaram de virar `MATCH`/`MATCH_PARCIAL` no mesmo run** — corrigido excluindo `result_status IN ('MATCH','MATCH_PARCIAL')` da consulta de candidatos. (b) `repair-service.ts::createRepairCase`: migration 050 (índice único parcial `idx_repair_cases_active_imei`) não tinha guarda de aplicação — violação virava erro cru do SQLite; adicionado check prévio que lança `RepairError("DUPLICATE_ACTIVE_IMEI", ...)` amigável (já tratado por `handleRepairError` nas rotas). (c) Testes desatualizados ajustados: `tests/repair-domain.test.ts` assumia múltiplos casos ativos por IMEI (regra antiga, pré-050) — reescritos para refletir "1 caso ativo por IMEI, reabertura permitida após encerramento"; `tests/match-engine-integration.test.ts` e `tests/receipt-motor.test.ts` ganharam `seedFillerCases()` (10 casos já em `VENDA_ESTADO`) para não deixar o caso sob teste ser o único elegível e virar vaga de liquidação em bancos pequenos. Trabalho de UI (`repaginação`, dashboards, migration 053 `venda_estado_count`) já estava presente e correto — não precisou de mudança, só ficou destravado pelos testes.
-4. **Home operacional / Central Operacional** (2026-07-17, migration 041): página `/admin/dashboards` refatorada em componentes (`src/client/components/dashboard/`); novos serviços `src/dashboard/` (snapshot, overview, alertas, contagens) e `src/issue/` (central de problemas). Migration 041 cria `dashboard_daily_snapshots` (UPSERT idempotente por `snapshot_date`, fuso SP) e `issue_reports` (módulo/severidade/status). Endpoints: `GET /api/dashboards/home` (cards + comparação + panorama + técnicos + contagens + alertas + problemas; snapshot do dia atualizado a cada acesso), `GET /api/dashboards/timeline` (série histórica por métrica), `POST /api/dashboards/snapshots/recalculate` (ADMIN), `GET/POST/PATCH /api/issue-reports`. Gráfico SVG nativo (sem dependência extra), 9 cards clicáveis com delta vs snapshot anterior, 8 alertas operacionais, modal de criação de problema. Nenhum módulo operacional alterado.
-5. **Consolidação do motor único de match** (2026-07-16, migration 038): função pura
-   `calculateMatch` é a ÚNICA implementação (motor real, simulador, testes) — sem
+1. **Camada canônica de custos de peças + estabilização P-001** (2026-07-22, migrations 058–062, branch `claude/canonical-parts-cost-layer-073927`, P-001/P-002 validados): histórico imutável de preços (triggers append-only), resolução canônica de custo, fingerprint determinístico, detecção de staleness, motor em modo sombra (`include_parts_cost=0`, `shadow_mode=1`), Venda no Estado com aprovação humana obrigatória (`APPROVE_AS_IS`), override manual (`MANAGE_PART_COSTS`), soft-delete de usuários, reparo FK, 729 testes, 63 migrations, zero defeitos.
+2. **Revisão automatizada da Central de Problemas (issues #11–#15)** (2026-07-22): issue #14 (OS no card via Datasys fallback), #15 (projeção — causa raiz: timing de deploy), #11/#12/#13 confirmados ao vivo.
+3. **Revisão dos 3 problemas abertos na Central de Problemas** (2026-07-21, migration 056): fix de `os_number`, CHECK constraint expandido, export/import xlsx de cotação.
+4. **Correção de regressões UI/VENDA_ESTADO** (2026-07-20): exclusão de MATCH/MATCH_PARCIAL dos candidatos, guarda DUPLICATE_ACTIVE_IMEI, testes reescritos.
+5. **Home operacional / Central Operacional** (2026-07-17, migration 041): dashboard com snapshots, alertas, contagens, central de problemas.
+6. **Consolidação do motor único de match** (2026-07-16, migration 038): função pura
    arredondamento (score decimal exato), elegibilidade com motivos de VERIFICAR
    persistidos em `repair_match_case_results`, gate de depósito (só AGUARDANDO PECA/
    MANUTENCAO INTERNA; fonte automática = Rel. Seriais Com Saldo), ordenação

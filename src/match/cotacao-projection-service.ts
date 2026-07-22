@@ -11,6 +11,8 @@ import { normalizeKey } from "../domain/text.js";
 import { calculateMatch } from "./calculate-match.js";
 import type { CalculateMatchInput, StockGroupInput } from "./calculate-match.js";
 import { loadEngineInput, loadActiveRuleStrict } from "./engine-loader.js";
+import { resolvePartCostsBatch } from "../operational/cost-resolution-service.js";
+import { getPriceSummary, type PriceSummary } from "../operational/part-price-service.js";
 
 export interface SelectedCotacaoItem {
   id: number;
@@ -28,6 +30,8 @@ export interface LineProjection {
   currentAvailable: number;
   marginalFullMatches: number;
   marginalPartialMatches: number;
+  /** Contexto histórico de preço da chave (null quando sem eventos). */
+  priceHistory: PriceSummary | null;
 }
 
 export interface ProjectedCase {
@@ -56,6 +60,12 @@ export interface CotacaoProjectionResult {
   incrementalRevenue: number | null;
   projectedMargin: number | null;
   incrementalMargin: number | null;
+  /** Custo estimado das peças dos casos incrementais (preço da seleção quando a chave está na cotação). */
+  incrementalPartsCost: number | null;
+  /** Margem incremental após descontar o custo das peças (null quando cobertura insuficiente). */
+  incrementalRepairMargin: number | null;
+  /** % de peças dos casos incrementais com custo conhecido (0–100). */
+  incrementalPartsCostCoverage: number | null;
   marginToCostRatio: number | null;
   costPerIncrementalMatch: number | null;
 
@@ -183,6 +193,10 @@ export function projectCotacaoImpact(
       currentAvailable,
       marginalFullMatches: projStats.full - minusStats.full,
       marginalPartialMatches: projStats.partial - minusStats.partial,
+      priceHistory: (() => {
+        const s = getPriceSummary(db, norm);
+        return s.eventCount > 0 ? s : null;
+      })(),
     };
   });
 
@@ -232,6 +246,58 @@ export function projectCotacaoImpact(
     0,
   );
 
+  // ── Custo de peças dos casos incrementais ─────────────────────────────────
+  // Para chaves presentes na seleção usa o preço unitário da cotação
+  // (PURCHASE_SIMULATION); para as demais, o custo canônico resolvido.
+  const selectionPriceByNorm = new Map<string, number>();
+  for (const item of selectedItems) {
+    const norm = normalizeKey(item.chavePeca);
+    const prev = selectionPriceByNorm.get(norm);
+    if (prev === undefined || item.valorUnitario < prev) {
+      selectionPriceByNorm.set(norm, item.valorUnitario);
+    }
+  }
+
+  const incrementalSet = new Set(incrementalCaseIds);
+  const incrementalParts: string[] = [];
+  for (const c of engineInput.cases) {
+    if (!incrementalSet.has(c.caseId)) continue;
+    for (const p of c.parts) {
+      if (p.chavePecaNorm && !selectionPriceByNorm.has(p.chavePecaNorm)) {
+        incrementalParts.push(p.chavePecaNorm);
+      }
+    }
+  }
+  const resolvedCosts = resolvePartCostsBatch(
+    db,
+    Array.from(new Set(incrementalParts)),
+    "PURCHASE_SIMULATION",
+  );
+
+  let incrementalPartsCost = 0;
+  let partsTotal = 0;
+  let partsCovered = 0;
+  for (const c of engineInput.cases) {
+    if (!incrementalSet.has(c.caseId)) continue;
+    for (const p of c.parts) {
+      partsTotal++;
+      if (!p.chavePecaNorm) continue;
+      const selPrice = selectionPriceByNorm.get(p.chavePecaNorm);
+      if (selPrice !== undefined) {
+        incrementalPartsCost += selPrice;
+        partsCovered++;
+        continue;
+      }
+      const resolved = resolvedCosts.get(p.chavePecaNorm);
+      if (resolved && resolved.unitCost !== null) {
+        incrementalPartsCost += resolved.unitCost;
+        partsCovered++;
+      }
+    }
+  }
+  const incrementalPartsCostCoverage =
+    partsTotal > 0 ? (partsCovered / partsTotal) * 100 : null;
+
   const orderCost = selectedItems.reduce((s, i) => s + i.qtde * i.valorUnitario, 0);
   const marginToCostRatio = orderCost > 0 && incrementalMargin > 0 ? incrementalMargin / orderCost : null;
   const costPerIncrementalMatch =
@@ -252,6 +318,12 @@ export function projectCotacaoImpact(
     incrementalRevenue: incrementalFinancial.some((c) => c.estimatedSale !== null) ? incrementalRevenue : null,
     projectedMargin: projectedCases.some((c) => c.margin !== null) ? projectedMargin : null,
     incrementalMargin: incrementalFinancial.some((c) => c.margin !== null) ? incrementalMargin : null,
+    incrementalPartsCost: partsTotal > 0 ? incrementalPartsCost : null,
+    incrementalRepairMargin:
+      incrementalFinancial.some((c) => c.margin !== null) && partsTotal > 0
+        ? incrementalMargin - incrementalPartsCost
+        : null,
+    incrementalPartsCostCoverage,
     marginToCostRatio,
     costPerIncrementalMatch,
     selectedItemCount: selectedItems.length,
@@ -276,6 +348,9 @@ function emptyResult(): CotacaoProjectionResult {
     incrementalRevenue: null,
     projectedMargin: null,
     incrementalMargin: null,
+    incrementalPartsCost: null,
+    incrementalRepairMargin: null,
+    incrementalPartsCostCoverage: null,
     marginToCostRatio: null,
     costPerIncrementalMatch: null,
     selectedItemCount: 0,

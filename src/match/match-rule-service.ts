@@ -19,6 +19,10 @@ export interface MatchRuleSet {
   marginWeight: number;
   ageWeight: number;
   manualPriorityEnabled: boolean;
+  includePartsCost: boolean;
+  shadowMode: boolean;
+  minPartsCostCoverage: number;
+  missingCostBehavior: "USE_LEGACY_MARGIN" | "SEND_TO_VERIFY" | "EXCLUDE";
   active: boolean;
   reason: string | null;
   createdByUserId: number | null;
@@ -36,6 +40,10 @@ export interface MatchRuleSetInput {
   marginWeight?: number;
   ageWeight?: number;
   manualPriorityEnabled?: boolean;
+  includePartsCost?: boolean;
+  shadowMode?: boolean;
+  minPartsCostCoverage?: number;
+  missingCostBehavior?: "USE_LEGACY_MARGIN" | "SEND_TO_VERIFY" | "EXCLUDE";
   reason?: string | null;
   createdByUserId?: number | null;
 }
@@ -105,6 +113,10 @@ function toRuleSet(r: Record<string, unknown>): MatchRuleSet {
     marginWeight: r.margin_weight as number,
     ageWeight: r.age_weight as number,
     manualPriorityEnabled: (r.manual_priority_enabled as number | undefined ?? 0) === 1,
+    includePartsCost: (r.include_parts_cost as number | undefined ?? 0) === 1,
+    shadowMode: (r.shadow_mode as number | undefined ?? 1) === 1,
+    minPartsCostCoverage: (r.min_parts_cost_coverage as number | undefined) ?? 0,
+    missingCostBehavior: (r.missing_cost_behavior as string | undefined ?? "USE_LEGACY_MARGIN") as "USE_LEGACY_MARGIN" | "SEND_TO_VERIFY" | "EXCLUDE",
     active: (r.active as number) === 1,
     reason: r.reason as string | null,
     createdByUserId: r.created_by_user_id as number | null,
@@ -127,6 +139,10 @@ export function toActiveRule(rs: MatchRuleSet): ActiveRule {
     marginWeight: rs.marginWeight,
     ageWeight: rs.ageWeight,
     manualPriorityEnabled: rs.manualPriorityEnabled,
+    includePartsCost: rs.includePartsCost,
+    shadowMode: rs.shadowMode,
+    minPartsCostCoverage: rs.minPartsCostCoverage,
+    missingCostBehavior: rs.missingCostBehavior,
   };
 }
 
@@ -159,8 +175,9 @@ export function createDraftRuleSet(db: Db, input: MatchRuleSetInput): MatchRuleS
     INSERT INTO match_rule_sets
       (version, name, margin_amount_per_point, age_days_per_point, age_max_points,
        allow_negative_margin_score, margin_weight, age_weight, manual_priority_enabled,
+       include_parts_cost, shadow_mode, min_parts_cost_coverage, missing_cost_behavior,
        active, reason, created_by_user_id)
-    VALUES (?,?,?,?,?,?,?,?,?,0,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)
   `).run(
     maxVersion + 1,
     input.name?.trim() || `Regra v${maxVersion + 1}`,
@@ -171,6 +188,10 @@ export function createDraftRuleSet(db: Db, input: MatchRuleSetInput): MatchRuleS
     input.marginWeight ?? 1.0,
     input.ageWeight ?? 1.0,
     input.manualPriorityEnabled ? 1 : 0,
+    input.includePartsCost ? 1 : 0,
+    input.shadowMode !== false ? 1 : 0,
+    input.minPartsCostCoverage ?? 0,
+    input.missingCostBehavior ?? "USE_LEGACY_MARGIN",
     input.reason ?? null,
     input.createdByUserId ?? null,
   );
@@ -193,6 +214,10 @@ export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput,
       margin_weight = COALESCE(?, margin_weight),
       age_weight = COALESCE(?, age_weight),
       manual_priority_enabled = COALESCE(?, manual_priority_enabled),
+      include_parts_cost = COALESCE(?, include_parts_cost),
+      shadow_mode = COALESCE(?, shadow_mode),
+      min_parts_cost_coverage = COALESCE(?, min_parts_cost_coverage),
+      missing_cost_behavior = COALESCE(?, missing_cost_behavior),
       reason = COALESCE(?, reason)
     WHERE id = ?
   `).run(
@@ -204,6 +229,10 @@ export function updateDraftRuleSet(db: Db, id: number, input: MatchRuleSetInput,
     input.marginWeight ?? null,
     input.ageWeight ?? null,
     input.manualPriorityEnabled !== undefined ? (input.manualPriorityEnabled ? 1 : 0) : null,
+    input.includePartsCost !== undefined ? (input.includePartsCost ? 1 : 0) : null,
+    input.shadowMode !== undefined ? (input.shadowMode ? 1 : 0) : null,
+    input.minPartsCostCoverage ?? null,
+    input.missingCostBehavior ?? null,
     input.reason ?? null,
     id,
   );

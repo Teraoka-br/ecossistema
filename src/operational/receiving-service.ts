@@ -3,6 +3,7 @@ import { catalogHasKey } from "../db/counting-queries.js";
 import { getSystemState } from "../system/system-service.js";
 import { getActiveBatch } from "../db/repository.js";
 import { getPurchaseOrder, ProcurementError, type PurchaseOrderItemRow, type PurchaseOrderWithItems } from "./procurement-service.js";
+import { recordPriceEvent } from "./part-price-service.js";
 
 function requireNonEmpty(value: string | undefined | null, field: string): string {
   const v = (value ?? "").trim();
@@ -209,6 +210,35 @@ export function confirmReceipt(db: Db, orderId: number, input: ConfirmReceiptInp
         `Recebimento do pedido ${order.order_number}`,
       );
       db.prepare("UPDATE purchase_order_items SET quantity_received = quantity_received + ? WHERE id = ?").run(it.quantity, poItem.id);
+
+      // Registrar evento canônico de preço (busca preço do cotacao_item ou purchase_request)
+      if (poItem.chave_peca) {
+        const priceSource = db.prepare(`
+          SELECT ci.valor_unitario, c.supplier
+          FROM cotacoes c
+          JOIN cotacao_items ci ON ci.cotacao_id = c.id
+          WHERE c.purchase_order_id = ? AND ci.chave_peca = ? AND ci.aprovado = 1
+          LIMIT 1
+        `).get(orderId, poItem.chave_peca) as { valor_unitario: number; supplier: string } | undefined;
+
+        if (priceSource) {
+          recordPriceEvent(db, {
+            chavePeca: poItem.chave_peca,
+            sourceType: "GOODS_RECEIPT",
+            unitPrice: priceSource.valor_unitario,
+            quantity: it.quantity,
+            supplier: priceSource.supplier,
+            purchaseOrderId: orderId,
+            purchaseOrderItemId: poItem.id,
+            goodsReceiptId: receiptId,
+            goodsReceiptItemId: grItemId,
+            confidence: "HIGH",
+            createdBy: receivedBy,
+            occurredAt: new Date().toISOString(),
+          });
+        }
+      }
+
       movementsCreated++;
       unitsReceived += it.quantity;
     }

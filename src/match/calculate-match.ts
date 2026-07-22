@@ -43,6 +43,14 @@ export interface ActiveRule {
    * default false: a ordem canônica pure score→margem→idade→ID governa tudo.
    */
   manualPriorityEnabled: boolean;
+  /** Se true, calcula margem de reparo (com custo de peças) no scoring. */
+  includePartsCost: boolean;
+  /** Se true, calcula repair margin mas não altera ranking real. */
+  shadowMode: boolean;
+  /** Cobertura mínima de custo de peças exigida (0-100). */
+  minPartsCostCoverage: number;
+  /** Comportamento quando custo de peças está ausente/incompleto. */
+  missingCostBehavior: "USE_LEGACY_MARGIN" | "SEND_TO_VERIFY" | "EXCLUDE";
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +77,12 @@ export interface MatchCaseInput {
   workflowStatus: string;
   manualPriority: boolean;
   parts: MatchPartInput[];
+  /** Custo total das peças ativas (preenchido pelo loader). */
+  partsCost?: number | null;
+  /** Cobertura de custo de peças em percentual (0-100). */
+  partsCostCoverage?: number;
+  /** Confiança geral do custo de peças. */
+  partsCostConfidence?: string;
 }
 
 export interface StockGroupInput {
@@ -123,6 +137,7 @@ export const VERIFY_REASONS = {
   PECA_NECESSARIA_AUSENTE: "PECA_NECESSARIA_AUSENTE",
   REFERENCIA_PECA_NAO_RESOLVIDA: "REFERENCIA_PECA_NAO_RESOLVIDA",
   MAIS_DE_UMA_REFERENCIA_POSSIVEL: "MAIS_DE_UMA_REFERENCIA_POSSIVEL",
+  CUSTO_PECAS_INCOMPLETO: "CUSTO_PECAS_INCOMPLETO",
 } as const;
 
 export type VerifyReason = (typeof VERIFY_REASONS)[keyof typeof VERIFY_REASONS];
@@ -138,6 +153,7 @@ export const VERIFY_REASON_LABELS: Record<VerifyReason, string> = {
   PECA_NECESSARIA_AUSENTE: "Peça necessária ausente",
   REFERENCIA_PECA_NAO_RESOLVIDA: "Referência de peça não resolvida",
   MAIS_DE_UMA_REFERENCIA_POSSIVEL: "Mais de uma referência possível",
+  CUSTO_PECAS_INCOMPLETO: "Custo das peças incompleto",
 };
 
 export type CaseResultStatus =
@@ -192,6 +208,16 @@ export interface CaseDecision {
   }>;
   activeRuleId: number;
   activeRuleVersion: number;
+  /** Custo total das peças (shadow ou real). */
+  partsCost?: number | null;
+  partsCostCoverage?: number;
+  partsCostConfidence?: string;
+  /** Margem de reparo = estimatedSale - cost - partsCost. */
+  repairMargin?: number | null;
+  /** Score calculado com repair margin (shadow ou real). */
+  repairScore?: number | null;
+  /** true quando os valores de repair margin são shadow (não influenciam ranking). */
+  isShadow?: boolean;
 }
 
 export interface CalculateMatchOutput {
@@ -405,6 +431,8 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
     margin: number | null;
     breakdown: ScoreBreakdown | null;
     resolutions: Map<number, KeyResolution>; // partRequestId → resolução
+    repairMargin: number | null;
+    repairBreakdown: ScoreBreakdown | null;
   }
 
   const evaluated: Evaluated[] = cases.map((c) => {
@@ -440,7 +468,7 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
     if (hasUnresolved) reasons.push(VERIFY_REASONS.REFERENCIA_PECA_NAO_RESOLVIDA);
     if (hasAmbiguous) reasons.push(VERIFY_REASONS.MAIS_DE_UMA_REFERENCIA_POSSIVEL);
 
-    const eligible = reasons.length === 0;
+    let eligible = reasons.length === 0;
 
     // margem = venda estimada − custo (decimal exato)
     const margin =
@@ -449,12 +477,46 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
         ? c.estimatedSale - c.cost
         : null;
 
+    // Custo de peças → repair margin
+    const partsCost = c.partsCost ?? null;
+    const partsCostCoverage = c.partsCostCoverage ?? 0;
+    let repairMargin: number | null = null;
+    if (margin !== null && partsCost !== null) {
+      repairMargin = margin - partsCost;
+    }
+
+    // Se includePartsCost está ativo e NÃO shadow, aplicar missingCostBehavior
+    if (eligible && activeRule.includePartsCost && !activeRule.shadowMode) {
+      if (partsCostCoverage < activeRule.minPartsCostCoverage) {
+        if (activeRule.missingCostBehavior === "SEND_TO_VERIFY") {
+          reasons.push(VERIFY_REASONS.CUSTO_PECAS_INCOMPLETO);
+          eligible = false;
+        } else if (activeRule.missingCostBehavior === "EXCLUDE") {
+          reasons.push(VERIFY_REASONS.CUSTO_PECAS_INCOMPLETO);
+          eligible = false;
+        }
+        // USE_LEGACY_MARGIN: não faz nada, usa margin legada
+      }
+    }
+
+    // Margem efetiva para scoring: repair margin quando ativo e não-shadow
+    const effectiveMargin =
+      activeRule.includePartsCost && !activeRule.shadowMode && repairMargin !== null
+        ? repairMargin
+        : margin;
+
     const breakdown =
-      eligible && margin !== null && c.ageDays !== null && c.ageDays !== undefined
-        ? computeRuleScore(activeRule, margin, c.ageDays)
+      eligible && effectiveMargin !== null && c.ageDays !== null && c.ageDays !== undefined
+        ? computeRuleScore(activeRule, effectiveMargin, c.ageDays)
         : null;
 
-    return { input: c, verifyReasons: reasons, eligible, margin, breakdown, resolutions };
+    // Shadow breakdown: calcular com repair margin (se disponível e ainda não usado acima)
+    const repairBreakdown =
+      eligible && repairMargin !== null && c.ageDays !== null && c.ageDays !== undefined
+        ? computeRuleScore(activeRule, repairMargin, c.ageDays)
+        : null;
+
+    return { input: c, verifyReasons: reasons, eligible, margin, breakdown, resolutions, repairMargin, repairBreakdown };
   });
 
   // ── 2. Ordenação dos elegíveis ───────────────────────────────────────────
@@ -606,6 +668,8 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
         via: p.resolutionVia,
       }));
 
+    const isShadow = activeRule.includePartsCost && activeRule.shadowMode;
+
     return {
       caseId: c.caseId,
       eligible: e.eligible,
@@ -622,6 +686,12 @@ export function calculateMatch(input: CalculateMatchInput): CalculateMatchOutput
       compatibilityResolutions,
       activeRuleId: activeRule.id,
       activeRuleVersion: activeRule.version,
+      partsCost: c.partsCost ?? null,
+      partsCostCoverage: c.partsCostCoverage,
+      partsCostConfidence: c.partsCostConfidence,
+      repairMargin: e.repairMargin,
+      repairScore: e.repairBreakdown?.score ?? null,
+      isShadow,
     };
   });
 

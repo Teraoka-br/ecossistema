@@ -40,6 +40,213 @@ interface EditModal {
   saving: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Histórico de preços + override manual (Camada 6)
+// ---------------------------------------------------------------------------
+
+interface PriceEventRow {
+  id: number;
+  sourceType: string;
+  unitPrice: number;
+  supplier: string | null;
+  confidence: string;
+  previousPrice: number | null;
+  notes: string | null;
+  createdBy: string | null;
+  occurredAt: string;
+}
+
+interface PriceSummaryData {
+  latestPrice: number | null;
+  latestSupplier: string | null;
+  latestDate: string | null;
+  avg30d: number | null;
+  avg90d: number | null;
+  minPrice: number | null;
+  maxPrice: number | null;
+  eventCount: number;
+}
+
+interface OverrideData {
+  unitCost: number;
+  justification: string;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  GOODS_RECEIPT: "Recebimento",
+  APPROVED_COTACAO: "Cotação aprovada",
+  COTACAO: "Cotação",
+  PURCHASE_ORDER: "Pedido",
+  MANUAL_OVERRIDE: "Override manual",
+  COST_CORRECTION: "Correção",
+  BACKFILL_COTACAO: "Backfill (cotação)",
+  BACKFILL_ORDER: "Backfill (pedido)",
+};
+
+function fmtBRL(v: number | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+
+function PriceHistoryModal({ chave, isAdmin, onClose }: { chave: string; isAdmin: boolean; onClose: () => void }) {
+  const [summary, setSummary] = useState<PriceSummaryData | null>(null);
+  const [events, setEvents] = useState<PriceEventRow[]>([]);
+  const [override, setOverride] = useState<OverrideData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [ovValue, setOvValue] = useState("");
+  const [ovReason, setOvReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const enc = encodeURIComponent(chave);
+      const [sRes, hRes, oRes] = await Promise.all([
+        fetch(`/api/part-costs/chavepeca/${enc}/summary`),
+        fetch(`/api/part-costs/chavepeca/${enc}/history?limit=50`),
+        fetch(`/api/part-costs/chavepeca/${enc}/override`),
+      ]);
+      if (sRes.ok) setSummary((await sRes.json() as { summary: PriceSummaryData }).summary);
+      if (hRes.ok) setEvents((await hRes.json() as { events: PriceEventRow[] }).events);
+      if (oRes.ok) setOverride((await oRes.json() as { override: OverrideData | null }).override);
+    } finally {
+      setLoading(false);
+    }
+  }, [chave]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function saveOverride() {
+    setSaving(true);
+    setErrMsg(null);
+    try {
+      const r = await fetch(`/api/part-costs/chavepeca/${encodeURIComponent(chave)}/override`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ unitCost: Number(ovValue), justification: ovReason }),
+      });
+      if (r.ok) { setOvValue(""); setOvReason(""); void load(); }
+      else setErrMsg((await r.json() as { error?: string }).error ?? "Erro ao salvar override.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function restoreOverride() {
+    setSaving(true);
+    setErrMsg(null);
+    try {
+      const r = await fetch(`/api/part-costs/chavepeca/${encodeURIComponent(chave)}/override`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: ovReason || "Restauração do valor calculado" }),
+      });
+      if (r.ok) { setOvReason(""); void load(); }
+      else setErrMsg((await r.json() as { error?: string }).error ?? "Erro ao restaurar.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="card" style={{ width: "100%", maxWidth: 640, maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.85rem" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h2 style={{ margin: 0, fontSize: "1rem" }}>Histórico de preços — <span className="mono">{chave}</span></h2>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}><X size={14} /></button>
+        </div>
+
+        {errMsg && <div className="alert alert-err">{errMsg}</div>}
+        {loading && <div className="muted small">Carregando…</div>}
+
+        {!loading && summary && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0.4rem" }}>
+            {[
+              { label: "Último preço", value: fmtBRL(summary.latestPrice) },
+              { label: "Média 30d", value: fmtBRL(summary.avg30d) },
+              { label: "Média 90d", value: fmtBRL(summary.avg90d) },
+              { label: "Mín / Máx", value: `${fmtBRL(summary.minPrice)} / ${fmtBRL(summary.maxPrice)}` },
+            ].map(({ label, value }) => (
+              <div key={label} style={{ textAlign: "center", padding: "0.45rem", background: "var(--surface-1)", borderRadius: "var(--r-sm)", border: "1px solid var(--border)" }}>
+                <div style={{ fontSize: "0.85rem", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+                <div style={{ fontSize: "0.66rem", color: "var(--muted)" }}>{label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!loading && override && (
+          <div style={{ border: "1px solid var(--warn-border, rgba(245,158,11,0.35))", background: "rgba(245,158,11,0.07)", borderRadius: "var(--r-sm)", padding: "0.5rem 0.75rem", fontSize: "0.8rem" }}>
+            <strong>Override ativo:</strong> {fmtBRL(override.unitCost)} — {override.justification}
+            <span className="muted"> ({override.createdBy ?? "?"}, {override.createdAt.slice(0, 10)})</span>
+          </div>
+        )}
+
+        {!loading && (
+          <div className="table-wrap" style={{ maxHeight: 260, overflowY: "auto" }}>
+            <table style={{ fontSize: "0.78rem" }}>
+              <thead>
+                <tr><th>Data</th><th>Origem</th><th>Preço</th><th>Fornecedor</th><th>Confiança</th><th>Usuário</th></tr>
+              </thead>
+              <tbody>
+                {events.length === 0 && <tr><td colSpan={6} className="muted">Nenhum evento de preço registrado.</td></tr>}
+                {events.map(ev => (
+                  <tr key={ev.id}>
+                    <td className="small muted">{ev.occurredAt.slice(0, 10)}</td>
+                    <td>{SOURCE_LABELS[ev.sourceType] ?? ev.sourceType}</td>
+                    <td style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{fmtBRL(ev.unitPrice)}</td>
+                    <td className="small">{ev.supplier ?? "—"}</td>
+                    <td className="small muted">{ev.confidence}</td>
+                    <td className="small muted">{ev.createdBy ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {isAdmin && !loading && (
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: "0.75rem" }}>
+            <div style={{ fontSize: "0.82rem", fontWeight: 600, marginBottom: "0.4rem" }}>
+              {override ? "Substituir ou restaurar override" : "Override manual de custo"}
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              <input
+                type="number" min={0} step="0.01" placeholder="Custo (R$)"
+                value={ovValue} onChange={e => setOvValue(e.target.value)}
+                style={{ width: 110 }}
+              />
+              <input
+                placeholder="Justificativa (obrigatória)…"
+                value={ovReason} onChange={e => setOvReason(e.target.value)}
+                style={{ flex: 1, minWidth: 180 }}
+              />
+              <button
+                className="btn btn-primary btn-sm"
+                disabled={saving || ovReason.trim().length < 5 || ovValue === "" || Number(ovValue) < 0}
+                onClick={() => void saveOverride()}
+              >
+                <Check size={12} /> Aplicar
+              </button>
+              {override && (
+                <button className="btn btn-ghost btn-sm" disabled={saving} onClick={() => void restoreOverride()} title="Restaurar valor calculado/importado">
+                  <RotateCcw size={12} /> Restaurar
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Listas ordenadas para dropdowns
 const FORNECEDOR_OPTS = Object.keys(FORNECEDORES).sort();
 const MARCA_OPTS = Object.keys(MARCAS).sort();
@@ -503,6 +710,7 @@ export function Referencias() {
 
   // Modal de edição universal
   const [editModal, setEditModal] = useState<EditModal | null>(null);
+  const [priceModal, setPriceModal] = useState<string | null>(null);
 
   // Deleção com confirmação
   const [deletingId, setDeletingId] = useState<number | null>(null);
@@ -751,6 +959,7 @@ export function Referencias() {
                   <td>
                     <div className="gap-row">
                       <button className="btn btn-ghost btn-sm" onClick={() => void openEdit(k)} title="Editar"><Pencil size={12} /></button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setPriceModal(k.chave_peca)} title="Histórico de preços"><History size={12} /></button>
                       {k.source === "MANUAL" && k.id !== null && !k.isOverride && (
                         <button
                           className={`btn btn-sm ${deletingId === k.id ? "btn-primary" : "btn-ghost"}`}
@@ -771,6 +980,10 @@ export function Referencias() {
       </div>
 
       <CompatSection allKeys={keys} isAdmin={user?.role === "ADMIN"} />
+
+      {priceModal && (
+        <PriceHistoryModal chave={priceModal} isAdmin={user?.role === "ADMIN"} onClose={() => setPriceModal(null)} />
+      )}
 
       {/* Modal de edição */}
       {editModal && (
