@@ -1,9 +1,12 @@
+import XLSX from "xlsx";
 import type { Db } from "../db/database.js";
 
 export interface NecessidadeItem {
   chavePeca: string;
   qtdeNecessaria: number;
   casesBlocked: number;
+  /** Aparelhos que viram MATCH completo comprando só esta peça (nenhuma outra pendente). */
+  fullMatchCount: number;
   marginReleased: number | null;
   saleReleased: number | null;
 }
@@ -46,6 +49,7 @@ export function listNecessidades(db: Db): NecessidadeItem[] {
     chave_peca: string;
     qtde_necessaria: number;
     cases_blocked: number;
+    full_match_count: number;
     margin_released: number | null;
     sale_released: number | null;
   };
@@ -54,8 +58,30 @@ export function listNecessidades(db: Db): NecessidadeItem[] {
       pr.chave_peca,
       COUNT(*)                          AS qtde_necessaria,
       COUNT(DISTINCT pr.repair_case_id) AS cases_blocked,
-      SUM(rc.margin)                    AS margin_released,
-      SUM(rc.estimated_sale)            AS sale_released
+      COUNT(DISTINCT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM part_requests pr3
+        WHERE pr3.repair_case_id = pr.repair_case_id
+          AND pr3.status = 'PEDIR_PECA'
+          AND pr3.cancelled_at IS NULL
+          AND pr3.chave_peca IS NOT NULL
+          AND pr3.chave_peca != pr.chave_peca
+      ) THEN pr.repair_case_id END)   AS full_match_count,
+      SUM(CASE WHEN NOT EXISTS (
+        SELECT 1 FROM part_requests pr3
+        WHERE pr3.repair_case_id = pr.repair_case_id
+          AND pr3.status = 'PEDIR_PECA'
+          AND pr3.cancelled_at IS NULL
+          AND pr3.chave_peca IS NOT NULL
+          AND pr3.chave_peca != pr.chave_peca
+      ) THEN rc.margin END)           AS margin_released,
+      SUM(CASE WHEN NOT EXISTS (
+        SELECT 1 FROM part_requests pr3
+        WHERE pr3.repair_case_id = pr.repair_case_id
+          AND pr3.status = 'PEDIR_PECA'
+          AND pr3.cancelled_at IS NULL
+          AND pr3.chave_peca IS NOT NULL
+          AND pr3.chave_peca != pr.chave_peca
+      ) THEN rc.estimated_sale END)  AS sale_released
     FROM part_requests pr
     JOIN repair_cases rc ON rc.id = pr.repair_case_id
     WHERE rc.workflow_status = 'PEDIR_PECA'
@@ -69,9 +95,26 @@ export function listNecessidades(db: Db): NecessidadeItem[] {
       chavePeca: r.chave_peca,
       qtdeNecessaria: r.qtde_necessaria,
       casesBlocked: r.cases_blocked,
+      fullMatchCount: r.full_match_count,
       marginReleased: r.margin_released ?? null,
       saleReleased: r.sale_released ?? null,
     }));
+}
+
+/**
+ * Gera um .xlsx (Excel padrão) com o template de cotação — evita o problema
+ * de CSV com vírgula não abrir em colunas no Excel em locale pt-BR (que usa
+ * vírgula como separador decimal e ponto-e-vírgula como separador de campo).
+ */
+export function buildNecessidadesXlsx(rows: Array<{ chavePeca: string; qtdeNecessaria: number }>): Buffer {
+  const aoa: (string | number)[][] = [
+    ["PECA", "QTDE", "VALOR UN", "VALOR TOTAL"],
+    ...rows.map(r => [r.chavePeca, r.qtdeNecessaria, "", ""]),
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Cotação");
+  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
 
 export interface CaseNeedingPart {
@@ -187,6 +230,61 @@ export function getLeverageData(db: Db, selectedParts: string[]): LeverageResult
 // Cotações
 // ---------------------------------------------------------------------------
 
+/**
+ * Interpreta um número digitado livremente por um fornecedor (ex.: "R$ 45,90",
+ * "1.234,56", "45.9", "5 un"). Remove tudo que não for dígito/vírgula/ponto/
+ * sinal, depois decide o separador decimal: se houver vírgula E ponto, o
+ * ponto é separador de milhar (formato BR); só vírgula → decimal BR; só
+ * ponto ou nenhum dos dois → já está em formato decimal comum.
+ */
+function parseFlexibleNumber(raw: unknown): number {
+  if (typeof raw === "number") return raw;
+  const cleaned = String(raw ?? "").trim().replace(/[^\d,.-]/g, "");
+  if (!cleaned) return NaN;
+  if (cleaned.includes(",") && cleaned.includes(".")) {
+    return parseFloat(cleaned.replace(/\./g, "").replace(",", "."));
+  }
+  if (cleaned.includes(",")) {
+    return parseFloat(cleaned.replace(",", "."));
+  }
+  return parseFloat(cleaned);
+}
+
+/** Mesma tolerância de `parseFlexibleNumber`, mas para inteiros (quantidade). */
+function parseFlexibleInt(raw: unknown): number {
+  if (typeof raw === "number") return Math.round(raw);
+  const cleaned = String(raw ?? "").trim().replace(/[^\d-]/g, "");
+  return cleaned ? parseInt(cleaned, 10) : NaN;
+}
+
+/**
+ * Lê o template de cotação preenchido (.xlsx) devolvido pelo fornecedor.
+ * Mesma tolerância do parser CSV anterior: detecta e pula a linha de
+ * cabeçalho se presente, ignora linhas sem chave/quantidade/valor válidos.
+ * Números aceitam símbolo de moeda, separador de milhar e vírgula ou ponto
+ * decimal — um fornecedor digitando "R$ 45,90" não pode fazer a linha
+ * inteira desaparecer silenciosamente da cotação.
+ */
+export function parseCotacaoXlsx(filePath: string): Array<{ chavePeca: string; qtde: number; valorUnitario: number }> {
+  const wb = XLSX.readFile(filePath);
+  const sheetName = wb.SheetNames[0];
+  if (!sheetName) return [];
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheetName], { header: 1, defval: null });
+
+  const firstRowJoined = (rows[0] ?? []).map(c => String(c ?? "")).join(",").toUpperCase();
+  const start = firstRowJoined.includes("PECA") || firstRowJoined.includes("VALOR") ? 1 : 0;
+
+  const result: Array<{ chavePeca: string; qtde: number; valorUnitario: number }> = [];
+  for (const row of rows.slice(start)) {
+    const chavePeca = row[0] != null ? String(row[0]).trim() : "";
+    const qtde = parseFlexibleInt(row[1]);
+    const valorUnitario = parseFlexibleNumber(row[2]);
+    if (!chavePeca || !Number.isFinite(qtde) || !Number.isFinite(valorUnitario) || valorUnitario <= 0) continue;
+    result.push({ chavePeca, qtde, valorUnitario });
+  }
+  return result;
+}
+
 function toItem(r: Record<string, unknown>): CotacaoItem {
   return {
     id: r.id as number,
@@ -265,14 +363,14 @@ export function createCotacao(db: Db, params: {
 }
 
 export function aprovaCotacao(db: Db, cotacaoId: number, params: {
-  aprovados: number[]; // ids de cotacao_items aprovados
+  aprovados: Array<{ id: number; qtde: number }>;
   approvedBy: string;
 }): { cotacao: Cotacao; purchaseOrderId: number; orderNumber: string } {
   const cotacao = getCotacao(db, cotacaoId);
   if (cotacao.status !== "PENDING_APPROVAL") throw new Error("Esta cotação não está pendente de aprovação.");
 
-  const aprovadosSet = new Set(params.aprovados);
-  const itensSelecionados = cotacao.items.filter(i => aprovadosSet.has(i.id));
+  const aprovadosMap = new Map(params.aprovados.map(a => [a.id, a.qtde]));
+  const itensSelecionados = cotacao.items.filter(i => aprovadosMap.has(i.id));
   if (itensSelecionados.length === 0) throw new Error("Selecione ao menos um item para aprovar.");
 
   // Gerar número do pedido
@@ -293,13 +391,14 @@ export function aprovaCotacao(db: Db, cotacaoId: number, params: {
     `).run(orderNumber, cotacao.supplier, params.approvedBy);
     const purchaseOrderId = orderRes.lastInsertRowid as number;
 
-    // Inserir itens no pedido
+    // Inserir itens no pedido com a qtde customizada pelo usuário
     for (const item of itensSelecionados) {
+      const qtdeOrdenada = aprovadosMap.get(item.id) ?? item.qtde;
       db.prepare(`
         INSERT INTO purchase_order_items
           (purchase_order_id, referencia, referencia_norm, chave_peca, quantity_ordered, quantity_received)
         VALUES (?, ?, lower(replace(?,' ','')), ?, ?, 0)
-      `).run(purchaseOrderId, item.chavePeca, item.chavePeca, item.chavePeca, item.qtde);
+      `).run(purchaseOrderId, item.chavePeca, item.chavePeca, item.chavePeca, qtdeOrdenada);
     }
 
     // Marcar itens como aprovado/reprovado e gravar histórico de preços
@@ -308,7 +407,7 @@ export function aprovaCotacao(db: Db, cotacaoId: number, params: {
        VALUES (?, ?, ?, ?)`,
     );
     for (const item of cotacao.items) {
-      const aprovado = aprovadosSet.has(item.id);
+      const aprovado = aprovadosMap.has(item.id);
       db.prepare("UPDATE cotacao_items SET aprovado = ? WHERE id = ?").run(aprovado ? 1 : 0, item.id);
       // Grava histórico para todos os itens com preço, aprovados ou não
       insertPrice.run(item.chavePeca, cotacao.supplier, item.valorUnitario, cotacaoId);

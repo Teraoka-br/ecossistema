@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import XLSX from "xlsx";
 import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -398,20 +399,52 @@ procurementRouter.post("/cotacoes/:id/cancelar", (req, res) => {
   } catch (err) { handleError(err, res); }
 });
 
-// Export CSV do pedido aprovado
-procurementRouter.get("/cotacoes/:id/pedido.csv", (req, res) => {
+// Export XLSX do pedido aprovado — usa quantidades gravadas em purchase_order_items
+procurementRouter.get("/cotacoes/:id/pedido.xlsx", (req, res) => {
   try {
-    const cotacao = cotacaoSvc.getCotacao(getDb(), idParam(req.params.id));
+    const db = getDb();
+    const cotacao = cotacaoSvc.getCotacao(db, idParam(req.params.id));
     if (cotacao.status !== "APPROVED") return res.status(400).json({ error: "Cotação não aprovada." });
-    const aprovados = cotacao.items.filter(i => i.aprovado);
-    const total = aprovados.reduce((s, i) => s + i.qtde * i.valorUnitario, 0);
-    const header = "PECA,QTDE,VALOR UN,VALOR TOTAL";
-    const lines = aprovados.map(i =>
-      `"${i.chavePeca.replace(/"/g, '""')}",${i.qtde},${i.valorUnitario.toFixed(2)},${(i.qtde * i.valorUnitario).toFixed(2)}`
-    );
-    lines.push(`,,TOTAL,${total.toFixed(2)}`);
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="pedido_${cotacao.id}_${cotacao.supplier.replace(/[^a-z0-9]/gi,'_')}.csv"`);
-    res.send("﻿" + [header, ...lines].join("\r\n"));
+
+    // Mapa: chavePeca → valorUnitario (da cotação)
+    const precoMap = new Map(cotacao.items.map(i => [i.chavePeca, i.valorUnitario]));
+
+    // Quantidades aprovadas vêm do purchase_order, não do cotacao_items
+    type OiRow = { chave_peca: string; quantity_ordered: number };
+    const orderItems = db.prepare(
+      "SELECT chave_peca, quantity_ordered FROM purchase_order_items WHERE purchase_order_id = ? ORDER BY chave_peca"
+    ).all(cotacao.purchaseOrderId) as OiRow[];
+
+    const rows: (string | number)[][] = orderItems.map(oi => {
+      const valorUn = precoMap.get(oi.chave_peca) ?? 0;
+      return [oi.chave_peca, oi.quantity_ordered, valorUn, oi.quantity_ordered * valorUn];
+    });
+    const total = rows.reduce((s, r) => s + (r[3] as number), 0);
+
+    const aoa: (string | number)[][] = [
+      ["PEÇA", "QTDE", "VALOR UN", "VALOR TOTAL"],
+      ...rows,
+      ["", "", "TOTAL", total],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    // Formatar colunas de valor como moeda BR
+    const fmt = '#.##0,00';
+    const range = XLSX.utils.decode_range(ws["!ref"] ?? "A1");
+    for (let R = 1; R <= range.e.r; R++) {
+      for (const C of [2, 3]) {
+        const addr = XLSX.utils.encode_cell({ r: R, c: C });
+        if (ws[addr] && typeof ws[addr].v === "number") ws[addr].z = fmt;
+      }
+    }
+    ws["!cols"] = [{ wch: 32 }, { wch: 8 }, { wch: 14 }, { wch: 14 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Pedido");
+    const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+
+    const safeName = `${cotacao.supplier.replace(/[^a-z0-9]/gi, "_")}`;
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="pedido_${cotacao.id}_${safeName}.xlsx"`);
+    res.send(buf);
   } catch (err) { handleError(err, res); }
 });

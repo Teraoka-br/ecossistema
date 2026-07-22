@@ -672,7 +672,7 @@ function CotacoesTab({ cotacoes, necessidades, onChanged }: { cotacoes: Cotacao[
             if (!r.ok) { const d = await r.json(); throw new Error(d.error ?? "Erro."); }
             const result = await r.json();
             // Download do pedido
-            window.open(`/api/cotacoes/${approving.id}/pedido.csv`, "_blank");
+            window.open(`/api/cotacoes/${approving.id}/pedido.xlsx`, "_blank");
             setApproving(null);
             onChanged();
             return result.orderNumber as string;
@@ -726,7 +726,7 @@ function CotacoesTab({ cotacoes, necessidades, onChanged }: { cotacoes: Cotacao[
 
             {c.status === "APPROVED" && (
               <div style={{ display: "flex", gap: "0.5rem" }}>
-                <a className="btn btn-ghost btn-sm" href={`/api/cotacoes/${c.id}/pedido.csv`} download>
+                <a className="btn btn-ghost btn-sm" href={`/api/cotacoes/${c.id}/pedido.xlsx`} download>
                   <Download size={12} /> Baixar pedido
                 </a>
               </div>
