@@ -8,7 +8,14 @@
 import { Router } from "express";
 import { z } from "zod";
 import { getDb } from "../../db/database.js";
-import { requireAuth, requireOperator } from "../middleware/auth-middleware.js";
+import { requireAuth, requireOperator, requirePermissionOrAdmin } from "../middleware/auth-middleware.js";
+import {
+  setPartCostOverride,
+  restorePartCost,
+  listActiveOverrides,
+  getActiveOverride,
+  PartCostOverrideError,
+} from "../../operational/part-cost-override-service.js";
 import {
   evaluateEconomics,
   approveAsIs,
@@ -135,3 +142,79 @@ economicsRouter.get("/part-costs/chavepeca/:key/history", requireAuth, (req, res
     next(err);
   }
 });
+
+// ── Override manual (permissão MANAGE_PART_COSTS) ──────────────────────────
+
+const overrideSchema = z.object({
+  unitCost: z.number().nonnegative(),
+  justification: z.string().min(5),
+  validUntil: z.string().optional().nullable(),
+});
+
+economicsRouter.get("/part-costs/overrides", requireAuth, (_req, res, next) => {
+  try {
+    res.json({ overrides: listActiveOverrides(getDb()) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+economicsRouter.get("/part-costs/chavepeca/:key/override", requireAuth, (req, res, next) => {
+  try {
+    res.json({ override: getActiveOverride(getDb(), normalizeKey(req.params.key)) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+economicsRouter.post(
+  "/part-costs/chavepeca/:key/override",
+  requireAuth,
+  requirePermissionOrAdmin("MANAGE_PART_COSTS"),
+  (req, res, next) => {
+    try {
+      const body = overrideSchema.parse(req.body);
+      const override = setPartCostOverride(getDb(), {
+        chavePeca: req.params.key,
+        unitCost: body.unitCost,
+        justification: body.justification,
+        validUntil: body.validUntil ?? null,
+        userId: req.sessionUser?.username ?? null,
+      });
+      res.json({ override });
+    } catch (err) {
+      if (err instanceof PartCostOverrideError) {
+        res.status(400).json({ error: err.message, code: err.code });
+        return;
+      }
+      if (err instanceof z.ZodError) {
+        res.status(400).json({ error: "Dados inválidos: custo não negativo e justificativa (mín. 5) são obrigatórios." });
+        return;
+      }
+      next(err);
+    }
+  },
+);
+
+economicsRouter.delete(
+  "/part-costs/chavepeca/:key/override",
+  requireAuth,
+  requirePermissionOrAdmin("MANAGE_PART_COSTS"),
+  (req, res, next) => {
+    try {
+      const reason = typeof req.body?.reason === "string" ? req.body.reason : "";
+      restorePartCost(getDb(), {
+        chavePeca: req.params.key,
+        reason,
+        userId: req.sessionUser?.username ?? null,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      if (err instanceof PartCostOverrideError) {
+        res.status(400).json({ error: err.message, code: err.code });
+        return;
+      }
+      next(err);
+    }
+  },
+);

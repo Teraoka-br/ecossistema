@@ -73,6 +73,35 @@ export function resolveEffectivePartCost(
   const now = opts.asOfDate ? new Date(opts.asOfDate) : new Date();
   const reasons: string[] = [];
 
+  // Override manual ativo tem precedência (exceto avaliação histórica,
+  // que usa o snapshot da época e nunca valores atuais).
+  if (opts.context !== "HISTORICAL_EVALUATION") {
+    try {
+      const ov = db
+        .prepare(
+          `SELECT id, unit_cost, created_at FROM part_cost_overrides
+           WHERE chave_peca_norm = ? AND active = 1
+             AND (valid_until IS NULL OR valid_until >= datetime('now'))`,
+        )
+        .get(opts.chavePecaNorm) as { id: number; unit_cost: number; created_at: string } | undefined;
+      if (ov) {
+        return {
+          unitCost: ov.unit_cost,
+          confidence: "MEDIUM",
+          sourceType: "MANUAL_OVERRIDE",
+          sourceEventId: null,
+          supplier: null,
+          occurredAt: ov.created_at,
+          ageInDays: daysBetween(ov.created_at, now),
+          isStale: false,
+          reasons: ["Override manual ativo"],
+        };
+      }
+    } catch {
+      /* tabela pode não existir em banco anterior à migration 061 */
+    }
+  }
+
   // Buscar eventos para a chave direta, ordenados por relevância
   const directEvents = db.prepare(`
     SELECT id, unit_price, source_type, supplier, occurred_at, confidence
