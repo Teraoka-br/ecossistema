@@ -11,6 +11,10 @@ interface MatchRuleSet {
   allowNegativeMarginScore: boolean;
   marginWeight: number;
   ageWeight: number;
+  includePartsCost: boolean;
+  shadowMode: boolean;
+  minPartsCostCoverage: number;
+  missingCostBehavior: "USE_LEGACY_MARGIN" | "SEND_TO_VERIFY" | "EXCLUDE";
   active: boolean;
   reason: string | null;
   createdAt: string;
@@ -403,6 +407,29 @@ function RuleCard({ rule, onActivate }: { rule: MatchRuleSet; onActivate: (id: n
             <div className="param-row"><span>Máx. pontos de idade</span><span>{rule.ageMaxPoints}</span></div>
             <div className="param-row"><span>Margem negativa pune</span><span>{rule.allowNegativeMarginScore ? "Sim" : "Não"}</span></div>
             <div className="param-row"><span>Peso margem / idade</span><span>{rule.marginWeight} / {rule.ageWeight}</span></div>
+            <div className="param-row">
+              <span>Custo de peças na margem</span>
+              <span>
+                {rule.includePartsCost
+                  ? rule.shadowMode
+                    ? "Ativo (modo sombra — não altera a fila)"
+                    : "ATIVO no score real"
+                  : "Desligado"}
+              </span>
+            </div>
+            {rule.includePartsCost && (
+              <>
+                <div className="param-row"><span>Cobertura mínima de custo</span><span>{rule.minPartsCostCoverage}%</span></div>
+                <div className="param-row">
+                  <span>Custo ausente</span>
+                  <span>
+                    {rule.missingCostBehavior === "USE_LEGACY_MARGIN" && "Usar margem legada"}
+                    {rule.missingCostBehavior === "SEND_TO_VERIFY" && "Enviar para VERIFICAR"}
+                    {rule.missingCostBehavior === "EXCLUDE" && "Excluir do ranking econômico"}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
 
           <div className="rule-formula">
@@ -484,6 +511,10 @@ function NewRuleForm({ onCreated }: { onCreated: () => void }) {
     allowNegativeMarginScore: true,
     marginWeight: 1,
     ageWeight: 1,
+    includePartsCost: false,
+    shadowMode: true,
+    minPartsCostCoverage: 100,
+    missingCostBehavior: "USE_LEGACY_MARGIN" as "USE_LEGACY_MARGIN" | "SEND_TO_VERIFY" | "EXCLUDE",
     reason: "",
   });
   const [saving, setSaving] = useState(false);
@@ -536,7 +567,41 @@ function NewRuleForm({ onCreated }: { onCreated: () => void }) {
           <span>Peso idade</span>
           <input className="input" type="number" step="0.1" value={form.ageWeight} onChange={e => f("ageWeight", Number(e.target.value))} />
         </label>
+        <label className="field checkbox">
+          <input type="checkbox" checked={form.includePartsCost} onChange={e => f("includePartsCost", e.target.checked)} />
+          <span>Incluir custo de peças na margem</span>
+        </label>
+        {form.includePartsCost && (
+          <>
+            <label className="field checkbox">
+              <input type="checkbox" checked={form.shadowMode} onChange={e => f("shadowMode", e.target.checked)} />
+              <span>Modo sombra (calcula sem alterar a fila)</span>
+            </label>
+            <label className="field">
+              <span>Cobertura mínima de custo (%)</span>
+              <input className="input" type="number" min={0} max={100} value={form.minPartsCostCoverage} onChange={e => f("minPartsCostCoverage", Number(e.target.value))} />
+            </label>
+            <label className="field">
+              <span>Quando o custo estiver ausente</span>
+              <select
+                className="input"
+                value={form.missingCostBehavior}
+                onChange={e => setForm(p => ({ ...p, missingCostBehavior: e.target.value as typeof p.missingCostBehavior }))}
+              >
+                <option value="USE_LEGACY_MARGIN">Usar margem legada</option>
+                <option value="SEND_TO_VERIFY">Enviar para VERIFICAR</option>
+                <option value="EXCLUDE">Excluir do ranking econômico</option>
+              </select>
+            </label>
+          </>
+        )}
       </div>
+      {form.includePartsCost && !form.shadowMode && (
+        <div className="alert" style={{ marginTop: "0.5rem", fontSize: "0.78rem", border: "1px solid var(--warn-border, rgba(245,158,11,0.35))", background: "rgba(245,158,11,0.07)", borderRadius: "var(--r-sm)", padding: "0.5rem 0.75rem" }}>
+          Atenção: sem modo sombra, o custo de peças passa a alterar o ranking REAL da fila de reparos.
+          Recomenda-se validar primeiro em modo sombra e simular o impacto antes de ativar.
+        </div>
+      )}
       <label className="field" style={{ marginTop: "0.5rem" }}>
         <span>Justificativa</span>
         <input className="input" value={form.reason} onChange={e => setForm(p => ({ ...p, reason: e.target.value }))} placeholder="Por que esta versão foi criada…" />
