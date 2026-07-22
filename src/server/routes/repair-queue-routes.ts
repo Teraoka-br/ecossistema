@@ -25,6 +25,8 @@ import {
   requestMatchRecompute, processPendingRecompute, autoEnsurePurchasesForPedirPeca,
 } from "../../match/engine-orchestrator.js";
 import { getCurrentOperationalStock } from "../../operational/stock-service.js";
+import { getLatestOsByImeis } from "../../datasys/datasys-service.js";
+import { normalizeKey } from "../../domain/text.js";
 
 export const repairQueueRouter = Router();
 
@@ -86,9 +88,20 @@ repairQueueRouter.get("/fila-reparos/minha-fila", requireAuth, (req, res) => {
         ELSE 9
       END,
       rc.updated_at DESC
-  `).all(staff.id);
+  `).all(staff.id) as Record<string, unknown>[];
 
-  res.json({ cases: rows, staffMember: staff });
+  const missingOsImeis = rows
+    .filter((r) => !r.os && typeof r.imei === "string" && r.imei)
+    .map((r) => r.imei as string);
+  const datasysOsByImeiNorm = getLatestOsByImeis(db, missingOsImeis);
+  const cases = rows.map((r) => ({
+    ...r,
+    datasys_last_os: !r.os && typeof r.imei === "string" && r.imei
+      ? datasysOsByImeiNorm.get(normalizeKey(r.imei)) ?? null
+      : null,
+  }));
+
+  res.json({ cases, staffMember: staff });
 });
 
 // ─── Engine state ─────────────────────────────────────────────────────────
@@ -185,6 +198,13 @@ repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) 
     LIMIT ? OFFSET ?
   `).all(...params, limit, offset) as Record<string, unknown>[];
 
+  // Fallback: para casos sem OS própria (comum em aparelhos de lote), busca o
+  // último OS conhecido no Datasys pelo IMEI — nunca sobrescreve rc.os.
+  const missingOsImeis = rows
+    .filter((r) => !r.os && typeof r.imei === "string" && r.imei)
+    .map((r) => r.imei as string);
+  const datasysOsByImeiNorm = getLatestOsByImeis(db, missingOsImeis);
+
   const items = rows.map((r) => {
     const workflowStatus = r.workflow_status as WorkflowStatus;
     const nextAction = deriveNextAction(workflowStatus, {
@@ -192,10 +212,14 @@ repairQueueRouter.get("/fila-reparos", requireAuth, requireOperator, (req, res) 
       allPartsReserved: (r.reserved_count as number) >= (r.total_parts as number) && (r.total_parts as number) > 0,
       hasActiveReservations: (r.reserved_count as number) > 0,
     });
+    const datasysLastOs = !r.os && typeof r.imei === "string" && r.imei
+      ? datasysOsByImeiNorm.get(normalizeKey(r.imei)) ?? null
+      : null;
     return {
       id: r.id,
       imei: r.imei,
       os: r.os,
+      datasysLastOs,
       brand: r.brand,
       model: r.model,
       capacity: r.capacity,

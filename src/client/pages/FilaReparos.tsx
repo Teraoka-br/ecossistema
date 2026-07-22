@@ -25,6 +25,8 @@ interface QueueItem {
   id: number;
   imei: string | null;
   os: string | null;
+  /** Último OS conhecido no Datasys para este IMEI — só preenchido quando `os` está vazio. */
+  datasysLastOs: string | null;
   brand: string | null;
   model: string | null;
   capacity: string | null;
@@ -195,6 +197,14 @@ function RepairCard({
           {item.os && (
             <div style={{ fontSize: "0.72rem", fontWeight: 600, color: "var(--accent)", marginBottom: "0.1rem", letterSpacing: "0.03em" }}>
               OS {item.os}
+            </div>
+          )}
+          {!item.os && item.datasysLastOs && (
+            <div
+              style={{ fontSize: "0.72rem", fontWeight: 600, color: "var(--text-muted)", marginBottom: "0.1rem", letterSpacing: "0.03em" }}
+              title="Este caso não tem OS própria — valor recuperado do último registro Datasys para este IMEI"
+            >
+              Último OS (Datasys) {item.datasysLastOs}
             </div>
           )}
           {/* IMEI + idade + origem */}

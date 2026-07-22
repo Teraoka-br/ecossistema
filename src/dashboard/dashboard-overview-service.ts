@@ -221,3 +221,30 @@ export function getDashboardOverview(db: Db): OverviewData {
 
   return { cards, cardComparison, stock, panorama, technicians, lastUpdatedAt: now };
 }
+
+export interface TechnicianCaseRow {
+  id: number;
+  imei: string;
+  brand: string | null;
+  model: string | null;
+  os_number: string | null;
+  workflow_status: string;
+  repair_date: string | null;
+  cost: number | null;
+  estimated_sale: number | null;
+  margin: number | null;
+}
+
+/** Aparelhos ativos direcionados a um técnico (usado pelo modal de detalhe do dashboard). */
+export function getTechnicianCaseDetails(db: Db, technicianId: number): TechnicianCaseRow[] {
+  return db
+    .prepare(
+      `SELECT id, imei, brand, model, os AS os_number, workflow_status,
+              repair_date, cost, estimated_sale, margin
+       FROM repair_cases
+       WHERE directed_technician_id = ?
+         AND workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
+       ORDER BY repair_date ASC`,
+    )
+    .all(technicianId) as unknown as TechnicianCaseRow[];
+}

@@ -5,6 +5,7 @@ interface RepairCase {
   id: number;
   imei: string | null;
   os: string | null;
+  datasys_last_os: string | null;
   brand: string | null;
   model: string | null;
   color: string | null;
@@ -169,8 +170,11 @@ function CaseCard({ c, acting, onStart, onComplete }: {
 
           <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.2rem" }}>
             {c.imei && <span>IMEI: {c.imei}</span>}
-            {c.imei && c.os && <span> · </span>}
+            {c.imei && (c.os || c.datasys_last_os) && <span> · </span>}
             {c.os && <span>OS: {c.os}</span>}
+            {!c.os && c.datasys_last_os && (
+              <span title="Sem OS própria — último registro Datasys para este IMEI">Último OS (Datasys): {c.datasys_last_os}</span>
+            )}
           </div>
 
           <div className="muted" style={{ fontSize: "0.78rem", marginTop: "0.25rem" }}>

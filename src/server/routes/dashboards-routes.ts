@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { getDb } from "../../db/database.js";
 import { requireAuth, requireAdmin } from "../middleware/auth-middleware.js";
-import { getDashboardOverview } from "../../dashboard/dashboard-overview-service.js";
+import { getDashboardOverview, getTechnicianCaseDetails } from "../../dashboard/dashboard-overview-service.js";
 import { getOperationalAlerts } from "../../dashboard/dashboard-alert-service.js";
 import { getCountingBlockData } from "../../dashboard/dashboard-counting-service.js";
 import { getIssueSummary } from "../../issue/issue-service.js";
@@ -146,19 +146,7 @@ dashboardsRouter.get("/dashboards/technician/:id/cases", requireAuth, (req, res,
     const techId = parseInt(req.params.id);
     if (isNaN(techId)) { res.status(400).json({ error: "ID inválido" }); return; }
 
-    type Row = {
-      id: number; imei: string; brand: string|null; model: string|null;
-      os_number: string|null; workflow_status: string; repair_date: string|null;
-      cost: number|null; estimated_sale: number|null; margin: number|null;
-    };
-    const cases = db.prepare(`
-      SELECT id, imei, brand, model, os_number, workflow_status,
-             repair_date, cost, estimated_sale, margin
-      FROM repair_cases
-      WHERE directed_technician_id = ?
-        AND workflow_status NOT IN ('CONCLUIDO','CANCELADO','VENDA_ESTADO')
-      ORDER BY repair_date ASC
-    `).all(techId) as Row[];
+    const cases = getTechnicianCaseDetails(db, techId);
 
     res.json({ cases });
   } catch (err) {
