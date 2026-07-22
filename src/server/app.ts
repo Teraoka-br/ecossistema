@@ -19,6 +19,7 @@ import { analiseRouter } from "./routes/analise-routes.js";
 import { dashboardsRouter } from "./routes/dashboards-routes.js";
 import { issueRouter } from "./routes/issue-routes.js";
 import { notificationsRouter } from "./routes/notifications-routes.js";
+import { economicsRouter } from "./routes/economics-routes.js";
 import { requireAuth } from "./middleware/auth-middleware.js";
 import { getDb } from "../db/database.js";
 
@@ -83,6 +84,7 @@ export function createApp(): Express {
   app.use("/api", dashboardsRouter);                    // dashboards administrativos
   app.use("/api", requireAuth, issueRouter);            // central de problemas
   app.use("/api", requireAuth, notificationsRouter);    // notificações
+  app.use("/api", economicsRouter);                     // venda no estado + custos de peças
 
   // Em produção, serve o frontend compilado e faz fallback de SPA.
   if (fs.existsSync(config.clientDist)) {
