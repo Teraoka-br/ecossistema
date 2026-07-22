@@ -76,7 +76,7 @@ economicsRouter.get("/repair-cases/:id/economic-evaluation", requireAuth, (req, 
   }
 });
 
-economicsRouter.post("/repair-cases/:id/as-is/approve", requireAuth, requireOperator, (req, res, next) => {
+economicsRouter.post("/repair-cases/:id/as-is/approve", requireAuth, requirePermissionOrAdmin("APPROVE_AS_IS"), (req, res, next) => {
   try {
     const caseId = Number(req.params.id);
     const body = decisionSchema.parse(req.body);
@@ -98,7 +98,7 @@ economicsRouter.post("/repair-cases/:id/as-is/approve", requireAuth, requireOper
   }
 });
 
-economicsRouter.post("/repair-cases/:id/as-is/reject", requireAuth, requireOperator, (req, res, next) => {
+economicsRouter.post("/repair-cases/:id/as-is/reject", requireAuth, requirePermissionOrAdmin("APPROVE_AS_IS"), (req, res, next) => {
   try {
     const caseId = Number(req.params.id);
     const body = decisionSchema.parse(req.body);

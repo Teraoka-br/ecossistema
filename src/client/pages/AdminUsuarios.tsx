@@ -26,6 +26,8 @@ const ROLE_BADGE: Record<Role, string> = { ADMIN: "badge-warn", OPERATOR: "badge
 const PERM_LABELS: Record<string, string> = {
   OVERRIDE_REPAIR_STATUS: "Alterar fase",
   MANAGE_PART_REFERENCES: "Editar referências",
+  MANAGE_PART_COSTS: "Gerenciar custos de peças",
+  APPROVE_AS_IS: "Aprovar Venda no Estado",
 };
 
 export function AdminUsuarios() {
@@ -368,7 +370,7 @@ export function AdminUsuarios() {
                       <span className="badge badge-warn" title="Admins têm todas as permissões">Todas (Admin)</span>
                     ) : (
                       <div className="gap-row" style={{ flexWrap: "wrap", gap: "4px" }}>
-                        {(["OVERRIDE_REPAIR_STATUS", "MANAGE_PART_REFERENCES"] as const).map((perm) => {
+                        {(["OVERRIDE_REPAIR_STATUS", "MANAGE_PART_REFERENCES", "MANAGE_PART_COSTS", "APPROVE_AS_IS"] as const).map((perm) => {
                           const has = u.permissions?.includes(perm) ?? false;
                           return (
                             <button
