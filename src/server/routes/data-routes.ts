@@ -130,7 +130,7 @@ dataRouter.get("/estoque", (req, res) => {
   });
 });
 
-dataRouter.get("/cotacoes", (req, res) => {
+dataRouter.get("/cotacoes-legado", (req, res) => {
   const db = getDb();
   const batchId = activeBatchId(db);
   if (batchId === null) {

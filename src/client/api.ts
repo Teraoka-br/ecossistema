@@ -108,7 +108,7 @@ export interface CotacoesResponse {
 export async function getCotacoes(search: string): Promise<CotacoesResponse> {
   const qs = new URLSearchParams();
   if (search) qs.set("search", search);
-  return handle<CotacoesResponse>(await fetch(`/api/cotacoes?${qs.toString()}`));
+  return handle<CotacoesResponse>(await fetch(`/api/cotacoes-legado?${qs.toString()}`));
 }
 
 export async function getDiagnostico(): Promise<DiagnosticReport> {

@@ -379,6 +379,35 @@ export function searchDatasysRecords(
   return rows.map(toDatasysRecord);
 }
 
+/**
+ * Para uma lista de IMEIs, devolve o OS do registro Datasys mais recente
+ * (maior `datasys_imports.started_at`) de cada um — usado como referência na
+ * Fila de Reparos quando o `repair_cases.os` do caso está vazio (comum em
+ * aparelhos de lote, sem OS individual na importação legado).
+ */
+export function getLatestOsByImeis(db: Db, imeis: string[]): Map<string, string> {
+  const result = new Map<string, string>();
+  const norms = [...new Set(imeis.filter(Boolean).map((i) => normalizeText(i)))];
+  if (norms.length === 0) return result;
+
+  const placeholders = norms.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT r.imei_norm AS imei_norm, r.os AS os
+       FROM datasys_records r
+       JOIN datasys_imports i ON i.id = r.datasys_import_id
+       WHERE i.status = 'COMPLETED' AND r.imei_norm IN (${placeholders}) AND r.os IS NOT NULL AND r.os != ''
+       ORDER BY i.started_at DESC`,
+    )
+    .all(...norms) as unknown as { imei_norm: string; os: string }[];
+
+  // A primeira ocorrência de cada imei_norm (ordenado por started_at DESC) é a mais recente.
+  for (const r of rows) {
+    if (!result.has(r.imei_norm)) result.set(r.imei_norm, r.os);
+  }
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Row mappers
 // ---------------------------------------------------------------------------
