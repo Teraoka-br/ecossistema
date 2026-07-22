@@ -337,7 +337,9 @@ export function deleteUser(db: Db, userId: number): void {
     if (r.c <= 1) throw new AuthError("LAST_ADMIN", "Não é possível excluir o último administrador ativo.");
   }
   db.prepare("UPDATE staff_members SET user_id = NULL WHERE user_id = ?").run(userId);
-  db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+  db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
+  db.prepare("DELETE FROM user_permissions WHERE user_id = ?").run(userId);
+  db.prepare("UPDATE users SET active = 0, updated_at = datetime('now') WHERE id = ?").run(userId);
 }
 
 // ---------------------------------------------------------------------------
