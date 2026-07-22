@@ -27,7 +27,8 @@ export type EconomicClassification =
 export interface AsIsPolicy {
   maxRepairCostRatio: number;
   maxActiveCandidates: number;
-  requireApproval: boolean;
+  /** Sempre true nesta versão — aprovação humana obrigatória. Campo reservado. */
+  requireApproval: true;
   incompleteCostBehavior: "MARK_INCOMPLETE" | "IGNORE";
 }
 
@@ -38,6 +39,10 @@ export interface EconomicEvaluation {
   repairMargin: number | null;
   partsCost: number | null;
   partsCostCoverage: number | null;
+  fingerprint: string | null;
+  ruleSetId: number | null;
+  evaluatedAt: string | null;
+  isStale?: boolean;
 }
 
 export interface EvaluateEconomicsReport {
@@ -68,7 +73,7 @@ export function loadAsIsPolicy(db: Db): AsIsPolicy {
   return {
     maxRepairCostRatio: (r.as_is_max_repair_cost_ratio as number | undefined) ?? 0.5,
     maxActiveCandidates: (r.as_is_max_active_candidates as number | undefined) ?? 10,
-    requireApproval: ((r.as_is_require_approval as number | undefined) ?? 1) === 1,
+    requireApproval: true, // sempre obrigatório nesta versão — não confiar no DB
     incompleteCostBehavior:
       ((r.as_is_incomplete_cost_behavior as string | undefined) ?? "MARK_INCOMPLETE") as
         | "MARK_INCOMPLETE"
@@ -90,6 +95,10 @@ interface CaseRow {
  */
 export function evaluateEconomics(db: Db): EvaluateEconomicsReport {
   const policy = loadAsIsPolicy(db);
+  const activeRule = db
+    .prepare("SELECT id FROM match_rule_sets WHERE active = 1 ORDER BY id LIMIT 1")
+    .get() as { id: number } | undefined;
+  const ruleSetId = activeRule?.id ?? null;
   const lockedList = ENGINE_LOCKED_STATUSES.map((s) => `'${s}'`).join(",");
 
   const cases = db
@@ -130,7 +139,18 @@ export function evaluateEconomics(db: Db): EvaluateEconomicsReport {
     ).map((r) => [r.repair_case_id, r.score]),
   );
 
-  const evals: Array<EconomicEvaluation & { ageDays: number | null; score: number | null; fingerprint: string }> = [];
+  interface InternalEval {
+    caseId: number;
+    classification: EconomicClassification;
+    repairCostRatio: number | null;
+    repairMargin: number | null;
+    partsCost: number | null;
+    partsCostCoverage: number | null;
+    ageDays: number | null;
+    score: number | null;
+    fingerprint: string;
+  }
+  const evals: InternalEval[] = [];
   let preservedDecisions = 0;
 
   for (const c of cases) {
@@ -198,8 +218,8 @@ export function evaluateEconomics(db: Db): EvaluateEconomicsReport {
   const upsert = db.prepare(`
     INSERT INTO case_economic_evaluations
       (repair_case_id, classification, repair_cost_ratio, repair_margin,
-       parts_cost, parts_cost_coverage, fingerprint, evaluated_at)
-    VALUES (?,?,?,?,?,?,?,datetime('now'))
+       parts_cost, parts_cost_coverage, fingerprint, rule_set_id, evaluated_at)
+    VALUES (?,?,?,?,?,?,?,?,datetime('now'))
     ON CONFLICT(repair_case_id) DO UPDATE SET
       classification = excluded.classification,
       repair_cost_ratio = excluded.repair_cost_ratio,
@@ -207,6 +227,7 @@ export function evaluateEconomics(db: Db): EvaluateEconomicsReport {
       parts_cost = excluded.parts_cost,
       parts_cost_coverage = excluded.parts_cost_coverage,
       fingerprint = excluded.fingerprint,
+      rule_set_id = excluded.rule_set_id,
       evaluated_at = excluded.evaluated_at
   `);
   db.exec("BEGIN");
@@ -214,7 +235,7 @@ export function evaluateEconomics(db: Db): EvaluateEconomicsReport {
     for (const e of evals) {
       upsert.run(
         e.caseId, e.classification, e.repairCostRatio, e.repairMargin,
-        e.partsCost, e.partsCostCoverage, e.fingerprint,
+        e.partsCost, e.partsCostCoverage, e.fingerprint, ruleSetId,
       );
     }
     db.exec("COMMIT");
@@ -239,6 +260,29 @@ export function getEconomicEvaluation(db: Db, caseId: number): EconomicEvaluatio
     .prepare("SELECT * FROM case_economic_evaluations WHERE repair_case_id = ?")
     .get(caseId) as Record<string, unknown> | undefined;
   if (!r) return null;
+
+  const storedFingerprint = r.fingerprint as string | null;
+  const storedRuleId = r.rule_set_id as number | null;
+
+  // Detectar desatualização: recalcular fingerprint atual e comparar
+  let isStale = false;
+  try {
+    const currentParts = calculateRepairPartsCost(db, caseId);
+    if (storedFingerprint && currentParts.fingerprint !== storedFingerprint) {
+      isStale = true;
+    }
+    // Também verificar se a regra ativa mudou
+    const activeRule = db
+      .prepare("SELECT id FROM match_rule_sets WHERE active = 1 ORDER BY id LIMIT 1")
+      .get() as { id: number } | undefined;
+    if (storedRuleId !== null && activeRule && activeRule.id !== storedRuleId) {
+      isStale = true;
+    }
+  } catch {
+    // Se não conseguir calcular, marcar como stale por segurança
+    isStale = true;
+  }
+
   return {
     caseId: r.repair_case_id as number,
     classification: r.classification as EconomicClassification,
@@ -246,6 +290,10 @@ export function getEconomicEvaluation(db: Db, caseId: number): EconomicEvaluatio
     repairMargin: r.repair_margin as number | null,
     partsCost: r.parts_cost as number | null,
     partsCostCoverage: r.parts_cost_coverage as number | null,
+    fingerprint: storedFingerprint,
+    ruleSetId: storedRuleId,
+    evaluatedAt: r.evaluated_at as string | null,
+    isStale,
   };
 }
 
