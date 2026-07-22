@@ -113,12 +113,14 @@ export function calculateRepairPartsCost(
       isStale,
     });
 
-    fingerprintParts.push(`${part.id}:${part.chave_peca_norm}:${unitCost}:${confidence}`);
+    fingerprintParts.push(`${part.chave_peca_norm ?? "null"}:${unitCost}:${confidence}`);
   }
 
   const coveredItems = items.filter(i => i.unitCost !== null).length;
   const coveragePercentage = parts.length > 0 ? (coveredItems / parts.length) * 100 : 100;
 
+  // Ordenar antes de gerar o hash — mesmos dados em qualquer ordem = mesmo fingerprint
+  fingerprintParts.sort();
   const fingerprint = createHash("md5").update(fingerprintParts.join("|")).digest("hex").slice(0, 12);
 
   return {
