@@ -119,7 +119,7 @@ export function resolveEffectivePartCost(
 
   // Tentar compatíveis (se fornecidos)
   if (opts.compatGroupMembers && opts.compatGroupMembers.length > 0) {
-    const otherKeys = opts.compatGroupMembers.filter(k => k !== opts.chavePecaNorm);
+    const otherKeys = opts.compatGroupMembers.filter(k => k !== opts.chavePecaNorm).sort();
     for (const key of otherKeys) {
       const compatEvents = db.prepare(`
         SELECT id, unit_price, source_type, supplier, occurred_at, confidence
@@ -190,26 +190,35 @@ function resolveFromEvents(
     }
   }
 
-  // Priority: GOODS_RECEIPT > APPROVED_COTACAO > PURCHASE_ORDER > COTACAO > MANUAL_OVERRIDE > BACKFILL_*
+  // Priority: GOODS_RECEIPT > APPROVED_COTACAO > PURCHASE_ORDER > COTACAO > BACKFILL_*
+  // MANUAL_OVERRIDE e COST_CORRECTION são eventos de auditoria do override —
+  // o override ativo é consultado diretamente em part_cost_overrides.
+  // COST_CORRECTION registra a desativação e NÃO deve virar custo vigente.
   const priority: Record<string, number> = {
     GOODS_RECEIPT: 1,
     APPROVED_COTACAO: 2,
     PURCHASE_ORDER: 3,
     COTACAO: 4,
-    MANUAL_OVERRIDE: 5,
-    COST_CORRECTION: 5,
-    BACKFILL_RECEIPT: 6,
-    BACKFILL_ORDER: 7,
-    BACKFILL_COTACAO: 8,
+    BACKFILL_RECEIPT: 5,
+    BACKFILL_ORDER: 6,
+    BACKFILL_COTACAO: 7,
   };
 
-  // Group events by source type priority, pick the best (most recent within highest priority)
+  // Group events by source type priority, pick the best
+  // Tiebreaker: priority → most recent occurred_at → highest id (deterministic)
   let bestEvent: PriceRow | null = null;
   let bestPriority = Infinity;
 
   for (const e of events) {
     const p = priority[e.source_type] ?? 99;
-    if (p < bestPriority || (p === bestPriority && (!bestEvent || e.occurred_at > bestEvent.occurred_at))) {
+    if (p > 90) continue; // skip audit-only events (MANUAL_OVERRIDE, COST_CORRECTION)
+    if (
+      p < bestPriority ||
+      (p === bestPriority && bestEvent && (
+        e.occurred_at > bestEvent.occurred_at ||
+        (e.occurred_at === bestEvent.occurred_at && e.id > bestEvent.id)
+      ))
+    ) {
       bestEvent = e;
       bestPriority = p;
     }
@@ -232,10 +241,6 @@ function resolveFromEvents(
     case "BACKFILL_ORDER":
       confidence = age <= COST_STALENESS_DAYS.APPROVED_COTACAO_FRESH ? "MEDIUM" : "LOW";
       isStale = age > COST_STALENESS_DAYS.APPROVED_COTACAO_FRESH;
-      break;
-    case "MANUAL_OVERRIDE":
-    case "COST_CORRECTION":
-      confidence = "HIGH";
       break;
     default:
       confidence = "LOW";
