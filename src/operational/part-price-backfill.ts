@@ -16,13 +16,20 @@ export function backfillPriceEvents(db: Db): BackfillReport {
     errors: [],
   };
 
-  const alreadyBackfilled = db.prepare(
-    `SELECT COUNT(*) AS cnt FROM part_price_events WHERE source_type LIKE 'BACKFILL_%'`,
-  ).get() as { cnt: number };
-  if (alreadyBackfilled.cnt > 0) {
-    report.errors.push(`Backfill já executado (${alreadyBackfilled.cnt} eventos existentes). Ignorando.`);
-    return report;
-  }
+  // Idempotência por registro: checa se cada origem já foi processada
+  // via cotacao_item_id / purchase_order_item_id no evento existente.
+
+  const existingCotacaoItemIds = new Set(
+    (db.prepare(
+      `SELECT cotacao_item_id FROM part_price_events WHERE source_type = 'BACKFILL_COTACAO' AND cotacao_item_id IS NOT NULL`,
+    ).all() as { cotacao_item_id: number }[]).map(r => r.cotacao_item_id),
+  );
+
+  const existingOrderItemIds = new Set(
+    (db.prepare(
+      `SELECT purchase_order_item_id FROM part_price_events WHERE source_type = 'BACKFILL_ORDER' AND purchase_order_item_id IS NOT NULL`,
+    ).all() as { purchase_order_item_id: number }[]).map(r => r.purchase_order_item_id),
+  );
 
   // 1. Cotações aprovadas → BACKFILL_COTACAO
   const cotacaoRows = db.prepare(`
@@ -41,6 +48,10 @@ export function backfillPriceEvents(db: Db): BackfillReport {
   }>;
 
   for (const row of cotacaoRows) {
+    if (existingCotacaoItemIds.has(row.item_id)) {
+      report.skipped++;
+      continue;
+    }
     try {
       recordPriceEvent(db, {
         chavePeca: row.chave_peca,
@@ -84,6 +95,10 @@ export function backfillPriceEvents(db: Db): BackfillReport {
   }>;
 
   for (const row of orderRows) {
+    if (existingOrderItemIds.has(row.item_id)) {
+      report.skipped++;
+      continue;
+    }
     try {
       recordPriceEvent(db, {
         chavePeca: row.chave_peca,
